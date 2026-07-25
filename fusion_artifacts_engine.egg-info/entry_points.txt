@@ -1,0 +1,2 @@
+[console_scripts]
+fusion-artifacts-engine = fusion_artifacts_engine.__main__:main

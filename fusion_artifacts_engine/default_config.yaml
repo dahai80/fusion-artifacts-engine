@@ -1,0 +1,26 @@
+# Default configuration for fusion-artifacts-engine
+# User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
+# Importers/callers: config.py load_config() reads this file
+# Affected API: ArtifactEngineConfig fields populated from this YAML
+# Data schema: YAML with server/storage/mlx/thresholds/artifact sections
+
+server:
+  host: "127.0.0.1"
+  port: 8892
+
+storage:
+  root: "~/.fusion/artifacts"
+  db_name: "meta.db"
+  small_content_limit: 10240
+
+mlx:
+  url: "http://localhost:8890"
+
+thresholds:
+  safe_context: 180000
+  output_reserve: 8192
+  auto_create_lines: 30
+  auto_create_chars: 1500
+
+artifact:
+  id_prefix: "art_"
