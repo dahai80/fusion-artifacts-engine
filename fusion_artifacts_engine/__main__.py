@@ -6,7 +6,7 @@ from pathlib import Path
 from fusion_artifacts_engine.config import load_config
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
-from fusion_artifacts_engine.utils import setup_logging
+from fusion_artifacts_engine.utils import setup_logging, get_package_version
 
 # User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
 # Importers/callers: CLI entry point, calls load_config() from config.py, passes config to ArtifactEngine and ArtifactRPCServer
@@ -45,7 +45,7 @@ def main():
         server = ArtifactRPCServer(engine, host=host, port=port)
 
         def shutdown(sig, frame):
-            logger.info(f"Received signal {sig}, shutting down")
+            logger.info("Received signal %s, shutting down", sig)
             server.stop()
             engine.close()
             sys.exit(0)
@@ -61,14 +61,20 @@ def main():
             engine.close()
 
     elif args.command == "status":
+        import os
         import httpx
         config = load_config()
         host = config.server_host
         port = config.server_port
+        headers = {}
+        api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
+        if api_key:
+            headers["X-API-Key"] = api_key
         try:
             resp = httpx.post(
                 f"http://{host}:{port}",
                 json={"jsonrpc": "2.0", "method": "ping", "id": 1},
+                headers=headers,
                 timeout=3.0,
             )
             data = resp.json()
@@ -80,7 +86,7 @@ def main():
             print(f"Not running: {e}")
 
     elif args.command == "version":
-        print("fusion-artifacts-engine 0.1.0")
+        print(f"fusion-artifacts-engine {get_package_version()}")
 
     else:
         parser.print_help()

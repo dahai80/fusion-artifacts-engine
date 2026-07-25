@@ -10,8 +10,6 @@ _CODE_LANGS = {
     "toml", "json", "xml", "html", "css", "scss", "dockerfile",
 }
 
-_MARKDOWN_LANGS = {"markdown", "md"}
-
 _DATA_EXTS = {".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".xml"}
 
 _HTML_EXTS = {".html", ".htm"}

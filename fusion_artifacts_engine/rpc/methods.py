@@ -1,6 +1,9 @@
 import logging
 from typing import Any, Optional
+from pathlib import Path
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.rpc.errors import RpcError
+from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
 
@@ -9,14 +12,15 @@ class RPCHandler:
 
     def __init__(self, engine: ArtifactEngine):
         self.engine = engine
+        self._method_map = self._build_methods()
 
     async def dispatch(self, method: str, params: dict) -> Any:
-        handler = self._methods().get(method)
+        handler = self._method_map.get(method)
         if handler is None:
-            raise ValueError(f"Method not found: {method}")
+            raise RpcError(-32601, f"Method not found: {method}")
         return await handler(params)
 
-    def _methods(self) -> dict:
+    def _build_methods(self) -> dict:
         return {
             "artifact.create": self._create,
             "artifact.get": self._get,
@@ -30,11 +34,14 @@ class RPCHandler:
             "artifact.check_safety": self._check_safety,
             "artifact.export": self._export,
             "artifact.export_session": self._export_session,
-            "artifact.import": self._import,
+            "artifact.import": self._import_artifact,
             "ping": self._ping,
         }
 
     async def _create(self, params: dict) -> dict:
+        valid_types = ("code", "markdown", "html", "react", "data")
+        if params.get("type") not in valid_types:
+            raise ValueError(f"Invalid type, must be one of {valid_types}")
         artifact, version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=params["name"],
@@ -117,33 +124,45 @@ class RPCHandler:
         return {"data": data}
 
     async def _export_session(self, params: dict) -> dict:
-        import json
-        from pathlib import Path
-        output_dir = Path(params["output_dir"])
+        storage_root = Path(self.engine.config.storage_root).resolve()
+        output_dir = Path(params["output_dir"]).resolve()
+        try:
+            output_dir.relative_to(storage_root)
+        except ValueError:
+            raise ValueError(f"output_dir must be under storage root {storage_root}")
         output_dir.mkdir(parents=True, exist_ok=True)
         artifacts = self.engine.list_artifacts(params["session_id"])
         count = 0
         for art in artifacts:
             content = self.engine.get_version_content(art.id)
             if content:
-                ext = art.name.rsplit(".", 1)[-1] if "." in art.name else "txt"
-                path = output_dir / f"{art.name}"
+                safe_name = art.name.replace("/", "_").replace("\\", "_").replace("..", "_").replace("\x00", "_")
+                path = output_dir / safe_name
+                try:
+                    path.resolve().relative_to(storage_root)
+                except ValueError:
+                    logger.warning("Skipping artifact name that escapes export dir: %s", art.name)
+                    continue
                 path.write_text(content.content, encoding="utf-8")
                 count += 1
         return {"count": count, "path": str(output_dir)}
 
-    async def _import(self, params: dict) -> dict:
+    async def _import_artifact(self, params: dict) -> dict:
+        valid_types = ("code", "markdown", "html", "react", "data")
         data = params["data"]
         artifact_data = data.get("artifact", data)
         content = data.get("content", "")
+        artifact_type = artifact_data.get("type", "code")
+        if artifact_type not in valid_types:
+            raise ValueError(f"Invalid type, must be one of {valid_types}")
         artifact, version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=artifact_data.get("name", "imported"),
-            artifact_type=artifact_data.get("type", "code"),
+            artifact_type=artifact_type,
             content=content,
             summary=artifact_data.get("summary", ""),
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
     async def _ping(self, params: dict) -> dict:
-        return {"pong": True, "version": "0.1.0"}
+        return {"pong": True, "version": get_package_version()}

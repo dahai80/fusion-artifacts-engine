@@ -2,7 +2,7 @@ import os
 import logging
 from pathlib import Path
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 import yaml
 
 # User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
@@ -24,13 +24,13 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     try:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
-        logger.info(f"Loaded config from {path}")
+        logger.info("Loaded config from %s", path)
         return data or {}
     except FileNotFoundError:
-        logger.debug(f"Config file not found: {path}")
+        logger.debug("Config file not found: %s", path)
         return {}
     except Exception as e:
-        logger.warning(f"Failed to load config {path}: {e}")
+        logger.warning("Failed to load config %s: %s", path, e)
         return {}
 
 
@@ -45,8 +45,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     storage = data.get("storage", {})
     if "root" in storage:
         root = storage["root"]
-        if root.startswith("~"):
-            root = os.path.expanduser(root)
+        root = os.path.expanduser(root)
         flat["storage_root"] = Path(root)
     if "db_name" in storage:
         flat["db_name"] = storage["db_name"]
@@ -94,9 +93,9 @@ def load_config(user_config_path: Optional[Path] = None) -> "ArtifactEngineConfi
         if val is not None:
             try:
                 env_overrides[field_name] = converter(val)
-                logger.debug(f"Config override from env {env_key}")
+                logger.debug("Config override from env %s", env_key)
             except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid env {env_key}={val}: {e}")
+                logger.warning("Invalid env %s=%s: %s", env_key, val, e)
 
     merged.update(env_overrides)
 
@@ -114,9 +113,10 @@ def load_config(user_config_path: Optional[Path] = None) -> "ArtifactEngineConfi
 
 
 class ArtifactEngineConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     storage_root: Path = Field(default=Path.home() / ".fusion" / "artifacts")
     db_name: str = Field(default="meta.db")
-    socket_path: str = Field(default="/tmp/fusion-artifacts.sock")
     mlx_url: str = Field(default="http://localhost:8890")
     safe_context_threshold: int = Field(default=180_000)
     output_reserve_tokens: int = Field(default=8192)

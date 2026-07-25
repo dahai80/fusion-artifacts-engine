@@ -35,3 +35,11 @@ class StorageDriver(ABC):
     @abstractmethod
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
         ...
+
+    @abstractmethod
+    def next_version_num(self, artifact_id: str) -> int:
+        ...
+
+    @abstractmethod
+    def close(self) -> None:
+        ...

@@ -35,6 +35,6 @@ class ArtifactRef(BaseModel):
     artifact_id: str
     name: str
     type: ArtifactType
-    version: str = "latest"
+    version: str
     token_count: int = 0
     summary: str = ""

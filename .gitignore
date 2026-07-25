@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.remember/
+*.db
+audit-report.md
+ar.md
+DESIGN.md
+interface.md
+PLAN.md

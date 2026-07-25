@@ -17,3 +17,11 @@ def setup_logging(level: int = logging.INFO) -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def get_package_version() -> str:
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version("fusion-artifacts-engine")
+    except Exception:
+        return "0.1.0"

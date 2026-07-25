@@ -1,6 +1,7 @@
 UPDATE_ARTIFACT_SCHEMA = {
     "name": "update_artifact",
     "description": "Update an existing artifact with new content, creating a new version.",
+    "schema_version": "1.0.0",
     "input_schema": {
         "type": "object",
         "properties": {

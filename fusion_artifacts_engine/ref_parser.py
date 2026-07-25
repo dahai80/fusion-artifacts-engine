@@ -1,12 +1,11 @@
 import re
 import logging
-from typing import Optional
 from fusion_artifacts_engine.models import ArtifactRef, ArtifactType
 
 logger = logging.getLogger(__name__)
 
 _TOOL_RESULT_PATTERN = re.compile(
-    r"\[Artifact:\s*(?P<name>[^|]+)\s*\|\s*ID:\s*(?P<id>\w+)\s*\|\s*Version:\s*v(?P<version>\d+)\s*\|\s*Type:\s*(?P<type>\w+)\s*\|\s*Tokens:\s*(?P<tokens>\d+)\s*(?:\|\s*Summary:\s*(?P<summary>[^\]]+))?\]",
+    r"\[Artifact:\s*(?P<name>[^|]+)\s*\|\s*ID:\s*(?P<id>\w+)\s*\|\s*Version:\s*v(?P<version>\d+)\s*\|\s*Type:\s*(?P<type>\w+)\s*\|\s*Tokens:\s*(?P<tokens>\d+)\s*(?:\|\s*Summary:\s*(?P<summary>.+?))?\]",
     re.IGNORECASE,
 )
 
@@ -19,11 +18,16 @@ _XML_ARTIFACT_PATTERN = re.compile(
 def parse_refs_from_message(content: str) -> list[ArtifactRef]:
     refs = []
     for m in _TOOL_RESULT_PATTERN.finditer(content):
+        ver = m.group("version")
+        try:
+            ver = str(int(ver))
+        except ValueError:
+            pass
         refs.append(ArtifactRef(
             artifact_id=m.group("id"),
             name=m.group("name").strip(),
             type=m.group("type").strip(),
-            version=m.group("version"),
+            version=ver,
             token_count=int(m.group("tokens")),
             summary=(m.group("summary") or "").strip(),
         ))
@@ -42,7 +46,7 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
             token_count=int(m.group("tokens")),
             summary=(m.group("summary") or "").strip(),
         ))
-    logger.debug(f"Parsed {len(refs)} refs from message")
+    logger.debug("Parsed %s refs from message", len(refs))
     return refs
 
 

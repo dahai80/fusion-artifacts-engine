@@ -12,6 +12,12 @@ from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
 
+_SUMMARY_MAX_LEN = 200
+
+
+def _truncate_summary(content: str) -> str:
+    return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
+
 
 class ArtifactEngine:
 
@@ -23,7 +29,7 @@ class ArtifactEngine:
             small_content_limit=self.config.small_content_limit,
         )
         self.token_counter = TokenCounter(mlx_url=self.config.mlx_url)
-        logger.info(f"ArtifactEngine initialized: storage_root={self.config.storage_root}")
+        logger.info("ArtifactEngine initialized: storage_root=%s", self.config.storage_root)
 
     async def create_artifact(
         self,
@@ -37,7 +43,7 @@ class ArtifactEngine:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
         if not summary:
-            summary = content[:200].replace("\n", " ").strip()
+            summary = _truncate_summary(content)
         artifact = Artifact(
             id=artifact_id,
             session_id=session_id,
@@ -48,7 +54,6 @@ class ArtifactEngine:
             created_at=now,
             updated_at=now,
         )
-        self.storage.save_artifact(artifact)
         token_count = self.token_counter.count_sync(content)
         version = ArtifactVersion(
             artifact_id=artifact_id,
@@ -58,9 +63,9 @@ class ArtifactEngine:
             change_log=change_log,
             created_at=now,
         )
-        self.storage.save_version(version)
+        self.storage.save_artifact_and_version(artifact, version)
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, token_count, summary)
-        logger.info(f"Created artifact: {artifact_id} name={name} tokens={token_count}")
+        logger.info("Created artifact: %s name=%s tokens=%s", artifact_id, name, token_count)
         return artifact, version, ref_text
 
     def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
@@ -81,7 +86,7 @@ class ArtifactEngine:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        new_version = artifact.current_version + 1
+        new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
         token_count = self.token_counter.count_sync(content)
         version = ArtifactVersion(
@@ -95,11 +100,11 @@ class ArtifactEngine:
         self.storage.save_version(version)
         artifact.current_version = new_version
         artifact.updated_at = now
-        if content[:200].replace("\n", " ").strip():
-            artifact.summary = content[:200].replace("\n", " ").strip()
+        if not artifact.summary:
+            artifact.summary = _truncate_summary(content)
         self.storage.save_artifact(artifact)
         ref_text = generate_ref_text(artifact_id, artifact.name, artifact.type, new_version, token_count, artifact.summary)
-        logger.info(f"Created version: {artifact_id} v{new_version} tokens={token_count}")
+        logger.info("Created version: %s v%s tokens=%s", artifact_id, new_version, token_count)
         return version, ref_text
 
     def get_version_content(self, artifact_id: str, version: Optional[int] = None) -> Optional[ArtifactVersion]:
@@ -107,7 +112,11 @@ class ArtifactEngine:
         if artifact is None:
             return None
         ver = version if version is not None else artifact.current_version
-        return self.storage.get_version(artifact_id, ver)
+        try:
+            return self.storage.get_version(artifact_id, ver)
+        except FileNotFoundError as e:
+            logger.error("Content file missing for %s v%s: %s", artifact_id, ver, e)
+            return None
 
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
         return self.storage.list_versions(artifact_id)
@@ -117,13 +126,17 @@ class ArtifactEngine:
         artifact_id: str,
         target_version: int,
     ) -> tuple[ArtifactVersion, str]:
-        target = self.storage.get_version(artifact_id, target_version)
+        try:
+            target = self.storage.get_version(artifact_id, target_version)
+        except FileNotFoundError as e:
+            logger.error("Content file missing for %s v%s: %s", artifact_id, target_version, e)
+            raise ValueError(f"Version content not found: {artifact_id} v{target_version}") from e
         if target is None:
             raise ValueError(f"Version not found: {artifact_id} v{target_version}")
         version, ref_text = await self.create_version(
             artifact_id, target.content, f"Rollback to v{target_version}"
         )
-        logger.info(f"Rolled back {artifact_id} to v{target_version}, new v{version.version_num}")
+        logger.info("Rolled back %s to v%s, new v%s", artifact_id, target_version, version.version_num)
         return version, ref_text
 
     async def inject(
