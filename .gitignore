@@ -10,6 +10,7 @@ build/
 *.db
 audit-report.md
 ar.md
+CLAUDE.md
 DESIGN.md
 interface.md
 PLAN.md
