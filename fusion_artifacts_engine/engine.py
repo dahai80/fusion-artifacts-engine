@@ -19,6 +19,24 @@ def _truncate_summary(content: str) -> str:
     return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
 
 
+def _auto_changelog(old_content: str, new_content: str) -> str:
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    added = max(len(new_lines) - len(old_lines), 0)
+    removed = max(len(old_lines) - len(new_lines), 0)
+    parts = []
+    if added:
+        parts.append(f"+{added} lines")
+    if removed:
+        parts.append(f"-{removed} lines")
+    if not parts:
+        if old_content != new_content:
+            parts.append("content modified")
+        else:
+            parts.append("no change")
+    return ", ".join(parts)
+
+
 class ArtifactEngine:
 
     def __init__(self, config: Optional[ArtifactEngineConfig] = None):
@@ -82,10 +100,14 @@ class ArtifactEngine:
         artifact_id: str,
         content: str,
         change_log: str = "",
+        source: str = "manual",
     ) -> tuple[ArtifactVersion, str]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
+        if not change_log:
+            old = self.storage.get_version(artifact_id, artifact.current_version)
+            change_log = _auto_changelog(old.content if old else "", content)
         new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
         token_count = self.token_counter.count_sync(content)
@@ -95,6 +117,7 @@ class ArtifactEngine:
             content=content,
             token_count=token_count,
             change_log=change_log,
+            source=source,
             created_at=now,
         )
         self.storage.save_version(version)

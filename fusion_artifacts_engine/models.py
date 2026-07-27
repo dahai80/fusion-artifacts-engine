@@ -28,6 +28,7 @@ class ArtifactVersion(BaseModel):
     content_path: Optional[str] = None
     token_count: int = 0
     change_log: str = ""
+    source: str = "manual"
     created_at: float = Field(default_factory=time.time)
 
 

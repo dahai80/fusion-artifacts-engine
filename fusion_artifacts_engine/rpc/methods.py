@@ -81,8 +81,13 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _update(self, params: dict) -> dict:
+        valid_sources = ("manual", "ai_generation")
+        source = params.get("source", "manual")
+        if source not in valid_sources:
+            raise ValueError(f"Invalid source, must be one of {valid_sources}")
         version, ref_text = await self.engine.create_version(
-            params["artifact_id"], params["content"], params.get("change_log", "")
+            params["artifact_id"], params["content"],
+            params.get("change_log", ""), source=source,
         )
         return {"version": version.model_dump(), "ref_text": ref_text}
 
