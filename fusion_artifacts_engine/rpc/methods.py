@@ -35,6 +35,10 @@ class RPCHandler:
             "artifact.export": self._export,
             "artifact.export_session": self._export_session,
             "artifact.import": self._import_artifact,
+            "artifact.export_code": self._export_code,
+            "artifact.import_code": self._import_code,
+            "artifact.watch": self._watch,
+            "artifact.sync": self._sync,
             "ping": self._ping,
         }
 
@@ -178,6 +182,51 @@ class RPCHandler:
             kind=kind,
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
+
+    async def _export_code(self, params: dict) -> dict:
+        language = params.get("language", "")
+        result = self.engine.export_code(params["artifact_id"], language)
+        return result
+
+    async def _import_code(self, params: dict) -> dict:
+        artifact, version, ref_text = await self.engine.import_code(
+            session_id=params["session_id"],
+            code=params["code"],
+            language=params.get("language", ""),
+            name=params.get("name", ""),
+            metadata=params.get("metadata"),
+        )
+        return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
+
+    async def _watch(self, params: dict) -> dict:
+        artifact_id = params["artifact_id"]
+        action = params.get("action", "poll")
+        since_version = params.get("since_version", 0)
+        watcher_id = params.get("watcher_id", "")
+        if action == "register":
+            if not watcher_id:
+                raise ValueError("watcher_id required for register action")
+            self.engine.register_watcher(artifact_id, watcher_id)
+            return {"registered": True, "artifact_id": artifact_id}
+        elif action == "unregister":
+            if not watcher_id:
+                raise ValueError("watcher_id required for unregister action")
+            self.engine.unregister_watcher(artifact_id, watcher_id)
+            return {"unregistered": True, "artifact_id": artifact_id}
+        elif action == "poll":
+            events = self.engine.get_watch_events(artifact_id, since_version)
+            return {"artifact_id": artifact_id, "events": events}
+        else:
+            raise ValueError(f"Invalid action: {action}, must be register/unregister/poll")
+
+    async def _sync(self, params: dict) -> dict:
+        direction = params.get("direction", "artifact_to_code")
+        if direction not in ("artifact_to_code", "code_to_artifact"):
+            raise ValueError("direction must be 'artifact_to_code' or 'code_to_artifact'")
+        result = await self.engine.sync_artifact_file(
+            params["artifact_id"], params["code_path"], direction
+        )
+        return result
 
     async def _ping(self, params: dict) -> dict:
         return {"pong": True, "version": get_package_version()}
