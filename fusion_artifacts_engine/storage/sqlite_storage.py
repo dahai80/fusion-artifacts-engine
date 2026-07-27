@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     session_id TEXT NOT NULL,
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('code','markdown','html','react','data')),
+    kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template')),
     current_version INTEGER NOT NULL DEFAULT 1,
     summary TEXT DEFAULT '',
     created_at REAL NOT NULL,
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
+CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,11 +35,17 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
     content_path TEXT,
     token_count INTEGER NOT NULL DEFAULT 0,
     change_log TEXT DEFAULT '',
+    source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation')),
     created_at REAL NOT NULL,
     FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_versions_artifact ON artifact_versions(artifact_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_artifact_version ON artifact_versions(artifact_id, version_num);
+"""
+
+_MIGRATION_SQL = """
+ALTER TABLE artifacts ADD COLUMN kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template'));
+ALTER TABLE artifact_versions ADD COLUMN source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation'));
 """
 
 
@@ -47,6 +55,7 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         session_id=row["session_id"],
         name=row["name"],
         type=row["type"],
+        kind=row["kind"] if "kind" in row.keys() else None,
         current_version=row["current_version"],
         summary=row["summary"] or "",
         created_at=row["created_at"],
@@ -64,6 +73,7 @@ def _version_from_row(row: sqlite3.Row) -> ArtifactVersion:
         content_path=row["content_path"],
         token_count=row["token_count"],
         change_log=row["change_log"] or "",
+        source=row["source"] if "source" in row.keys() else "manual",
         created_at=row["created_at"],
     )
 
@@ -84,6 +94,8 @@ class SQLiteStorage(StorageDriver):
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
+        self._migrate_kind_column()
+        self._migrate_source_column()
         logger.info("SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir)
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
@@ -109,40 +121,42 @@ class SQLiteStorage(StorageDriver):
         with self._write_lock:
             self._conn.execute(
                 """INSERT INTO artifacts
-                   (id, session_id, name, type, current_version, summary, created_at, updated_at, is_deleted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (id, session_id, name, type, kind, current_version, summary, created_at, updated_at, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
                      type=excluded.type,
+                     kind=excluded.kind,
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
                      is_deleted=excluded.is_deleted""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
-                 artifact.current_version, artifact.summary, artifact.created_at,
-                 artifact.updated_at, int(artifact.is_deleted)),
+                 artifact.kind, artifact.current_version, artifact.summary,
+                 artifact.created_at, artifact.updated_at, int(artifact.is_deleted)),
             )
             self._conn.commit()
-        logger.info("Saved artifact: %s name=%s", artifact.id, artifact.name)
+        logger.info("Saved artifact: %s name=%s kind=%s", artifact.id, artifact.name, artifact.kind)
 
     def save_artifact_and_version(self, artifact: Artifact, version: ArtifactVersion) -> None:
         with self._write_lock:
             self._conn.execute(
                 """INSERT INTO artifacts
-                   (id, session_id, name, type, current_version, summary, created_at, updated_at, is_deleted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (id, session_id, name, type, kind, current_version, summary, created_at, updated_at, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
                      type=excluded.type,
+                     kind=excluded.kind,
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
                      is_deleted=excluded.is_deleted""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
-                 artifact.current_version, artifact.summary, artifact.created_at,
-                 artifact.updated_at, int(artifact.is_deleted)),
+                 artifact.kind, artifact.current_version, artifact.summary,
+                 artifact.created_at, artifact.updated_at, int(artifact.is_deleted)),
             )
             content = version.content
             content_path = None
@@ -152,13 +166,13 @@ class SQLiteStorage(StorageDriver):
                 content = ""
             self._conn.execute(
                 """INSERT INTO artifact_versions
-                   (artifact_id, version_num, content, content_path, token_count, change_log, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (artifact_id, version_num, content, content_path, token_count, change_log, source, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (version.artifact_id, version.version_num, content, content_path,
-                 version.token_count, version.change_log, version.created_at),
+                 version.token_count, version.change_log, version.source, version.created_at),
             )
             self._conn.commit()
-        logger.info("Saved artifact+version: %s v%d tokens=%d", artifact.id, version.version_num, version.token_count)
+        logger.info("Saved artifact+version: %s v%d tokens=%d source=%s", artifact.id, version.version_num, version.token_count, version.source)
 
     def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
         cur = self._conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
@@ -207,10 +221,10 @@ class SQLiteStorage(StorageDriver):
                 try:
                     self._conn.execute(
                         """INSERT INTO artifact_versions
-                           (artifact_id, version_num, content, content_path, token_count, change_log, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                           (artifact_id, version_num, content, content_path, token_count, change_log, source, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (version.artifact_id, version.version_num, content, content_path,
-                         version.token_count, version.change_log, version.created_at),
+                         version.token_count, version.change_log, version.source, version.created_at),
                     )
                     self._conn.commit()
                     logger.info("Saved version: %s v%d tokens=%d", version.artifact_id, version.version_num, version.token_count)
@@ -264,6 +278,22 @@ class SQLiteStorage(StorageDriver):
             if "." in name:
                 return name.rsplit(".", 1)[-1]
         return "txt"
+
+    def _migrate_kind_column(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifacts)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "kind" not in columns:
+            self._conn.executescript("ALTER TABLE artifacts ADD COLUMN kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template'));")
+            self._conn.commit()
+            logger.info("Migrated: added 'kind' column to artifacts table")
+
+    def _migrate_source_column(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifact_versions)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "source" not in columns:
+            self._conn.executescript("ALTER TABLE artifact_versions ADD COLUMN source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation'));")
+            self._conn.commit()
+            logger.info("Migrated: added 'source' column to artifact_versions table")
 
     def close(self) -> None:
         self._conn.close()

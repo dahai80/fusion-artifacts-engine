@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 from pathlib import Path
 from fusion_artifacts_engine.config import ArtifactEngineConfig
-from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef
+from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef, infer_kind
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import TokenCounter
 from fusion_artifacts_engine.ref_parser import generate_ref_text
@@ -19,6 +19,24 @@ _SUMMARY_MAX_LEN = 200
 
 def _truncate_summary(content: str) -> str:
     return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
+
+
+def _auto_changelog(old_content: str, new_content: str) -> str:
+    old_lines = old_content.splitlines()
+    new_lines = new_content.splitlines()
+    added = max(len(new_lines) - len(old_lines), 0)
+    removed = max(len(old_lines) - len(new_lines), 0)
+    parts = []
+    if added:
+        parts.append(f"+{added} lines")
+    if removed:
+        parts.append(f"-{removed} lines")
+    if not parts:
+        if old_content != new_content:
+            parts.append("content modified")
+        else:
+            parts.append("no change")
+    return ", ".join(parts)
 
 
 class ArtifactEngine:
@@ -43,16 +61,20 @@ class ArtifactEngine:
         content: str,
         summary: str = "",
         change_log: str = "Initial version",
+        kind: Optional[str] = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
         if not summary:
             summary = _truncate_summary(content)
+        if kind is None:
+            kind = infer_kind(artifact_type)
         artifact = Artifact(
             id=artifact_id,
             session_id=session_id,
             name=name,
             type=artifact_type,
+            kind=kind,
             current_version=1,
             summary=summary,
             created_at=now,
@@ -86,10 +108,14 @@ class ArtifactEngine:
         artifact_id: str,
         content: str,
         change_log: str = "",
+        source: str = "manual",
     ) -> tuple[ArtifactVersion, str]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
+        if not change_log:
+            old = self.storage.get_version(artifact_id, artifact.current_version)
+            change_log = _auto_changelog(old.content if old else "", content)
         new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
         token_count = self.token_counter.count_sync(content)
@@ -99,6 +125,7 @@ class ArtifactEngine:
             content=content,
             token_count=token_count,
             change_log=change_log,
+            source=source,
             created_at=now,
         )
         self.storage.save_version(version)
