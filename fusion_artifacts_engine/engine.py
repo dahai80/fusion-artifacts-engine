@@ -2,7 +2,7 @@ import time
 import logging
 from typing import Optional
 from fusion_artifacts_engine.config import ArtifactEngineConfig
-from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef
+from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef, infer_kind
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import TokenCounter
 from fusion_artifacts_engine.ref_parser import generate_ref_text
@@ -39,16 +39,20 @@ class ArtifactEngine:
         content: str,
         summary: str = "",
         change_log: str = "Initial version",
+        kind: Optional[str] = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
         if not summary:
             summary = _truncate_summary(content)
+        if kind is None:
+            kind = infer_kind(artifact_type)
         artifact = Artifact(
             id=artifact_id,
             session_id=session_id,
             name=name,
             type=artifact_type,
+            kind=kind,
             current_version=1,
             summary=summary,
             created_at=now,
