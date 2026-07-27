@@ -1,6 +1,8 @@
 import time
+import hashlib
 import logging
 from typing import Optional
+from pathlib import Path
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
@@ -29,6 +31,8 @@ class ArtifactEngine:
             small_content_limit=self.config.small_content_limit,
         )
         self.token_counter = TokenCounter(mlx_url=self.config.mlx_url)
+        self._watchers: dict[str, list[str]] = {}
+        self._sync_registry: dict[str, dict] = {}
         logger.info("ArtifactEngine initialized: storage_root=%s", self.config.storage_root)
 
     async def create_artifact(
@@ -176,6 +180,143 @@ class ArtifactEngine:
             self.config.auto_create_threshold_lines,
             self.config.auto_create_threshold_chars,
         )
+
+    _LANG_EXT = {
+        "python": "py", "javascript": "js", "typescript": "ts",
+        "html": "html", "css": "css", "markdown": "md",
+        "json": "json", "yaml": "yaml", "rust": "rs",
+        "go": "go", "java": "java", "c": "c", "cpp": "cpp",
+    }
+
+    _EXT_LANG = {v: k for k, v in _LANG_EXT.items()}
+
+    def export_code(self, artifact_id: str, language: str = "") -> dict:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        version = self.get_version_content(artifact_id)
+        if version is None:
+            raise ValueError(f"No content for artifact: {artifact_id}")
+        ext = self._LANG_EXT.get(language, "")
+        if not ext:
+            name = artifact.name.lower()
+            if "." in name:
+                ext = name.rsplit(".", 1)[-1]
+                language = self._EXT_LANG.get(ext, language)
+            else:
+                ext = self._LANG_EXT.get(artifact.type, "txt")
+        code = version.content
+        return {
+            "code": code,
+            "language": language,
+            "ext": ext,
+            "artifact_id": artifact_id,
+            "version": version.version_num,
+            "name": artifact.name,
+        }
+
+    async def import_code(
+        self,
+        session_id: str,
+        code: str,
+        language: str = "",
+        name: str = "",
+        metadata: Optional[dict] = None,
+    ) -> tuple[Artifact, ArtifactVersion, str]:
+        meta = metadata or {}
+        artifact_type = "code"
+        ext = self._LANG_EXT.get(language, "")
+        if language in ("html",) or ext == "html":
+            artifact_type = "html"
+        elif language in ("javascript", "typescript") and ext in ("jsx", "tsx"):
+            artifact_type = "react"
+        if not name:
+            name = meta.get("filename", f"imported.{ext}" if ext else "imported.txt")
+        summary = meta.get("summary", _truncate_summary(code))
+        return await self.create_artifact(
+            session_id=session_id,
+            name=name,
+            artifact_type=artifact_type,
+            content=code,
+            summary=summary,
+        )
+
+    def register_watcher(self, artifact_id: str, watcher_id: str) -> None:
+        if artifact_id not in self._watchers:
+            self._watchers[artifact_id] = []
+        if watcher_id not in self._watchers[artifact_id]:
+            self._watchers[artifact_id].append(watcher_id)
+            logger.info("Watcher registered: %s for artifact %s", watcher_id, artifact_id)
+
+    def unregister_watcher(self, artifact_id: str, watcher_id: str) -> None:
+        if artifact_id in self._watchers:
+            self._watchers[artifact_id] = [
+                w for w in self._watchers[artifact_id] if w != watcher_id
+            ]
+            if not self._watchers[artifact_id]:
+                del self._watchers[artifact_id]
+            logger.info("Watcher unregistered: %s for artifact %s", watcher_id, artifact_id)
+
+    def get_watch_events(self, artifact_id: str, since_version: int = 0) -> list[dict]:
+        versions = self.storage.list_versions(artifact_id)
+        events = []
+        for v in versions:
+            if v.version_num > since_version:
+                events.append({
+                    "artifact_id": artifact_id,
+                    "version": v.version_num,
+                    "change_log": v.change_log,
+                    "created_at": v.created_at,
+                })
+        logger.debug("Watch events for %s since v%d: %d events", artifact_id, since_version, len(events))
+        return events
+
+    async def sync_artifact_file(self, artifact_id: str, code_path: str, direction: str = "artifact_to_code") -> dict:
+        path = Path(code_path).resolve()
+        storage_root = Path(self.config.storage_root).resolve()
+        try:
+            path.relative_to(storage_root)
+        except ValueError:
+            raise ValueError(f"code_path must be under storage root {storage_root}")
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        version = self.get_version_content(artifact_id)
+        if version is None:
+            raise ValueError(f"No content for artifact: {artifact_id}")
+        content_hash = hashlib.sha256(version.content.encode("utf-8")).hexdigest()[:16]
+        if direction == "artifact_to_code":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(version.content, encoding="utf-8")
+            self._sync_registry[artifact_id] = {
+                "path": str(path),
+                "hash": content_hash,
+                "version": version.version_num,
+            }
+            logger.info("Synced artifact %s v%d -> %s", artifact_id, version.version_num, path)
+            return {"direction": "artifact_to_code", "path": str(path), "version": version.version_num}
+        elif direction == "code_to_artifact":
+            if not path.exists():
+                raise ValueError(f"Code file not found: {path}")
+            code_content = path.read_text(encoding="utf-8")
+            file_hash = hashlib.sha256(code_content.encode("utf-8")).hexdigest()[:16]
+            reg = self._sync_registry.get(artifact_id)
+            if reg and reg.get("hash") == file_hash:
+                return {"direction": "code_to_artifact", "status": "no_change", "version": version.version_num}
+            old_hash = reg.get("hash", "") if reg else ""
+            new_version, ref = await self.create_version(
+                artifact_id, code_content, f"Synced from {path}"
+            )
+            new_content_hash = hashlib.sha256(code_content.encode("utf-8")).hexdigest()[:16]
+            self._sync_registry[artifact_id] = {
+                "path": str(path),
+                "hash": new_content_hash,
+                "version": new_version.version_num,
+            }
+            logger.info("Synced %s -> artifact %s v%d", path, artifact_id, new_version.version_num)
+            return {"direction": "code_to_artifact", "path": str(path), "version": new_version.version_num, "ref_text": ref}
+        else:
+            raise ValueError(f"Invalid direction: {direction}, must be 'artifact_to_code' or 'code_to_artifact'")
 
     def close(self) -> None:
         self.storage.close()
