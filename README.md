@@ -38,12 +38,12 @@ curl -X POST http://127.0.0.1:8892 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create` | session_id, name, type, content, summary? | Create artifact + v1 |
+| `artifact.create` | session_id, name, type, content, summary?, kind? | Create artifact + v1 |
 | `artifact.get` | artifact_id | Get metadata |
 | `artifact.get_content` | artifact_id, version? | Get version content |
 | `artifact.list` | session_id, include_deleted? | List session artifacts |
 | `artifact.delete` | artifact_id, soft_delete? | Delete artifact |
-| `artifact.update` | artifact_id, content, change_log? | Create new version |
+| `artifact.update` | artifact_id, content, change_log?, source? | Create new version |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
 | `artifact.inject` | messages, max_context? | Pre-request content injection |
@@ -51,7 +51,69 @@ curl -X POST http://127.0.0.1:8892 \
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
 | `artifact.export_session` | session_id, output_dir | Batch export session |
 | `artifact.import` | session_id, data | Import artifact |
+| `artifact.export_code` | artifact_id, language? | Export as source code |
+| `artifact.import_code` | session_id, code, language?, name?, metadata? | Create artifact from code |
+| `artifact.watch` | artifact_id, action, watcher_id?, since_version? | Watch for changes |
+| `artifact.sync` | artifact_id, code_path, direction | Bidirectional code sync |
 | `ping` | — | Health check |
+
+### Artifact Kinds
+
+Semantic classification matching how users think about artifacts:
+
+| Kind | Description |
+|---|---|
+| `app` | Interactive web apps, dashboards, websites |
+| `code` | Code snippets, algorithms, scripts |
+| `document` | Structured documents, reports, templates |
+| `game` | Playable games, simulations, interactive challenges |
+| `tool` | Productivity utilities, calculators, planners |
+| `template` | Creative projects, quizzes, reusable patterns |
+
+When `kind` is not specified, it is auto-inferred from `type`:
+- `html` / `react` → `app`
+- `markdown` → `document`
+- `code` → `code`
+- `data` → `tool`
+
+### Version Source Tracking
+
+Each version records its `source`:
+- `manual` — user-initiated edit
+- `ai_generation` — AI-driven update
+
+When `change_log` is omitted, it is auto-generated from the content diff (e.g., "+5 lines, -2 lines").
+
+### Code-Artifact Sync
+
+**Export code** — get artifact content as source code:
+```bash
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.export_code","params":{"artifact_id":"art_xxx","language":"python"}}'
+```
+
+**Import code** — create artifact from code:
+```bash
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.import_code","params":{"session_id":"s1","code":"def foo(): pass","language":"python"}}'
+```
+
+**Watch** — poll for changes since a version:
+```bash
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.watch","params":{"artifact_id":"art_xxx","action":"poll","since_version":3}}'
+```
+
+**Sync** — bidirectional file sync:
+```bash
+# Artifact → file
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.sync","params":{"artifact_id":"art_xxx","code_path":"/path/to/file.py","direction":"artifact_to_code"}}'
+
+# File → artifact
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.sync","params":{"artifact_id":"art_xxx","code_path":"/path/to/file.py","direction":"code_to_artifact"}}'
+```
 
 ## Python SDK
 
@@ -62,23 +124,33 @@ from fusion_artifacts_engine import ArtifactEngine, ArtifactEngineConfig
 engine = ArtifactEngine()
 
 async def main():
-    # Create
+    # Create with kind
     art, ver, ref = await engine.create_artifact(
-        "sess_1", "main.py", "code", "print('hello')\n" * 50,
-        summary="Main application"
+        "sess_1", "app.py", "code", "print('hello')\n" * 50,
+        summary="Main application", kind="tool"
     )
-    print(f"Created: {art.id} v{ver.version_num}")
-    print(f"Reference: {ref}")
+    print(f"Created: {art.id} kind={art.kind}")
 
-    # Update
-    v2, ref2 = await engine.create_version(art.id, "print('world')\n" * 60, "Updated")
+    # Update with source tracking
+    v2, ref2 = await engine.create_version(
+        art.id, "print('world')\n" * 60,
+        change_log="", source="ai_generation"
+    )
+
+    # Export as code
+    code_data = engine.export_code(art.id, "python")
+
+    # Import from code
+    new_art, _, _ = await engine.import_code(
+        "s1", "def bar(): pass", language="python", name="bar.py"
+    )
+
+    # Sync artifact to file
+    await engine.sync_artifact_file(art.id, "/path/to/file.py", "artifact_to_code")
 
     # Inject for model context
     messages = [{"role": "assistant", "content": ref}]
     injected, total, safe = await engine.inject(messages)
-
-    # Safety check
-    safe, current, remaining = await engine.check_safety(messages)
 
     engine.close()
 
@@ -141,4 +213,4 @@ pytest tests/ -v
 
 ## License
 
-Proprietary — Fusion internal component
+Apache License 2.0
