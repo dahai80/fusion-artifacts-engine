@@ -6,6 +6,19 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 ArtifactType = Literal["code", "markdown", "html", "react", "data"]
+ArtifactKind = Literal["app", "code", "document", "game", "tool", "template"]
+
+_TYPE_TO_KIND: dict[str, str] = {
+    "html": "app",
+    "react": "app",
+    "markdown": "document",
+    "code": "code",
+    "data": "tool",
+}
+
+
+def infer_kind(artifact_type: str) -> str:
+    return _TYPE_TO_KIND.get(artifact_type, "tool")
 
 
 class Artifact(BaseModel):
@@ -13,6 +26,7 @@ class Artifact(BaseModel):
     session_id: str
     name: str
     type: ArtifactType
+    kind: Optional[ArtifactKind] = None
     current_version: int = 1
     summary: str = ""
     created_at: float = Field(default_factory=time.time)

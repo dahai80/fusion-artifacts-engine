@@ -42,6 +42,10 @@ class RPCHandler:
         valid_types = ("code", "markdown", "html", "react", "data")
         if params.get("type") not in valid_types:
             raise ValueError(f"Invalid type, must be one of {valid_types}")
+        valid_kinds = ("app", "code", "document", "game", "tool", "template")
+        kind = params.get("kind")
+        if kind is not None and kind not in valid_kinds:
+            raise ValueError(f"Invalid kind, must be one of {valid_kinds}")
         artifact, version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=params["name"],
@@ -49,6 +53,7 @@ class RPCHandler:
             content=params["content"],
             summary=params.get("summary", ""),
             change_log=params.get("change_log", "Initial version"),
+            kind=kind,
         )
         return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
 
@@ -160,12 +165,17 @@ class RPCHandler:
         artifact_type = artifact_data.get("type", "code")
         if artifact_type not in valid_types:
             raise ValueError(f"Invalid type, must be one of {valid_types}")
+        valid_kinds = ("app", "code", "document", "game", "tool", "template")
+        kind = artifact_data.get("kind")
+        if kind is not None and kind not in valid_kinds:
+            raise ValueError(f"Invalid kind, must be one of {valid_kinds}")
         artifact, version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=artifact_data.get("name", "imported"),
             artifact_type=artifact_type,
             content=content,
             summary=artifact_data.get("summary", ""),
+            kind=kind,
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
