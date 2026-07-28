@@ -28,6 +28,7 @@ class Artifact(BaseModel):
     type: ArtifactType
     kind: Optional[ArtifactKind] = None
     project_id: Optional[str] = None
+    metadata: Optional[dict] = None
     current_version: int = 1
     summary: str = ""
     created_at: float = Field(default_factory=time.time)

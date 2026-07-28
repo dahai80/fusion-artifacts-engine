@@ -16,7 +16,7 @@ def test_count_sync_heuristic(monkeypatch):
     c = TokenCounter(mlx_url="http://localhost:9999")
     c._tiktoken_enc = None
     monkeypatch.setitem(__import__("sys").modules, "tiktoken", None)
-    result = c._count_via_tiktoken("test")
+    c._count_via_tiktoken("test")
     c._tiktoken_enc = None
 
 

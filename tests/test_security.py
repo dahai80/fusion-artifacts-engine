@@ -3,7 +3,6 @@ import time
 import urllib.request
 import asyncio
 import pytest
-from pathlib import Path
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer

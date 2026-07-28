@@ -17,7 +17,7 @@ class StorageDriver(ABC):
         ...
 
     @abstractmethod
-    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None) -> list[Artifact]:
+    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None, metadata_filter: Optional[dict] = None) -> list[Artifact]:
         ...
 
     @abstractmethod

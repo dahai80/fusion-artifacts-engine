@@ -6,8 +6,9 @@ import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
-from typing import Any, Optional
+from typing import Optional
 from fusion_artifacts_engine.rpc.methods import RPCHandler
+from fusion_artifacts_engine.rpc.errors import RpcError
 from fusion_artifacts_engine.engine import ArtifactEngine
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,6 @@ _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
-
-
-from fusion_artifacts_engine.rpc.errors import RpcError
 
 
 class JSONRPCHandler(BaseHTTPRequestHandler):

@@ -4,12 +4,12 @@ import logging
 from typing import Optional
 from pathlib import Path
 from fusion_artifacts_engine.config import ArtifactEngineConfig
-from fusion_artifacts_engine.models import Artifact, ArtifactVersion, ArtifactRef, infer_kind
+from fusion_artifacts_engine.models import Artifact, ArtifactVersion, infer_kind
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import TokenCounter
 from fusion_artifacts_engine.ref_parser import generate_ref_text
 from fusion_artifacts_engine.injection import inject_artifacts_to_messages
-from fusion_artifacts_engine.auto_identifier import should_create_artifact, detect_artifact_type
+from fusion_artifacts_engine.auto_identifier import should_create_artifact
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ class ArtifactEngine:
         change_log: str = "Initial version",
         kind: Optional[str] = None,
         project_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
@@ -77,6 +78,7 @@ class ArtifactEngine:
             type=artifact_type,
             kind=kind,
             project_id=project_id,
+            metadata=metadata,
             current_version=1,
             summary=summary,
             created_at=now,
@@ -99,8 +101,8 @@ class ArtifactEngine:
     def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
         return self.storage.get_artifact(artifact_id, project_id)
 
-    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None) -> list[Artifact]:
-        return self.storage.list_artifacts(session_id, include_deleted, project_id)
+    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None, metadata_filter: Optional[dict] = None) -> list[Artifact]:
+        return self.storage.list_artifacts(session_id, include_deleted, project_id, metadata_filter)
 
     def delete_artifact(self, artifact_id: str, soft_delete: bool = True, project_id: Optional[str] = None) -> bool:
         return self.storage.delete_artifact(artifact_id, soft_delete, project_id)
@@ -332,7 +334,6 @@ class ArtifactEngine:
             reg = self._sync_registry.get(artifact_id)
             if reg and reg.get("hash") == file_hash:
                 return {"direction": "code_to_artifact", "status": "no_change", "version": version.version_num}
-            old_hash = reg.get("hash", "") if reg else ""
             new_version, ref = await self.create_version(
                 artifact_id, code_content, f"Synced from {path}"
             )
