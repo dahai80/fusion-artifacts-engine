@@ -27,6 +27,9 @@ from fusion_artifacts_engine.rpc.errors import RpcError
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
+        if self.path == "/api/token-count":
+            self._handle_token_count()
+            return
         if _API_KEY:
             api_key = self.headers.get("X-API-Key", "")
             if not hmac.compare_digest(api_key, _API_KEY):
@@ -70,6 +73,40 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "id": None,
                 "error": {"code": -32603, "message": "Internal error"},
             })
+
+    def _handle_token_count(self) -> None:
+        if _API_KEY:
+            api_key = self.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(api_key, _API_KEY):
+                self._send_rest_response(401, {"error": "Unauthorized"})
+                return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length > _MAX_BODY_SIZE:
+                self._send_rest_response(413, {"error": "Request body too large"})
+                return
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                self._send_rest_response(400, {"error": f"Parse error: {e}"})
+                return
+            text = data.get("text", "")
+            model = data.get("model")
+            engine = self.server._rpc_handler.engine
+            token_count = self._run_async(engine.token_counter.count(text, model))
+            self._send_rest_response(200, {"token_count": token_count})
+        except Exception as e:
+            logger.error("token-count error: %s", e, exc_info=True)
+            self._send_rest_response(500, {"error": "Internal error"})
+
+    def _send_rest_response(self, code: int, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _run_async(self, coro):
         loop = self.server._async_loop

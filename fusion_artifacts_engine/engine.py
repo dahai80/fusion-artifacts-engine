@@ -62,6 +62,7 @@ class ArtifactEngine:
         summary: str = "",
         change_log: str = "Initial version",
         kind: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
@@ -75,6 +76,7 @@ class ArtifactEngine:
             name=name,
             type=artifact_type,
             kind=kind,
+            project_id=project_id,
             current_version=1,
             summary=summary,
             created_at=now,
@@ -97,8 +99,8 @@ class ArtifactEngine:
     def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
         return self.storage.get_artifact(artifact_id)
 
-    def list_artifacts(self, session_id: str, include_deleted: bool = False) -> list[Artifact]:
-        return self.storage.list_artifacts(session_id, include_deleted)
+    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None) -> list[Artifact]:
+        return self.storage.list_artifacts(session_id, include_deleted, project_id)
 
     def delete_artifact(self, artifact_id: str, soft_delete: bool = True) -> bool:
         return self.storage.delete_artifact(artifact_id, soft_delete)

@@ -58,6 +58,7 @@ class RPCHandler:
             summary=params.get("summary", ""),
             change_log=params.get("change_log", "Initial version"),
             kind=kind,
+            project_id=params.get("project_id"),
         )
         return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
 
@@ -82,7 +83,11 @@ class RPCHandler:
         return {"content": result.content, "token_count": result.token_count, "version": result.version_num}
 
     async def _list(self, params: dict) -> dict:
-        artifacts = self.engine.list_artifacts(params["session_id"], params.get("include_deleted", False))
+        artifacts = self.engine.list_artifacts(
+            params["session_id"],
+            params.get("include_deleted", False),
+            project_id=params.get("project_id"),
+        )
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
     async def _delete(self, params: dict) -> dict:
@@ -180,6 +185,7 @@ class RPCHandler:
             content=content,
             summary=artifact_data.get("summary", ""),
             kind=kind,
+            project_id=params.get("project_id"),
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 

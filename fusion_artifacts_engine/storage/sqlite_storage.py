@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     name TEXT NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('code','markdown','html','react','data')),
     kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template')),
+    project_id TEXT DEFAULT NULL,
     current_version INTEGER NOT NULL DEFAULT 1,
     summary TEXT DEFAULT '',
     created_at REAL NOT NULL,
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
 CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
+CREATE INDEX IF NOT EXISTS idx_artifacts_project_id ON artifacts(project_id);
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +48,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_artifact_version ON artifact_vers
 _MIGRATION_SQL = """
 ALTER TABLE artifacts ADD COLUMN kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template'));
 ALTER TABLE artifact_versions ADD COLUMN source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation'));
+ALTER TABLE artifacts ADD COLUMN project_id TEXT DEFAULT NULL;
 """
 
 
@@ -56,6 +59,7 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         name=row["name"],
         type=row["type"],
         kind=row["kind"] if "kind" in row.keys() else None,
+        project_id=row["project_id"] if "project_id" in row.keys() else None,
         current_version=row["current_version"],
         summary=row["summary"] or "",
         created_at=row["created_at"],
@@ -96,6 +100,7 @@ class SQLiteStorage(StorageDriver):
         self._conn.commit()
         self._migrate_kind_column()
         self._migrate_source_column()
+        self._migrate_project_id_column()
         logger.info("SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir)
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
@@ -121,41 +126,43 @@ class SQLiteStorage(StorageDriver):
         with self._write_lock:
             self._conn.execute(
                 """INSERT INTO artifacts
-                   (id, session_id, name, type, kind, current_version, summary, created_at, updated_at, is_deleted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (id, session_id, name, type, kind, project_id, current_version, summary, created_at, updated_at, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
                      type=excluded.type,
                      kind=excluded.kind,
+                     project_id=excluded.project_id,
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
                      is_deleted=excluded.is_deleted""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
-                 artifact.kind, artifact.current_version, artifact.summary,
+                 artifact.kind, artifact.project_id, artifact.current_version, artifact.summary,
                  artifact.created_at, artifact.updated_at, int(artifact.is_deleted)),
             )
             self._conn.commit()
-        logger.info("Saved artifact: %s name=%s kind=%s", artifact.id, artifact.name, artifact.kind)
+        logger.info("Saved artifact: %s name=%s kind=%s project_id=%s", artifact.id, artifact.name, artifact.kind, artifact.project_id)
 
     def save_artifact_and_version(self, artifact: Artifact, version: ArtifactVersion) -> None:
         with self._write_lock:
             self._conn.execute(
                 """INSERT INTO artifacts
-                   (id, session_id, name, type, kind, current_version, summary, created_at, updated_at, is_deleted)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (id, session_id, name, type, kind, project_id, current_version, summary, created_at, updated_at, is_deleted)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
                      type=excluded.type,
                      kind=excluded.kind,
+                     project_id=excluded.project_id,
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
                      is_deleted=excluded.is_deleted""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
-                 artifact.kind, artifact.current_version, artifact.summary,
+                 artifact.kind, artifact.project_id, artifact.current_version, artifact.summary,
                  artifact.created_at, artifact.updated_at, int(artifact.is_deleted)),
             )
             content = version.content
@@ -181,11 +188,16 @@ class SQLiteStorage(StorageDriver):
             return None
         return _artifact_from_row(row)
 
-    def list_artifacts(self, session_id: str, include_deleted: bool = False) -> list[Artifact]:
-        if include_deleted:
-            cur = self._conn.execute("SELECT * FROM artifacts WHERE session_id = ? ORDER BY updated_at DESC", (session_id,))
-        else:
-            cur = self._conn.execute("SELECT * FROM artifacts WHERE session_id = ? AND is_deleted = 0 ORDER BY updated_at DESC", (session_id,))
+    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None) -> list[Artifact]:
+        conditions = ["session_id = ?"]
+        params: list = [session_id]
+        if not include_deleted:
+            conditions.append("is_deleted = 0")
+        if project_id is not None:
+            conditions.append("project_id = ?")
+            params.append(project_id)
+        where = " AND ".join(conditions)
+        cur = self._conn.execute(f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params)
         return [_artifact_from_row(r) for r in cur.fetchall()]
 
     def delete_artifact(self, artifact_id: str, soft_delete: bool = True) -> bool:
@@ -294,6 +306,15 @@ class SQLiteStorage(StorageDriver):
             self._conn.executescript("ALTER TABLE artifact_versions ADD COLUMN source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation'));")
             self._conn.commit()
             logger.info("Migrated: added 'source' column to artifact_versions table")
+
+    def _migrate_project_id_column(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifacts)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "project_id" not in columns:
+            self._conn.executescript("ALTER TABLE artifacts ADD COLUMN project_id TEXT DEFAULT NULL;")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_project_id ON artifacts(project_id)")
+            self._conn.commit()
+            logger.info("Migrated: added 'project_id' column to artifacts table")
 
     def close(self) -> None:
         self._conn.close()

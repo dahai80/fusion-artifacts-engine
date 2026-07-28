@@ -38,10 +38,10 @@ curl -X POST http://127.0.0.1:8892 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create` | session_id, name, type, content, summary?, kind? | Create artifact + v1 |
+| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id? | Create artifact + v1 |
 | `artifact.get` | artifact_id | Get metadata |
 | `artifact.get_content` | artifact_id, version? | Get version content |
-| `artifact.list` | session_id, include_deleted? | List session artifacts |
+| `artifact.list` | session_id, include_deleted?, project_id? | List session artifacts |
 | `artifact.delete` | artifact_id, soft_delete? | Delete artifact |
 | `artifact.update` | artifact_id, content, change_log?, source? | Create new version |
 | `artifact.version_list` | artifact_id | List all versions |
@@ -114,6 +114,32 @@ curl -X POST http://127.0.0.1:8892 \
 curl -X POST http://127.0.0.1:8892 \
   -d '{"method":"artifact.sync","params":{"artifact_id":"art_xxx","code_path":"/path/to/file.py","direction":"code_to_artifact"}}'
 ```
+
+### Project Scope
+
+Artifacts can be scoped to a `project_id` for multi-project isolation:
+
+```bash
+# Create with project scope
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.create","params":{"session_id":"s1","name":"app.py","type":"code","content":"...","project_id":"my-project"}}'
+
+# List artifacts in a project
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.list","params":{"session_id":"s1","project_id":"my-project"}}'
+```
+
+### Token Count API
+
+Standalone HTTP endpoint for token counting (outside JSON-RPC):
+
+```bash
+curl -X POST http://127.0.0.1:8892/api/token-count \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, world!"}'
+```
+
+Response: `{"token_count": 4}`
 
 ## Python SDK
 
