@@ -96,14 +96,14 @@ class ArtifactEngine:
         logger.info("Created artifact: %s name=%s tokens=%s", artifact_id, name, token_count)
         return artifact, version, ref_text
 
-    def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
-        return self.storage.get_artifact(artifact_id)
+    def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
+        return self.storage.get_artifact(artifact_id, project_id)
 
     def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None) -> list[Artifact]:
         return self.storage.list_artifacts(session_id, include_deleted, project_id)
 
-    def delete_artifact(self, artifact_id: str, soft_delete: bool = True) -> bool:
-        return self.storage.delete_artifact(artifact_id, soft_delete)
+    def delete_artifact(self, artifact_id: str, soft_delete: bool = True, project_id: Optional[str] = None) -> bool:
+        return self.storage.delete_artifact(artifact_id, soft_delete, project_id)
 
     async def create_version(
         self,
