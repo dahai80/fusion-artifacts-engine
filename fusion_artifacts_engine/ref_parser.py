@@ -1,6 +1,6 @@
 import re
 import logging
-from fusion_artifacts_engine.models import ArtifactRef, ArtifactType
+from fusion_artifacts_engine.models import ArtifactRef
 
 logger = logging.getLogger(__name__)
 

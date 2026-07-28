@@ -38,11 +38,11 @@ curl -X POST http://127.0.0.1:8892 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id? | Create artifact + v1 |
-| `artifact.get` | artifact_id | Get metadata |
+| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id?, metadata? | Create artifact + v1 |
+| `artifact.get` | artifact_id, project_id? | Get metadata |
 | `artifact.get_content` | artifact_id, version? | Get version content |
-| `artifact.list` | session_id, include_deleted?, project_id? | List session artifacts |
-| `artifact.delete` | artifact_id, soft_delete? | Delete artifact |
+| `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | List session artifacts |
+| `artifact.delete` | artifact_id, soft_delete?, project_id? | Delete artifact |
 | `artifact.update` | artifact_id, content, change_log?, source? | Create new version |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
@@ -128,6 +128,22 @@ curl -X POST http://127.0.0.1:8892 \
 curl -X POST http://127.0.0.1:8892 \
   -d '{"method":"artifact.list","params":{"session_id":"s1","project_id":"my-project"}}'
 ```
+
+### Metadata
+
+Artifacts support arbitrary JSON metadata for filtering and classification:
+
+```bash
+# Create with metadata
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.create","params":{"session_id":"s1","name":"Button.tsx","type":"react","content":"...","metadata":{"framework":"react","component_name":"Button"}}}'
+
+# List artifacts filtered by metadata
+curl -X POST http://127.0.0.1:8892 \
+  -d '{"method":"artifact.list","params":{"session_id":"s1","metadata_filter":{"framework":"react"}}}'
+```
+
+Metadata is stored as JSON in SQLite and queried via `json_extract()`. You can combine `metadata_filter` with `project_id` for scoped queries.
 
 ### Token Count API
 

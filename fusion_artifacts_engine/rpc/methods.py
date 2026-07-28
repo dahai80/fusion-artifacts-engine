@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional
+from typing import Any
 from pathlib import Path
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.errors import RpcError
@@ -59,6 +59,7 @@ class RPCHandler:
             change_log=params.get("change_log", "Initial version"),
             kind=kind,
             project_id=params.get("project_id"),
+            metadata=params.get("metadata"),
         )
         return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
 
@@ -79,7 +80,7 @@ class RPCHandler:
             version = None
         result = self.engine.get_version_content(params["artifact_id"], version)
         if result is None:
-            raise ValueError(f"Version not found")
+            raise ValueError("Version not found")
         return {"content": result.content, "token_count": result.token_count, "version": result.version_num}
 
     async def _list(self, params: dict) -> dict:
@@ -87,6 +88,7 @@ class RPCHandler:
             params["session_id"],
             params.get("include_deleted", False),
             project_id=params.get("project_id"),
+            metadata_filter=params.get("metadata_filter"),
         )
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
@@ -130,7 +132,7 @@ class RPCHandler:
     async def _export(self, params: dict) -> dict:
         artifact = self.engine.get_artifact(params["artifact_id"])
         if artifact is None:
-            raise ValueError(f"Artifact not found")
+            raise ValueError("Artifact not found")
         include_versions = params.get("include_versions", False)
         data = {"artifact": artifact.model_dump()}
         if include_versions:
@@ -186,6 +188,7 @@ class RPCHandler:
             summary=artifact_data.get("summary", ""),
             kind=kind,
             project_id=params.get("project_id"),
+            metadata=artifact_data.get("metadata"),
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
