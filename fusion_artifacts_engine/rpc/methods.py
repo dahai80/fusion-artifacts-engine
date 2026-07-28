@@ -63,7 +63,7 @@ class RPCHandler:
         return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
 
     async def _get(self, params: dict) -> dict:
-        artifact = self.engine.get_artifact(params["artifact_id"])
+        artifact = self.engine.get_artifact(params["artifact_id"], project_id=params.get("project_id"))
         if artifact is None:
             raise ValueError(f"Artifact not found: {params['artifact_id']}")
         return {"artifact": artifact.model_dump()}
@@ -91,7 +91,7 @@ class RPCHandler:
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
     async def _delete(self, params: dict) -> dict:
-        ok = self.engine.delete_artifact(params["artifact_id"], params.get("soft_delete", True))
+        ok = self.engine.delete_artifact(params["artifact_id"], params.get("soft_delete", True), project_id=params.get("project_id"))
         return {"ok": ok}
 
     async def _update(self, params: dict) -> dict:

@@ -181,8 +181,11 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         logger.info("Saved artifact+version: %s v%d tokens=%d source=%s", artifact.id, version.version_num, version.token_count, version.source)
 
-    def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
-        cur = self._conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
+    def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
+        if project_id is not None:
+            cur = self._conn.execute("SELECT * FROM artifacts WHERE id = ? AND project_id = ?", (artifact_id, project_id))
+        else:
+            cur = self._conn.execute("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
         row = cur.fetchone()
         if row is None:
             return None
@@ -200,7 +203,12 @@ class SQLiteStorage(StorageDriver):
         cur = self._conn.execute(f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params)
         return [_artifact_from_row(r) for r in cur.fetchall()]
 
-    def delete_artifact(self, artifact_id: str, soft_delete: bool = True) -> bool:
+    def delete_artifact(self, artifact_id: str, soft_delete: bool = True, project_id: Optional[str] = None) -> bool:
+        if project_id is not None:
+            art = self.get_artifact(artifact_id, project_id=project_id)
+            if art is None:
+                logger.warning("Delete denied: artifact %s not found in project %s", artifact_id, project_id)
+                return False
         if soft_delete:
             with self._write_lock:
                 cur = self._conn.execute("UPDATE artifacts SET is_deleted = 1, updated_at = ? WHERE id = ?",

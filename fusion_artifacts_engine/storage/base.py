@@ -13,7 +13,7 @@ class StorageDriver(ABC):
         ...
 
     @abstractmethod
-    def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
+    def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
         ...
 
     @abstractmethod
@@ -21,7 +21,7 @@ class StorageDriver(ABC):
         ...
 
     @abstractmethod
-    def delete_artifact(self, artifact_id: str, soft_delete: bool = True) -> bool:
+    def delete_artifact(self, artifact_id: str, soft_delete: bool = True, project_id: Optional[str] = None) -> bool:
         ...
 
     @abstractmethod
