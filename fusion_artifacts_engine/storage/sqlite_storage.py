@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(type);
-CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind);
-CREATE INDEX IF NOT EXISTS idx_artifacts_project_id ON artifacts(project_id);
+-- idx_artifacts_kind / idx_artifacts_project_id moved to _migrate_*_column():
+-- on a pre-existing DB those columns are added by ALTER AFTER this script runs,
+-- so creating the indexes here fails with "no such column" (see issue #13).
 
 CREATE TABLE IF NOT EXISTS artifact_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,6 +329,8 @@ class SQLiteStorage(StorageDriver):
             self._conn.executescript("ALTER TABLE artifacts ADD COLUMN kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template'));")
             self._conn.commit()
             logger.info("Migrated: added 'kind' column to artifacts table")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)")
+        self._conn.commit()
 
     def _migrate_source_column(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(artifact_versions)")
@@ -342,9 +345,10 @@ class SQLiteStorage(StorageDriver):
         columns = {row["name"] for row in cur.fetchall()}
         if "project_id" not in columns:
             self._conn.executescript("ALTER TABLE artifacts ADD COLUMN project_id TEXT DEFAULT NULL;")
-            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_project_id ON artifacts(project_id)")
             self._conn.commit()
             logger.info("Migrated: added 'project_id' column to artifacts table")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_project_id ON artifacts(project_id)")
+        self._conn.commit()
 
     def _migrate_metadata_column(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(artifacts)")
