@@ -139,6 +139,13 @@ curl -X POST http://127.0.0.1:8892 \
 |---|---|---|
 | `artifact.move_to_project_kb` | artifact_id | Move artifact to project knowledge base |
 
+### External Module Methods
+
+| Method | Params | Description |
+|---|---|---|
+| `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | Create artifact from external module (e.g. fusion-mlx) |
+| `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | List artifacts by source module |
+
 ### Artifact Kinds
 
 Semantic classification matching how users think about artifacts:
@@ -280,12 +287,21 @@ RESTful CRUD API alongside JSON-RPC:
 
 **GET** endpoints:
 ```bash
-GET /api/v1/artifacts          # List artifacts
+GET /api/v1/artifacts          # List artifacts (supports query params: created_by, since, until, kind, type, sort, page, page_size)
+GET /api/v1/external?source_module=fusion-mlx&workspace_id=ws-001  # List artifacts by source module
 GET /api/v1/folders            # List folders
 GET /api/v1/tags               # List tags
 GET /api/v1/events             # List events
 GET /api/v1/recycle            # List recycle bin
 ```
+
+Query parameters for `GET /api/v1/artifacts`:
+- `created_by` — filter by owner_user_id
+- `since` / `until` — filter by created_at timestamp (Unix epoch)
+- `kind` — filter by artifact kind (app/code/document/game/tool/template)
+- `type` — filter by artifact type (code/markdown/html/react/data)
+- `sort` — sort field (updated_at, created_at, name, starred)
+- `page` / `page_size` — pagination
 
 **POST** endpoints (action-based):
 ```bash
@@ -302,15 +318,23 @@ POST /api/v1/tags              # {"artifact_id": "...", "tag_name": "..."}
 POST /api/v1/folders           # {"name": "...", "parent_id": "..."}
 POST /api/v1/events            # {"artifact_id": "...", "event_type": "..."}
 POST /api/v1/purge             # {}
+POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id": "ws-001", "name": "...", "type": "code", "content": "..."}
 ```
 
 ### SSE Events Stream (P4)
 
-Server-Sent Events endpoint for real-time artifact change notifications:
+Server-Sent Events endpoint for real-time push-based artifact change notifications:
 ```bash
 curl -N http://127.0.0.1:8892/api/v1/events/stream
 ```
 Returns `text/event-stream` with heartbeat every 30 seconds (configurable via `sse.heartbeat_interval`).
+
+Events are pushed in real-time via an internal EventBus — no polling required. Supported event types: `artifact.created`, `artifact.updated`, `artifact.deleted`.
+
+Filter by artifact kind:
+```bash
+curl -N "http://127.0.0.1:8892/api/v1/events/stream?kind=app"
+```
 
 ### Token Count API
 
@@ -413,6 +437,7 @@ When the model calls `create_artifact`, the engine returns a `[Artifact: ...]` r
 - Ownership: `owner_user_id`, `ownership_type` (personal/team/project)
 - Lifecycle: `is_deleted`, `deleted_at` (soft delete), `is_starred`, `is_pinned`, `pinned_chat_id`
 - Organization: `folder_id`, `share_id`, `in_project_kb`, `content_hash`, `active_in_session`
+- External source: `source_module`, `workspace_id`, `workflow_run_id`
 
 **ArtifactVersion** — versioned content with snapshot support:
 - Snapshot: `snapshot_type` (auto/named), `snapshot_label`, `author`, `parent_version`

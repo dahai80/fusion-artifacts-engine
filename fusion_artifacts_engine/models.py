@@ -47,6 +47,9 @@ class Artifact(BaseModel):
     deleted_at: Optional[str] = None
     content_hash: Optional[str] = None
     active_in_session: Optional[str] = None
+    source_module: Optional[str] = None
+    workspace_id: Optional[str] = None
+    workflow_run_id: Optional[str] = None
 
 
 class ArtifactVersion(BaseModel):

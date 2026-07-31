@@ -3,6 +3,7 @@ from typing import Any
 from pathlib import Path
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.errors import RpcError
+from fusion_artifacts_engine.rpc.event_bus import event_bus
 from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,9 @@ class RPCHandler:
             "artifact.list_events": self._list_events,
             # P3: project KB
             "artifact.move_to_project_kb": self._move_to_project_kb,
+            # external module
+            "artifact.create_external": self._create_external,
+            "artifact.list_by_source": self._list_by_source,
             "ping": self._ping,
         }
 
@@ -96,6 +100,7 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
+        event_bus.publish("artifact.created", {"artifact_id": artifact.id, "kind": artifact.kind})
         return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
 
     async def _get(self, params: dict) -> dict:
@@ -129,6 +134,7 @@ class RPCHandler:
 
     async def _delete(self, params: dict) -> dict:
         ok = self.engine.delete_artifact(params["artifact_id"], params.get("soft_delete", True), project_id=params.get("project_id"))
+        event_bus.publish("artifact.deleted", {"artifact_id": params["artifact_id"]})
         return {"ok": ok}
 
     async def _update(self, params: dict) -> dict:
@@ -141,6 +147,7 @@ class RPCHandler:
             params.get("change_log", ""), source=source,
             expected_content_hash=params.get("expected_content_hash"),
         )
+        event_bus.publish("artifact.updated", {"artifact_id": params["artifact_id"]})
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
@@ -453,3 +460,37 @@ class RPCHandler:
     async def _move_to_project_kb(self, params: dict) -> dict:
         ok = self.engine.move_to_project_kb(params["artifact_id"], params["project_id"])
         return {"ok": ok}
+
+    # ── external module ─────────────────────────────────────────
+
+    async def _create_external(self, params: dict) -> dict:
+        valid_types = ("code", "markdown", "html", "react", "data")
+        artifact_type = params.get("type", "code")
+        if artifact_type not in valid_types:
+            raise ValueError(f"Invalid type, must be one of {valid_types}")
+        valid_kinds = ("app", "code", "document", "game", "tool", "template")
+        kind = params.get("kind")
+        if kind is not None and kind not in valid_kinds:
+            raise ValueError(f"Invalid kind, must be one of {valid_kinds}")
+        artifact, version, ref_text = await self.engine.create_external_artifact(
+            source_module=params["source_module"],
+            workspace_id=params["workspace_id"],
+            name=params["name"],
+            artifact_type=artifact_type,
+            content=params["content"],
+            workflow_run_id=params.get("workflow_run_id"),
+            summary=params.get("summary", ""),
+            kind=kind,
+            project_id=params.get("project_id"),
+            metadata=params.get("metadata"),
+        )
+        event_bus.publish("artifact.created", {"artifact_id": artifact.id, "source_module": artifact.source_module, "kind": artifact.kind})
+        return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
+
+    async def _list_by_source(self, params: dict) -> dict:
+        artifacts = self.engine.list_by_source(
+            source_module=params["source_module"],
+            workspace_id=params.get("workspace_id"),
+            workflow_run_id=params.get("workflow_run_id"),
+        )
+        return {"artifacts": [a.model_dump() for a in artifacts]}

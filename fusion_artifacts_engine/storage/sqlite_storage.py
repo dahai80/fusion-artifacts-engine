@@ -136,6 +136,9 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         deleted_at=row["deleted_at"] if "deleted_at" in keys else None,
         content_hash=row["content_hash"] if "content_hash" in keys else None,
         active_in_session=row["active_in_session"] if "active_in_session" in keys else None,
+        source_module=row["source_module"] if "source_module" in keys else None,
+        workspace_id=row["workspace_id"] if "workspace_id" in keys else None,
+        workflow_run_id=row["workflow_run_id"] if "workflow_run_id" in keys else None,
     )
 
 
@@ -232,6 +235,7 @@ class SQLiteStorage(StorageDriver):
         self._migrate_share_column()
         self._migrate_kb_column()
         self._migrate_snapshot_columns()
+        self._migrate_source_module_columns()
         logger.info("SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir)
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
@@ -264,8 +268,9 @@ class SQLiteStorage(StorageDriver):
                     current_version, summary, created_at, updated_at, is_deleted,
                     owner_user_id, ownership_type, is_starred, is_pinned,
                     pinned_chat_id, share_id, in_project_kb, folder_id,
-                    deleted_at, content_hash, active_in_session)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    deleted_at, content_hash, active_in_session,
+                    source_module, workspace_id, workflow_run_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
@@ -287,7 +292,10 @@ class SQLiteStorage(StorageDriver):
                      folder_id=excluded.folder_id,
                      deleted_at=excluded.deleted_at,
                      content_hash=excluded.content_hash,
-                     active_in_session=excluded.active_in_session""",
+                     active_in_session=excluded.active_in_session,
+                     source_module=excluded.source_module,
+                     workspace_id=excluded.workspace_id,
+                     workflow_run_id=excluded.workflow_run_id""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
                  artifact.kind, artifact.project_id, meta_json, artifact.current_version,
                  artifact.summary, artifact.created_at, artifact.updated_at,
@@ -295,7 +303,8 @@ class SQLiteStorage(StorageDriver):
                  artifact.ownership_type, int(artifact.is_starred), int(artifact.is_pinned),
                  artifact.pinned_chat_id, artifact.share_id, int(artifact.in_project_kb),
                  artifact.folder_id, artifact.deleted_at, artifact.content_hash,
-                 artifact.active_in_session),
+                 artifact.active_in_session,
+                 artifact.source_module, artifact.workspace_id, artifact.workflow_run_id),
             )
             self._conn.commit()
         logger.info("Saved artifact: %s name=%s kind=%s", artifact.id, artifact.name, artifact.kind)
@@ -309,8 +318,9 @@ class SQLiteStorage(StorageDriver):
                     current_version, summary, created_at, updated_at, is_deleted,
                     owner_user_id, ownership_type, is_starred, is_pinned,
                     pinned_chat_id, share_id, in_project_kb, folder_id,
-                    deleted_at, content_hash, active_in_session)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    deleted_at, content_hash, active_in_session,
+                    source_module, workspace_id, workflow_run_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      session_id=excluded.session_id,
                      name=excluded.name,
@@ -332,7 +342,10 @@ class SQLiteStorage(StorageDriver):
                      folder_id=excluded.folder_id,
                      deleted_at=excluded.deleted_at,
                      content_hash=excluded.content_hash,
-                     active_in_session=excluded.active_in_session""",
+                     active_in_session=excluded.active_in_session,
+                     source_module=excluded.source_module,
+                     workspace_id=excluded.workspace_id,
+                     workflow_run_id=excluded.workflow_run_id""",
                 (artifact.id, artifact.session_id, artifact.name, artifact.type,
                  artifact.kind, artifact.project_id, meta_json, artifact.current_version,
                  artifact.summary, artifact.created_at, artifact.updated_at,
@@ -340,7 +353,8 @@ class SQLiteStorage(StorageDriver):
                  artifact.ownership_type, int(artifact.is_starred), int(artifact.is_pinned),
                  artifact.pinned_chat_id, artifact.share_id, int(artifact.in_project_kb),
                  artifact.folder_id, artifact.deleted_at, artifact.content_hash,
-                 artifact.active_in_session),
+                 artifact.active_in_session,
+                 artifact.source_module, artifact.workspace_id, artifact.workflow_run_id),
             )
             content = version.content
             content_path = None
@@ -439,6 +453,18 @@ class SQLiteStorage(StorageDriver):
             if name_search:
                 conditions.append("name LIKE ?")
                 params.append(f"%{name_search}%")
+            owner_user_id = filters.get("owner_user_id")
+            if owner_user_id:
+                conditions.append("owner_user_id = ?")
+                params.append(owner_user_id)
+            since = filters.get("since")
+            if since is not None:
+                conditions.append("created_at >= ?")
+                params.append(float(since))
+            until = filters.get("until")
+            if until is not None:
+                conditions.append("created_at <= ?")
+                params.append(float(until))
         where = " AND ".join(conditions)
         count_cur = self._conn.execute(f"SELECT COUNT(*) FROM artifacts WHERE {where}", params)
         total = count_cur.fetchone()[0]
@@ -1060,6 +1086,39 @@ class SQLiteStorage(StorageDriver):
             self._conn.executescript(" ".join(new_cols))
             self._conn.commit()
             logger.info("Migrated: added snapshot columns to artifact_versions (%d cols)", len(new_cols))
+
+    def _migrate_source_module_columns(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifacts)")
+        columns = {row["name"] for row in cur.fetchall()}
+        new_cols = []
+        if "source_module" not in columns:
+            new_cols.append("ALTER TABLE artifacts ADD COLUMN source_module TEXT DEFAULT NULL;")
+        if "workspace_id" not in columns:
+            new_cols.append("ALTER TABLE artifacts ADD COLUMN workspace_id TEXT DEFAULT NULL;")
+        if "workflow_run_id" not in columns:
+            new_cols.append("ALTER TABLE artifacts ADD COLUMN workflow_run_id TEXT DEFAULT NULL;")
+        if new_cols:
+            self._conn.executescript(" ".join(new_cols))
+            self._conn.commit()
+            logger.info("Migrated: added source_module columns (%d cols)", len(new_cols))
+
+    def list_by_source(
+        self,
+        source_module: str,
+        workspace_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+    ) -> list[Artifact]:
+        conditions = ["is_deleted = 0", "source_module = ?"]
+        params: list = [source_module]
+        if workspace_id:
+            conditions.append("workspace_id = ?")
+            params.append(workspace_id)
+        if workflow_run_id:
+            conditions.append("workflow_run_id = ?")
+            params.append(workflow_run_id)
+        where = " AND ".join(conditions)
+        cur = self._conn.execute(f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params)
+        return [Artifact(**dict(row)) for row in cur.fetchall()]
 
     def close(self) -> None:
         self._conn.close()

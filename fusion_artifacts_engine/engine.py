@@ -103,6 +103,67 @@ class ArtifactEngine:
         logger.info("Created artifact: %s name=%s tokens=%s", artifact_id, name, token_count)
         return artifact, version, ref_text
 
+    async def create_external_artifact(
+        self,
+        source_module: str,
+        workspace_id: str,
+        name: str,
+        artifact_type: str,
+        content: str,
+        workflow_run_id: Optional[str] = None,
+        summary: str = "",
+        kind: Optional[str] = None,
+        project_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> tuple[Artifact, ArtifactVersion, str]:
+        session_id = f"ext_{source_module}_{workspace_id}"
+        artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
+        now = time.time()
+        if not summary:
+            summary = _truncate_summary(content)
+        if kind is None:
+            kind = infer_kind(artifact_type)
+        artifact = Artifact(
+            id=artifact_id,
+            session_id=session_id,
+            name=name,
+            type=artifact_type,
+            kind=kind,
+            project_id=project_id,
+            metadata=metadata,
+            current_version=1,
+            summary=summary,
+            created_at=now,
+            updated_at=now,
+            source_module=source_module,
+            workspace_id=workspace_id,
+            workflow_run_id=workflow_run_id,
+        )
+        token_count = self.token_counter.count_sync(content)
+        version = ArtifactVersion(
+            artifact_id=artifact_id,
+            version_num=1,
+            content=content,
+            token_count=token_count,
+            change_log="Created by external module",
+            created_at=now,
+        )
+        self.storage.save_artifact_and_version(artifact, version)
+        if project_id:
+            self.storage.move_to_project_kb(artifact_id, project_id)
+            logger.info("Auto-archived external artifact %s to project %s", artifact_id, project_id)
+        ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, token_count, summary)
+        logger.info("Created external artifact: %s source=%s ws=%s tokens=%s", artifact_id, source_module, workspace_id, token_count)
+        return artifact, version, ref_text
+
+    def list_by_source(
+        self,
+        source_module: str,
+        workspace_id: Optional[str] = None,
+        workflow_run_id: Optional[str] = None,
+    ) -> list[Artifact]:
+        return self.storage.list_by_source(source_module, workspace_id, workflow_run_id)
+
     def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
         return self.storage.get_artifact(artifact_id, project_id)
 

@@ -5,11 +5,14 @@ import queue
 import logging
 import asyncio
 import threading
+import time as _t
+from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 from fusion_artifacts_engine.rpc.errors import RpcError
+from fusion_artifacts_engine.rpc.event_bus import event_bus
 from fusion_artifacts_engine.engine import ArtifactEngine
 
 logger = logging.getLogger(__name__)
@@ -240,7 +243,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not self._is_authed():
             self._send_rest_response(401, {"error": "Unauthorized"})
             return
-        path = self.path[len("/api/v1/"):]
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        path = parsed.path[len("/api/v1/"):]
         parts = path.strip("/").split("/")
         engine = self.server._rpc_handler.engine
         try:
@@ -266,8 +271,44 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 else:
                     self._send_rest_response(404, {"error": "Not found"})
             elif parts[0] == "artifacts":
-                artifacts, total = engine.list_all_artifacts()
+                filters = {}
+                created_by = qs.get("created_by", [None])[0]
+                since = qs.get("since", [None])[0]
+                until = qs.get("until", [None])[0]
+                kind = qs.get("kind", [None])[0]
+                type_ = qs.get("type", [None])[0]
+                if created_by:
+                    filters["owner_user_id"] = created_by
+                if since:
+                    try:
+                        filters["since"] = float(since)
+                    except ValueError:
+                        pass
+                if until:
+                    try:
+                        filters["until"] = float(until)
+                    except ValueError:
+                        pass
+                if kind:
+                    filters["kind"] = kind
+                if type_:
+                    filters["type"] = type_
+                sort = qs.get("sort", ["updated_at"])[0]
+                page = int(qs.get("page", ["1"])[0])
+                page_size = int(qs.get("page_size", ["20"])[0])
+                artifacts, total = engine.list_all_artifacts(
+                    filters=filters or None, sort=sort, page=page, page_size=page_size,
+                )
                 self._send_rest_response(200, {"artifacts": [a.model_dump() for a in artifacts], "total": total})
+            elif parts[0] == "external":
+                source_module = qs.get("source_module", [None])[0]
+                if not source_module:
+                    self._send_rest_response(400, {"error": "source_module query param required"})
+                    return
+                workspace_id = qs.get("workspace_id", [None])[0]
+                workflow_run_id = qs.get("workflow_run_id", [None])[0]
+                artifacts = engine.list_by_source(source_module, workspace_id=workspace_id, workflow_run_id=workflow_run_id)
+                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in artifacts]})
             elif parts[0] == "folders":
                 folders = engine.list_folders()
                 self._send_rest_response(200, {"folders": [f.model_dump() for f in folders]})
@@ -354,10 +395,26 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     data["event_type"], artifact_id=data.get("artifact_id"),
                     session_id=data.get("session_id"), payload=data.get("payload"),
                 )
+                event_bus.publish(event.event_type, {"artifact_id": event.artifact_id, "session_id": event.session_id, "payload": event.payload})
                 self._send_rest_response(200, {"event": event.model_dump()})
             elif parts[0] == "purge":
                 count = engine.purge_expired()
                 self._send_rest_response(200, {"purged": count})
+            elif parts[0] == "external" and len(parts) >= 2 and parts[1] == "create":
+                artifact, version, ref_text = self._run_async(engine.create_external_artifact(
+                    source_module=data["source_module"],
+                    workspace_id=data["workspace_id"],
+                    name=data["name"],
+                    artifact_type=data.get("type", "code"),
+                    content=data["content"],
+                    workflow_run_id=data.get("workflow_run_id"),
+                    summary=data.get("summary", ""),
+                    kind=data.get("kind"),
+                    project_id=data.get("project_id"),
+                    metadata=data.get("metadata"),
+                ))
+                event_bus.publish("artifact.created", {"artifact_id": artifact.id, "source_module": artifact.source_module})
+                self._send_rest_response(200, {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text})
             else:
                 self._send_rest_response(404, {"error": "Not found"})
         except ValueError as e:
@@ -366,12 +423,15 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             logger.error("REST v1 POST error: %s", e, exc_info=True)
             self._send_rest_response(500, {"error": "Internal error"})
 
-    # ── P4: SSE ────────────────────────────────────────────────
+    # ── P4: SSE (push-based via EventBus) ─────────────────────
 
     def _handle_sse(self) -> None:
         if not self._is_authed():
             self._send_rest_response(401, {"error": "Unauthorized"})
             return
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        kind_filter = qs.get("kind", [None])[0]
         engine = self.server._rpc_handler.engine
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -379,28 +439,35 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
-        heartbeat_interval = getattr(engine.config, "sse_heartbeat_interval", 30)
+        sub = event_bus.subscribe()
         watcher_id = f"sse_{id(self)}_{threading.get_ident()}"
-        logger.info("SSE connected: watcher=%s", watcher_id)
+        logger.info("SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter)
         try:
             self.wfile.write(b": connected\n\n")
             self.wfile.flush()
-            import time as _t
+            heartbeat_interval = getattr(engine.config, "sse_heartbeat_interval", 30)
             while True:
                 try:
-                    events, _ = engine.list_events(since_ts=None, page=1, page_size=10)
-                    for evt in events:
-                        data = json.dumps(evt.model_dump())
-                        self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode("utf-8"))
-                    self.wfile.write(b": heartbeat\n\n")
+                    try:
+                        event = sub.get(timeout=heartbeat_interval)
+                    except queue.Empty:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        continue
+                    if kind_filter:
+                        event_kind = event.get("payload", {}).get("kind") if isinstance(event.get("payload"), dict) else None
+                        if event_kind and event_kind != kind_filter:
+                            continue
+                    data = json.dumps(event)
+                    self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode("utf-8"))
                     self.wfile.flush()
-                    _t.sleep(heartbeat_interval)
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 except Exception as e:
                     logger.error("SSE loop error: %s", e)
                     break
         finally:
+            event_bus.unsubscribe(sub)
             logger.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _send_rest_response(self, code: int, data: dict) -> None:
