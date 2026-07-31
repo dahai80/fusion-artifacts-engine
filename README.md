@@ -55,6 +55,8 @@ curl -X POST http://127.0.0.1:8892 \
 | `artifact.import_code` | session_id, code, language?, name?, metadata? | Create artifact from code |
 | `artifact.watch` | artifact_id, action, watcher_id?, since_version? | Watch for changes |
 | `artifact.sync` | artifact_id, code_path, direction | Bidirectional code sync |
+| `artifact.render` | session_id, content, type?, viewport?, project_id? | Detect renderable content, create artifact |
+| `artifact.interact` | artifact_id, action, payload, session_id? | Canvas interaction → version update |
 | `ping` | — | Health check |
 
 ### Artifact Kinds
@@ -144,6 +146,34 @@ curl -X POST http://127.0.0.1:8892 \
 ```
 
 Metadata is stored as JSON in SQLite and queried via `json_extract()`. You can combine `metadata_filter` with `project_id` for scoped queries.
+
+### Render API
+
+REST endpoints for fusion-studio canvas integration. The engine detects renderable content types (HTML, SVG, Mermaid, React) and returns a URL for iframe embedding.
+
+**Render** — detect + create artifact for canvas:
+```bash
+curl -X POST http://127.0.0.1:8892/api/artifact/render \
+  -H "Content-Type: application/json" \
+  -d '{"content":"<!DOCTYPE html><html><body>Hello</body></html>","session_id":"s1","type":"auto","viewport":{"width":800,"height":600}}'
+```
+Response: `{"renderable": true, "artifact_id": "art_xxx", "artifact_type": "html", "render_url": "/api/artifact/content/art_xxx", "viewport": {"width": 800, "height": 600}}`
+
+Supported `type` values: `"auto"` (detect), `"html"`, `"svg"`, `"mermaid"`, `"react"`. SVG content is wrapped in an HTML page; Mermaid content is wrapped with the Mermaid.js runtime.
+
+**Get Content** — serve artifact content for iframe:
+```bash
+curl http://127.0.0.1:8892/api/artifact/content/art_xxx
+```
+Returns raw content with appropriate `Content-Type` header.
+
+**Interact** — bidirectional canvas → chat context:
+```bash
+curl -X POST http://127.0.0.1:8892/api/artifact/interact \
+  -H "Content-Type: application/json" \
+  -d '{"artifact_id":"art_xxx","action":"user_edit","payload":{"content":"<!DOCTYPE html><html><body>Updated</body></html>"}}'
+```
+Actions: `user_click`, `user_edit`, `state_change`. Creates a new artifact version and returns a `ref_text` for chat context injection.
 
 ### Token Count API
 

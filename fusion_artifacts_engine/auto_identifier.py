@@ -1,7 +1,16 @@
+import re
 import logging
 from fusion_artifacts_engine.models import ArtifactType
 
 logger = logging.getLogger(__name__)
+
+_RENDERABLE_SVG_RE = re.compile(r"^\s*<svg[\s>]", re.IGNORECASE)
+_RENDERABLE_MERMAID_RE = re.compile(
+    r"^\s*(graph\s+[A-Z]{2}|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|flowchart)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_RENDERABLE_REACT_RE = re.compile(r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function|jsx|tsx)", re.IGNORECASE)
+_RENDERABLE_HTML_RE = re.compile(r"^\s*(<!DOCTYPE\s+html|<html[\s>])", re.IGNORECASE)
 
 _CODE_LANGS = {
     "python", "py", "javascript", "js", "typescript", "ts", "rust", "go",
@@ -50,6 +59,28 @@ def detect_artifact_type(name: str, content: str = "") -> ArtifactType:
     if content.strip().startswith("# ") or content.strip().startswith("## "):
         return "markdown"
     return "code"
+
+
+def detect_renderable_type(content: str, name: str = "") -> str | None:
+    if name:
+        name_lower = name.lower()
+        if name_lower.endswith(".svg"):
+            return "svg"
+        if name_lower.endswith((".jsx", ".tsx")):
+            return "react"
+        if name_lower.endswith((".html", ".htm")):
+            return "html"
+        if name_lower.endswith(".mermaid") or name_lower.endswith(".mmd"):
+            return "mermaid"
+    if _RENDERABLE_SVG_RE.search(content):
+        return "svg"
+    if _RENDERABLE_MERMAID_RE.search(content):
+        return "mermaid"
+    if _RENDERABLE_REACT_RE.search(content):
+        return "react"
+    if _RENDERABLE_HTML_RE.search(content):
+        return "html"
+    return None
 
 
 def extract_name_hint(content: str, lang_hint: str = "") -> str:
