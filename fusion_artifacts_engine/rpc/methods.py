@@ -2,6 +2,7 @@ import logging
 from typing import Any
 from pathlib import Path
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.auto_identifier import should_create_artifact, detect_artifact_type, extract_name_hint
 from fusion_artifacts_engine.rpc.errors import RpcError
 from fusion_artifacts_engine.utils import get_package_version
 
@@ -39,6 +40,7 @@ class RPCHandler:
             "artifact.import_code": self._import_code,
             "artifact.watch": self._watch,
             "artifact.sync": self._sync,
+            "artifact.render": self._render,
             "ping": self._ping,
         }
 
@@ -239,3 +241,38 @@ class RPCHandler:
 
     async def _ping(self, params: dict) -> dict:
         return {"pong": True, "version": get_package_version()}
+
+    async def _render(self, params: dict) -> dict:
+        content = params.get("content", "")
+        session_id = params.get("session_id", "")
+        lang_hint = params.get("lang_hint", "")
+        project_id = params.get("project_id")
+        if not content:
+            return {"created": False, "reason": "empty_content"}
+        if not should_create_artifact(content, content_type="text"):
+            return {"created": False, "reason": "below_threshold"}
+        name = extract_name_hint(content, lang_hint) if lang_hint else extract_name_hint(content)
+        artifact_type = detect_artifact_type(name, content)
+        renderable_types = {"html", "react", "markdown"}
+        is_renderable = artifact_type in renderable_types
+        try:
+            artifact, version, ref_text = await self.engine.create_artifact(
+                session_id=session_id,
+                name=name,
+                artifact_type=artifact_type,
+                content=content,
+                summary=content[:200].replace("\n", " ").strip(),
+                change_log="Created via artifact.render",
+                project_id=project_id,
+            )
+            logger.info("artifact.render: created %s type=%s renderable=%s", artifact.id, artifact_type, is_renderable)
+            return {
+                "created": True,
+                "artifact": artifact.model_dump(),
+                "render_type": artifact_type if is_renderable else None,
+                "content": content,
+                "ref_text": ref_text,
+            }
+        except Exception as e:
+            logger.error("artifact.render failed: %s", e, exc_info=True)
+            return {"created": False, "reason": str(e)}
