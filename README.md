@@ -276,6 +276,15 @@ Storage: SQLite + Filesystem
 Inference: fusion-mlx (local) │ Cloud APIs
 ```
 
+## Roadmap
+
+The refactoring blueprint to make fusion-artifacts-engine competitive with Claude Artifacts is documented in [fusion-artifact-enhance-ar.md](./fusion-artifact-enhance-ar.md) (AR = Architecture Refactor). It covers:
+
+- Competitive gap matrix vs Claude Artifacts (追平 9 项 / 超越 5 项 / 二期 1 项)
+- Data model expansion, new engine ops (rename/star/pin/duplicate/snapshot/share/recycle/migrate-KB), rendering hardening (CSP sandbox, Mermaid/Markdown localization), ```artifact fence parsing, SSE event bus, REST `/api/v1` parity, optimistic locking
+- 4-phase implementation plan (P1-P4)
+- Cross-repo issue/PR proposals for fusion-studio / fusion-agent-studio / fusion-projects / fusion-mlx / fusion-cowork (GUI designs in md ASCII mockups)
+
 ## Running Tests
 
 ```bash
