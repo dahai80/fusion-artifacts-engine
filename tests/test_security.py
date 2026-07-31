@@ -43,6 +43,7 @@ def test_rpc_unknown_method_returns_32601(tmp_path):
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
         server_port=port,
+        allow_no_auth=True,
     )
     eng = ArtifactEngine(config)
     server = ArtifactRPCServer(eng, port=port)
@@ -72,6 +73,7 @@ def test_rpc_invalid_json_returns_32700(tmp_path):
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
         server_port=port,
+        allow_no_auth=True,
     )
     eng = ArtifactEngine(config)
     server = ArtifactRPCServer(eng, port=port)
@@ -101,6 +103,7 @@ def test_rpc_invalid_request_returns_32600(tmp_path):
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
         server_port=port,
+        allow_no_auth=True,
     )
     eng = ArtifactEngine(config)
     server = ArtifactRPCServer(eng, port=port)

@@ -41,6 +41,39 @@ class RPCHandler:
             "artifact.sync": self._sync,
             "artifact.render": self._render,
             "artifact.interact": self._interact,
+            # P1: lifecycle + global repo
+            "artifact.rename": self._rename,
+            "artifact.star": self._star,
+            "artifact.pin": self._pin,
+            "artifact.duplicate": self._duplicate,
+            "artifact.list_all": self._list_all,
+            # P1: recycle bin
+            "artifact.list_recycle": self._list_recycle,
+            "artifact.restore": self._restore,
+            "artifact.purge_expired": self._purge_expired,
+            # P2: snapshots
+            "artifact.create_snapshot": self._create_snapshot,
+            "artifact.list_snapshots": self._list_snapshots,
+            # P1: share
+            "artifact.create_share": self._create_share,
+            "artifact.get_shared": self._get_shared,
+            "artifact.revoke_share": self._revoke_share,
+            # P2: folders
+            "artifact.create_folder": self._create_folder,
+            "artifact.list_folders": self._list_folders,
+            "artifact.rename_folder": self._rename_folder,
+            "artifact.delete_folder": self._delete_folder,
+            "artifact.move_to_folder": self._move_to_folder,
+            # P4: tags
+            "artifact.add_tag": self._add_tag,
+            "artifact.remove_tag": self._remove_tag,
+            "artifact.list_tags": self._list_tags,
+            "artifact.list_artifact_tags": self._list_artifact_tags,
+            # P4: events
+            "artifact.emit_event": self._emit_event,
+            "artifact.list_events": self._list_events,
+            # P3: project KB
+            "artifact.move_to_project_kb": self._move_to_project_kb,
             "ping": self._ping,
         }
 
@@ -106,6 +139,7 @@ class RPCHandler:
         version, ref_text = await self.engine.create_version(
             params["artifact_id"], params["content"],
             params.get("change_log", ""), source=source,
+            expected_content_hash=params.get("expected_content_hash"),
         )
         return {"version": version.model_dump(), "ref_text": ref_text}
 
@@ -260,3 +294,162 @@ class RPCHandler:
             session_id=params.get("session_id", ""),
         )
         return result
+
+    # ── P1: lifecycle + global repo ────────────────────────────
+
+    async def _rename(self, params: dict) -> dict:
+        ok = self.engine.rename_artifact(params["artifact_id"], params["new_name"])
+        return {"ok": ok}
+
+    async def _star(self, params: dict) -> dict:
+        ok = self.engine.star_artifact(params["artifact_id"], params.get("starred", True))
+        return {"ok": ok}
+
+    async def _pin(self, params: dict) -> dict:
+        ok = self.engine.pin_artifact(
+            params["artifact_id"],
+            chat_id=params.get("chat_id"),
+            pinned=params.get("pinned", True),
+        )
+        return {"ok": ok}
+
+    async def _duplicate(self, params: dict) -> dict:
+        dup = self.engine.duplicate_artifact(params["artifact_id"], params.get("new_name"))
+        if dup is None:
+            raise ValueError("Failed to duplicate artifact")
+        return {"artifact": dup.model_dump()}
+
+    async def _list_all(self, params: dict) -> dict:
+        artifacts, total = self.engine.list_all_artifacts(
+            filters=params.get("filters"),
+            sort=params.get("sort", "updated_at"),
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 20),
+        )
+        return {"artifacts": [a.model_dump() for a in artifacts], "total": total}
+
+    # ── P1: recycle bin ────────────────────────────────────────
+
+    async def _list_recycle(self, params: dict) -> dict:
+        artifacts, total = self.engine.list_recycle(
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 20),
+        )
+        return {"artifacts": [a.model_dump() for a in artifacts], "total": total}
+
+    async def _restore(self, params: dict) -> dict:
+        ok = self.engine.restore_artifact(params["artifact_id"])
+        return {"ok": ok}
+
+    async def _purge_expired(self, params: dict) -> dict:
+        count = self.engine.purge_expired()
+        return {"purged": count}
+
+    # ── P2: snapshots ──────────────────────────────────────────
+
+    async def _create_snapshot(self, params: dict) -> dict:
+        snapshot = await self.engine.create_snapshot(
+            params["artifact_id"],
+            label=params.get("label"),
+            author=params.get("author"),
+        )
+        return {"version": snapshot.model_dump()}
+
+    async def _list_snapshots(self, params: dict) -> dict:
+        snapshots = self.engine.list_snapshots(params["artifact_id"])
+        return {"snapshots": [s.model_dump() for s in snapshots]}
+
+    # ── P1: share ──────────────────────────────────────────────
+
+    async def _create_share(self, params: dict) -> dict:
+        share = self.engine.create_share(
+            params["artifact_id"],
+            created_by=params.get("created_by"),
+            expires_at=params.get("expires_at"),
+        )
+        return {"share": share.model_dump()}
+
+    async def _get_shared(self, params: dict) -> dict:
+        result = self.engine.get_shared_artifact(params["share_id"])
+        if result is None:
+            raise ValueError("Shared artifact not found or access denied")
+        return result
+
+    async def _revoke_share(self, params: dict) -> dict:
+        ok = self.engine.revoke_share(params["share_id"])
+        return {"ok": ok}
+
+    # ── P2: folders ────────────────────────────────────────────
+
+    async def _create_folder(self, params: dict) -> dict:
+        folder = self.engine.create_folder(
+            params["name"],
+            parent_id=params.get("parent_id"),
+            project_id=params.get("project_id"),
+        )
+        return {"folder": folder.model_dump()}
+
+    async def _list_folders(self, params: dict) -> dict:
+        folders = self.engine.list_folders(params.get("project_id"))
+        return {"folders": [f.model_dump() for f in folders]}
+
+    async def _rename_folder(self, params: dict) -> dict:
+        ok = self.engine.rename_folder(params["folder_id"], params["new_name"])
+        return {"ok": ok}
+
+    async def _delete_folder(self, params: dict) -> dict:
+        ok = self.engine.delete_folder(params["folder_id"])
+        return {"ok": ok}
+
+    async def _move_to_folder(self, params: dict) -> dict:
+        ok = self.engine.move_to_folder(params["artifact_id"], params.get("folder_id"))
+        return {"ok": ok}
+
+    # ── P4: tags ───────────────────────────────────────────────
+
+    async def _add_tag(self, params: dict) -> dict:
+        tag = self.engine.add_tag(
+            params["artifact_id"],
+            params["tag_name"],
+            color=params.get("color"),
+        )
+        return {"tag": tag.model_dump()}
+
+    async def _remove_tag(self, params: dict) -> dict:
+        ok = self.engine.remove_tag(params["artifact_id"], params["tag_name"])
+        return {"ok": ok}
+
+    async def _list_tags(self, params: dict) -> dict:
+        tags = self.engine.list_tags()
+        return {"tags": [t.model_dump() for t in tags]}
+
+    async def _list_artifact_tags(self, params: dict) -> dict:
+        tags = self.engine.list_artifact_tags(params["artifact_id"])
+        return {"tags": [t.model_dump() for t in tags]}
+
+    # ── P4: events ─────────────────────────────────────────────
+
+    async def _emit_event(self, params: dict) -> dict:
+        event = self.engine.emit_event(
+            params["event_type"],
+            artifact_id=params.get("artifact_id"),
+            session_id=params.get("session_id"),
+            payload=params.get("payload"),
+        )
+        return {"event": event.model_dump()}
+
+    async def _list_events(self, params: dict) -> dict:
+        events, total = self.engine.list_events(
+            artifact_id=params.get("artifact_id"),
+            session_id=params.get("session_id"),
+            since_ts=params.get("since_ts"),
+            page=params.get("page", 1),
+            page_size=params.get("page_size", 50),
+        )
+        return {"events": [e.model_dump() for e in events], "total": total}
+
+    # ── P3: project KB ─────────────────────────────────────────
+
+    async def _move_to_project_kb(self, params: dict) -> dict:
+        ok = self.engine.move_to_project_kb(params["artifact_id"], params["project_id"])
+        return {"ok": ok}

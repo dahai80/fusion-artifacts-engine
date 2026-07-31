@@ -70,6 +70,16 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     if "id_prefix" in artifact:
         flat["artifact_id_prefix"] = artifact["id_prefix"]
 
+    security = data.get("security", {})
+    if "allow_no_auth" in security:
+        flat["allow_no_auth"] = security["allow_no_auth"]
+    if "recycle_retention_days" in security:
+        flat["recycle_retention_days"] = security["recycle_retention_days"]
+
+    sse = data.get("sse", {})
+    if "heartbeat_interval" in sse:
+        flat["sse_heartbeat_interval"] = sse["heartbeat_interval"]
+
     return flat
 
 
@@ -126,6 +136,9 @@ class ArtifactEngineConfig(BaseModel):
     artifact_id_prefix: str = Field(default="art_")
     server_host: str = Field(default="127.0.0.1")
     server_port: int = Field(default=8892)
+    recycle_retention_days: int = Field(default=7)
+    allow_no_auth: bool = Field(default=False)
+    sse_heartbeat_interval: int = Field(default=30)
 
     @property
     def db_path(self) -> Path:

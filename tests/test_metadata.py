@@ -14,7 +14,7 @@ PORT = 19897
 @pytest.fixture(scope="module")
 def rpc_server():
     tmp = Path(tempfile.mkdtemp())
-    cfg = ArtifactEngineConfig(storage_root=tmp / "artifacts")
+    cfg = ArtifactEngineConfig(storage_root=tmp / "artifacts", allow_no_auth=True)
     engine = ArtifactEngine(cfg)
     server = ArtifactRPCServer(engine, host="127.0.0.1", port=PORT)
     server.start_async()

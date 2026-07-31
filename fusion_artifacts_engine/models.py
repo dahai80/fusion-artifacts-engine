@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 ArtifactType = Literal["code", "markdown", "html", "react", "data"]
 ArtifactKind = Literal["app", "code", "document", "game", "tool", "template"]
+OwnershipType = Literal["free", "project", "cowork"]
+SnapshotType = Literal["auto", "manual", "named"]
 
 _TYPE_TO_KIND: dict[str, str] = {
     "html": "app",
@@ -34,6 +36,17 @@ class Artifact(BaseModel):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
     is_deleted: bool = False
+    owner_user_id: Optional[str] = None
+    ownership_type: str = "free"
+    is_starred: bool = False
+    is_pinned: bool = False
+    pinned_chat_id: Optional[str] = None
+    share_id: Optional[str] = None
+    in_project_kb: bool = False
+    folder_id: Optional[str] = None
+    deleted_at: Optional[str] = None
+    content_hash: Optional[str] = None
+    active_in_session: Optional[str] = None
 
 
 class ArtifactVersion(BaseModel):
@@ -46,6 +59,10 @@ class ArtifactVersion(BaseModel):
     change_log: str = ""
     source: str = "manual"
     created_at: float = Field(default_factory=time.time)
+    snapshot_type: str = "auto"
+    snapshot_label: Optional[str] = None
+    author: Optional[str] = None
+    parent_version: Optional[int] = None
 
 
 class ArtifactRef(BaseModel):
@@ -55,3 +72,37 @@ class ArtifactRef(BaseModel):
     version: str
     token_count: int = 0
     summary: str = ""
+
+
+class ArtifactShare(BaseModel):
+    share_id: str
+    artifact_id: str
+    created_by: Optional[str] = None
+    created_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    revoked: bool = False
+    access_count: int = 0
+    last_access_at: Optional[str] = None
+
+
+class ArtifactFolder(BaseModel):
+    folder_id: str
+    name: str
+    parent_id: Optional[str] = None
+    project_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class ArtifactTag(BaseModel):
+    tag_id: str
+    name: str
+    color: Optional[str] = None
+
+
+class ArtifactEvent(BaseModel):
+    event_id: str
+    artifact_id: Optional[str] = None
+    session_id: Optional[str] = None
+    event_type: str
+    payload: Optional[dict] = None
+    created_at: Optional[str] = None

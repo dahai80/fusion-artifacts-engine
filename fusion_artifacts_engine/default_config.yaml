@@ -1,8 +1,4 @@
 # Default configuration for fusion-artifacts-engine
-# User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
-# Importers/callers: config.py load_config() reads this file
-# Affected API: ArtifactEngineConfig fields populated from this YAML
-# Data schema: YAML with server/storage/mlx/thresholds/artifact sections
 
 server:
   host: "127.0.0.1"
@@ -24,3 +20,10 @@ thresholds:
 
 artifact:
   id_prefix: "art_"
+
+security:
+  allow_no_auth: false
+  recycle_retention_days: 7
+
+sse:
+  heartbeat_interval: 30

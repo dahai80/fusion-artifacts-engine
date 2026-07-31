@@ -89,6 +89,7 @@ def test_rpc_server_ping(tmp_path):
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
         server_port=port,
+        allow_no_auth=True,
     )
     eng = ArtifactEngine(config)
     server = ArtifactRPCServer(eng, port=port)
@@ -120,6 +121,7 @@ def test_rpc_concurrent_requests(tmp_path):
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
         server_port=port,
+        allow_no_auth=True,
     )
     eng = ArtifactEngine(config)
     server = ArtifactRPCServer(eng, port=port)

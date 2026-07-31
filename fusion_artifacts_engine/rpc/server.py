@@ -1,6 +1,7 @@
 import os
 import json
 import hmac
+import queue
 import logging
 import asyncio
 import threading
@@ -17,12 +18,45 @@ _MAX_BODY_SIZE = 10 * 1024 * 1024
 
 _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
+_CSP_HEADER = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none';"
+)
+
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
+
+    def _is_authed(self) -> bool:
+        if not _API_KEY:
+            allow_no_auth = getattr(
+                self.server._rpc_handler.engine.config,
+                "allow_no_auth", False,
+            )
+            if allow_no_auth:
+                return True
+            logger.warning("Auth rejected: no API_KEY configured and allow_no_auth=False")
+            return False
+        api_key = self.headers.get("X-API-Key", "")
+        return hmac.compare_digest(api_key, _API_KEY)
+
+    def _send_auth_denied(self, jsonrpc: bool = True) -> None:
+        if jsonrpc:
+            self._send_response(401, {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Unauthorized"},
+            })
+        else:
+            self._send_rest_response(401, {"error": "Unauthorized"})
 
     def do_POST(self):
         if self.path == "/api/token-count":
@@ -34,15 +68,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path == "/api/artifact/interact":
             self._handle_interact()
             return
-        if _API_KEY:
-            api_key = self.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(api_key, _API_KEY):
-                self._send_response(401, {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32600, "message": "Unauthorized"},
-                })
-                return
+        if self.path.startswith("/api/v1/"):
+            self._handle_rest_v1_post()
+            return
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=True)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -78,12 +109,25 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "error": {"code": -32603, "message": "Internal error"},
             })
 
+    def do_GET(self):
+        if self.path.startswith("/api/v1/events/stream"):
+            self._handle_sse()
+            return
+        if self.path.startswith("/api/v1/"):
+            self._handle_rest_v1_get()
+            return
+        if self.path.startswith("/api/artifact/content/"):
+            self._handle_artifact_content()
+            return
+        if self.path.startswith("/api/share/"):
+            self._handle_shared_content()
+            return
+        self._send_rest_response(404, {"error": "Not found"})
+
     def _handle_token_count(self) -> None:
-        if _API_KEY:
-            api_key = self.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(api_key, _API_KEY):
-                self._send_rest_response(401, {"error": "Unauthorized"})
-                return
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=False)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -104,21 +148,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             logger.error("token-count error: %s", e, exc_info=True)
             self._send_rest_response(500, {"error": "Internal error"})
 
-    def _send_rest_response(self, code: int, data: dict) -> None:
-        body = json.dumps(data).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path.startswith("/api/artifact/content/"):
-            self._handle_artifact_content()
-            return
-        self._send_rest_response(404, {"error": "Not found"})
-
     def _handle_artifact_content(self) -> None:
+        if not self._is_authed():
+            self._send_rest_response(401, {"error": "Unauthorized"})
+            return
         artifact_id = self.path.split("/")[-1]
         engine = self.server._rpc_handler.engine
         result = engine.get_artifact_raw_content(artifact_id)
@@ -129,15 +162,33 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", result["content_type"])
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_shared_content(self) -> None:
+        share_id = self.path.split("/")[-1]
+        engine = self.server._rpc_handler.engine
+        result = engine.get_shared_artifact(share_id)
+        if result is None:
+            self._send_rest_response(404, {"error": "Shared artifact not found or expired"})
+            return
+        content = result.get("content", "")
+        content_type = result.get("content_type", "text/html")
+        body = content.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Security-Policy", _CSP_HEADER)
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 
     def _handle_render(self) -> None:
-        if _API_KEY:
-            api_key = self.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(api_key, _API_KEY):
-                self._send_rest_response(401, {"error": "Unauthorized"})
-                return
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=False)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -159,11 +210,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(500, {"error": "Internal error"})
 
     def _handle_interact(self) -> None:
-        if _API_KEY:
-            api_key = self.headers.get("X-API-Key", "")
-            if not hmac.compare_digest(api_key, _API_KEY):
-                self._send_rest_response(401, {"error": "Unauthorized"})
-                return
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=False)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -184,6 +233,183 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.error("interact error: %s", e, exc_info=True)
             self._send_rest_response(500, {"error": "Internal error"})
+
+    # ── P3: REST /api/v1 ───────────────────────────────────────
+
+    def _handle_rest_v1_get(self) -> None:
+        if not self._is_authed():
+            self._send_rest_response(401, {"error": "Unauthorized"})
+            return
+        path = self.path[len("/api/v1/"):]
+        parts = path.strip("/").split("/")
+        engine = self.server._rpc_handler.engine
+        try:
+            if not parts or parts[0] == "":
+                self._send_rest_response(200, {"api": "v1", "status": "ok"})
+            elif parts[0] == "artifacts" and len(parts) >= 2:
+                artifact_id = parts[1]
+                if len(parts) == 2:
+                    artifact = engine.get_artifact(artifact_id)
+                    if artifact is None:
+                        self._send_rest_response(404, {"error": "Artifact not found"})
+                        return
+                    self._send_rest_response(200, artifact.model_dump())
+                elif len(parts) == 3 and parts[2] == "versions":
+                    versions = engine.list_versions(artifact_id)
+                    self._send_rest_response(200, {"versions": [v.model_dump() for v in versions]})
+                elif len(parts) == 3 and parts[2] == "snapshots":
+                    snapshots = engine.list_snapshots(artifact_id)
+                    self._send_rest_response(200, {"snapshots": [s.model_dump() for s in snapshots]})
+                elif len(parts) == 3 and parts[2] == "tags":
+                    tags = engine.list_artifact_tags(artifact_id)
+                    self._send_rest_response(200, {"tags": [t.model_dump() for t in tags]})
+                else:
+                    self._send_rest_response(404, {"error": "Not found"})
+            elif parts[0] == "artifacts":
+                artifacts, total = engine.list_all_artifacts()
+                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in artifacts], "total": total})
+            elif parts[0] == "folders":
+                folders = engine.list_folders()
+                self._send_rest_response(200, {"folders": [f.model_dump() for f in folders]})
+            elif parts[0] == "tags":
+                tags = engine.list_tags()
+                self._send_rest_response(200, {"tags": [t.model_dump() for t in tags]})
+            elif parts[0] == "events":
+                events, total = engine.list_events()
+                self._send_rest_response(200, {"events": [e.model_dump() for e in events], "total": total})
+            elif parts[0] == "recycle":
+                arts, total = engine.list_recycle()
+                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in arts], "total": total})
+            else:
+                self._send_rest_response(404, {"error": "Not found"})
+        except Exception as e:
+            logger.error("REST v1 GET error: %s", e, exc_info=True)
+            self._send_rest_response(500, {"error": "Internal error"})
+
+    def _handle_rest_v1_post(self) -> None:
+        if not self._is_authed():
+            self._send_rest_response(401, {"error": "Unauthorized"})
+            return
+        path = self.path[len("/api/v1/"):]
+        parts = path.strip("/").split("/")
+        engine = self.server._rpc_handler.engine
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length > _MAX_BODY_SIZE:
+                self._send_rest_response(413, {"error": "Request body too large"})
+                return
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            self._send_rest_response(400, {"error": f"Parse error: {e}"})
+            return
+        try:
+            if parts[0] == "artifacts" and len(parts) >= 2:
+                artifact_id = parts[1]
+                if len(parts) == 2:
+                    action = data.get("action", "")
+                    if action == "rename":
+                        ok = engine.rename_artifact(artifact_id, data["new_name"])
+                        self._send_rest_response(200, {"ok": ok})
+                    elif action == "star":
+                        ok = engine.star_artifact(artifact_id, data.get("starred", True))
+                        self._send_rest_response(200, {"ok": ok})
+                    elif action == "pin":
+                        ok = engine.pin_artifact(artifact_id, data.get("chat_id"), data.get("pinned", True))
+                        self._send_rest_response(200, {"ok": ok})
+                    elif action == "duplicate":
+                        dup = engine.duplicate_artifact(artifact_id, data.get("new_name"))
+                        self._send_rest_response(200, {"artifact": dup.model_dump()} if dup else {"error": "Duplicate failed"})
+                    elif action == "restore":
+                        ok = engine.restore_artifact(artifact_id)
+                        self._send_rest_response(200, {"ok": ok})
+                    elif action == "move_to_kb":
+                        ok = engine.move_to_project_kb(artifact_id, data["project_id"])
+                        self._send_rest_response(200, {"ok": ok})
+                    elif action == "move_to_folder":
+                        ok = engine.move_to_folder(artifact_id, data.get("folder_id"))
+                        self._send_rest_response(200, {"ok": ok})
+                    else:
+                        self._send_rest_response(400, {"error": f"Unknown action: {action}"})
+                elif len(parts) == 3 and parts[2] == "snapshot":
+                    snapshot = self._run_async(engine.create_snapshot(
+                        artifact_id, label=data.get("label"), author=data.get("author"),
+                    ))
+                    self._send_rest_response(200, {"version": snapshot.model_dump()})
+                elif len(parts) == 3 and parts[2] == "share":
+                    share = engine.create_share(
+                        artifact_id, created_by=data.get("created_by"), expires_at=data.get("expires_at"),
+                    )
+                    self._send_rest_response(200, {"share": share.model_dump()})
+                elif len(parts) == 3 and parts[2] == "tags":
+                    tag = engine.add_tag(artifact_id, data["tag_name"], color=data.get("color"))
+                    self._send_rest_response(200, {"tag": tag.model_dump()})
+                else:
+                    self._send_rest_response(404, {"error": "Not found"})
+            elif parts[0] == "folders":
+                folder = engine.create_folder(data["name"], parent_id=data.get("parent_id"), project_id=data.get("project_id"))
+                self._send_rest_response(200, {"folder": folder.model_dump()})
+            elif parts[0] == "events":
+                event = engine.emit_event(
+                    data["event_type"], artifact_id=data.get("artifact_id"),
+                    session_id=data.get("session_id"), payload=data.get("payload"),
+                )
+                self._send_rest_response(200, {"event": event.model_dump()})
+            elif parts[0] == "purge":
+                count = engine.purge_expired()
+                self._send_rest_response(200, {"purged": count})
+            else:
+                self._send_rest_response(404, {"error": "Not found"})
+        except ValueError as e:
+            self._send_rest_response(400, {"error": str(e)})
+        except Exception as e:
+            logger.error("REST v1 POST error: %s", e, exc_info=True)
+            self._send_rest_response(500, {"error": "Internal error"})
+
+    # ── P4: SSE ────────────────────────────────────────────────
+
+    def _handle_sse(self) -> None:
+        if not self._is_authed():
+            self._send_rest_response(401, {"error": "Unauthorized"})
+            return
+        engine = self.server._rpc_handler.engine
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        heartbeat_interval = getattr(engine.config, "sse_heartbeat_interval", 30)
+        watcher_id = f"sse_{id(self)}_{threading.get_ident()}"
+        logger.info("SSE connected: watcher=%s", watcher_id)
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            import time as _t
+            while True:
+                try:
+                    events, _ = engine.list_events(since_ts=None, page=1, page_size=10)
+                    for evt in events:
+                        data = json.dumps(evt.model_dump())
+                        self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode("utf-8"))
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    _t.sleep(heartbeat_interval)
+                except (BrokenPipeError, ConnectionResetError):
+                    break
+                except Exception as e:
+                    logger.error("SSE loop error: %s", e)
+                    break
+        finally:
+            logger.info("SSE disconnected: watcher=%s", watcher_id)
+
+    def _send_rest_response(self, code: int, data: dict) -> None:
+        body = json.dumps(data).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _run_async(self, coro):
         loop = self.server._async_loop
