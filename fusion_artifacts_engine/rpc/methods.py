@@ -39,6 +39,8 @@ class RPCHandler:
             "artifact.import_code": self._import_code,
             "artifact.watch": self._watch,
             "artifact.sync": self._sync,
+            "artifact.render": self._render,
+            "artifact.interact": self._interact,
             "ping": self._ping,
         }
 
@@ -239,3 +241,22 @@ class RPCHandler:
 
     async def _ping(self, params: dict) -> dict:
         return {"pong": True, "version": get_package_version()}
+
+    async def _render(self, params: dict) -> dict:
+        result = await self.engine.render_artifact(
+            session_id=params.get("session_id", ""),
+            content=params.get("content", ""),
+            artifact_type=params.get("type", "auto"),
+            viewport=params.get("viewport"),
+            project_id=params.get("project_id"),
+        )
+        return result
+
+    async def _interact(self, params: dict) -> dict:
+        result = await self.engine.interact_artifact(
+            artifact_id=params["artifact_id"],
+            action=params.get("action", "state_change"),
+            payload=params.get("payload", {}),
+            session_id=params.get("session_id", ""),
+        )
+        return result

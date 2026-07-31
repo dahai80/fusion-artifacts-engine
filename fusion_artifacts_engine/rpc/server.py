@@ -28,6 +28,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path == "/api/token-count":
             self._handle_token_count()
             return
+        if self.path == "/api/artifact/render":
+            self._handle_render()
+            return
+        if self.path == "/api/artifact/interact":
+            self._handle_interact()
+            return
         if _API_KEY:
             api_key = self.headers.get("X-API-Key", "")
             if not hmac.compare_digest(api_key, _API_KEY):
@@ -105,6 +111,79 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path.startswith("/api/artifact/content/"):
+            self._handle_artifact_content()
+            return
+        self._send_rest_response(404, {"error": "Not found"})
+
+    def _handle_artifact_content(self) -> None:
+        artifact_id = self.path.split("/")[-1]
+        engine = self.server._rpc_handler.engine
+        result = engine.get_artifact_raw_content(artifact_id)
+        if result is None:
+            self._send_rest_response(404, {"error": "Artifact not found"})
+            return
+        body = result["content"].encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", result["content_type"])
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_render(self) -> None:
+        if _API_KEY:
+            api_key = self.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(api_key, _API_KEY):
+                self._send_rest_response(401, {"error": "Unauthorized"})
+                return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length > _MAX_BODY_SIZE:
+                self._send_rest_response(413, {"error": "Request body too large"})
+                return
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+            engine = self.server._rpc_handler.engine
+            result = self._run_async(engine.render_artifact(
+                session_id=data.get("session_id", ""),
+                content=data.get("content", ""),
+                artifact_type=data.get("type", "auto"),
+                viewport=data.get("viewport"),
+                project_id=data.get("project_id"),
+            ))
+            self._send_rest_response(200, result)
+        except Exception as e:
+            logger.error("render error: %s", e, exc_info=True)
+            self._send_rest_response(500, {"error": "Internal error"})
+
+    def _handle_interact(self) -> None:
+        if _API_KEY:
+            api_key = self.headers.get("X-API-Key", "")
+            if not hmac.compare_digest(api_key, _API_KEY):
+                self._send_rest_response(401, {"error": "Unauthorized"})
+                return
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length > _MAX_BODY_SIZE:
+                self._send_rest_response(413, {"error": "Request body too large"})
+                return
+            body = self.rfile.read(length)
+            data = json.loads(body.decode("utf-8"))
+            engine = self.server._rpc_handler.engine
+            result = self._run_async(engine.interact_artifact(
+                artifact_id=data["artifact_id"],
+                action=data.get("action", "state_change"),
+                payload=data.get("payload", {}),
+                session_id=data.get("session_id", ""),
+            ))
+            self._send_rest_response(200, result)
+        except ValueError as e:
+            self._send_rest_response(400, {"error": str(e)})
+        except Exception as e:
+            logger.error("interact error: %s", e, exc_info=True)
+            self._send_rest_response(500, {"error": "Internal error"})
 
     def _run_async(self, coro):
         loop = self.server._async_loop

@@ -9,7 +9,7 @@ from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import TokenCounter
 from fusion_artifacts_engine.ref_parser import generate_ref_text
 from fusion_artifacts_engine.injection import inject_artifacts_to_messages
-from fusion_artifacts_engine.auto_identifier import should_create_artifact
+from fusion_artifacts_engine.auto_identifier import should_create_artifact, detect_renderable_type
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
@@ -347,6 +347,90 @@ class ArtifactEngine:
             return {"direction": "code_to_artifact", "path": str(path), "version": new_version.version_num, "ref_text": ref}
         else:
             raise ValueError(f"Invalid direction: {direction}, must be 'artifact_to_code' or 'code_to_artifact'")
+
+    _RENDER_TYPE_MAP = {
+        "html": "html",
+        "svg": "html",
+        "mermaid": "html",
+        "react": "react",
+    }
+
+    async def render_artifact(
+        self,
+        session_id: str,
+        content: str,
+        artifact_type: str = "auto",
+        viewport: Optional[dict] = None,
+        project_id: Optional[str] = None,
+    ) -> dict:
+        if artifact_type == "auto":
+            detected = detect_renderable_type(content)
+            if detected is None:
+                logger.info("render_artifact: content not renderable")
+                return {"renderable": False, "artifact_type": None, "artifact_id": None, "render_url": None, "viewport": viewport}
+            artifact_type = detected
+        elif artifact_type not in ("html", "svg", "mermaid", "react"):
+            return {"renderable": False, "artifact_type": artifact_type, "artifact_id": None, "render_url": None, "viewport": viewport}
+        store_type = self._RENDER_TYPE_MAP.get(artifact_type, "html")
+        name_map = {"html": "render.html", "svg": "render.svg", "mermaid": "render.mermaid", "react": "render.tsx"}
+        name = name_map.get(artifact_type, "render.html")
+        wrapped_content = content
+        if artifact_type == "svg":
+            wrapped_content = f'<html><body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh">{content}</body></html>'
+        elif artifact_type == "mermaid":
+            wrapped_content = (
+                '<html><head><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" integrity="sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E" crossorigin="anonymous"></script>'
+                '<style>body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh}</style></head>'
+                f'<body><pre class="mermaid">{content}</pre>'
+                '<script>mermaid.initialize({startOnLoad:true});</script></body></html>'
+            )
+        artifact, version, ref_text = await self.create_artifact(
+            session_id=session_id, name=name, artifact_type=store_type,
+            content=wrapped_content, project_id=project_id,
+        )
+        render_url = f"/api/artifact/content/{artifact.id}"
+        logger.info("render_artifact: created %s type=%s renderable=True", artifact.id, artifact_type)
+        return {
+            "renderable": True,
+            "artifact_id": artifact.id,
+            "artifact_type": artifact_type,
+            "render_url": render_url,
+            "viewport": viewport or {"width": 800, "height": 600},
+        }
+
+    async def interact_artifact(
+        self,
+        artifact_id: str,
+        action: str,
+        payload: dict,
+        session_id: str = "",
+    ) -> dict:
+        valid_actions = ("user_click", "user_edit", "state_change")
+        if action not in valid_actions:
+            raise ValueError(f"Invalid action: {action}, must be one of {valid_actions}")
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        new_content = payload.get("content", "")
+        if not new_content:
+            logger.info("interact_artifact: %s action=%s no content change", artifact_id, action)
+            return {"ok": True, "artifact_id": artifact_id, "version": artifact.current_version, "ref_text": ""}
+        version, ref_text = await self.create_version(
+            artifact_id, new_content, change_log=f"Canvas interaction: {action}",
+        )
+        logger.info("interact_artifact: %s action=%s new_version=%d", artifact_id, action, version.version_num)
+        return {"ok": True, "artifact_id": artifact_id, "version": version.version_num, "ref_text": ref_text}
+
+    def get_artifact_raw_content(self, artifact_id: str) -> Optional[dict]:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            return None
+        version = self.get_version_content(artifact_id)
+        if version is None:
+            return None
+        content_type_map = {"html": "text/html", "react": "text/html", "markdown": "text/markdown", "code": "text/plain", "data": "application/json"}
+        ct = content_type_map.get(artifact.type, "text/plain")
+        return {"content": version.content, "content_type": ct, "artifact_id": artifact_id, "version": version.version_num}
 
     def close(self) -> None:
         self.storage.close()
