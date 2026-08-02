@@ -333,7 +333,7 @@ class ArtifactRPCServer:
     def __init__(self, engine: ArtifactEngine, host: Optional[str] = None, port: Optional[int] = None):
         self.engine = engine
         self.host = host or getattr(engine.config, "server_host", "127.0.0.1")
-        self.port = port or getattr(engine.config, "server_port", 8892)
+        self.port = port or getattr(engine.config, "server_port", 11451)
         self.rpc_handler = RPCHandler(engine)
         self._server = None
         self._async_loop = None

@@ -120,7 +120,7 @@ class ArtifactEngineConfig(BaseModel):
     small_content_limit: int = Field(default=10240)
     artifact_id_prefix: str = Field(default="art_")
     server_host: str = Field(default="127.0.0.1")
-    server_port: int = Field(default=8892)
+    server_port: int = Field(default=11451)
     recycle_retention_days: int = Field(default=7)
     allow_no_auth: bool = Field(default=True)
     sse_heartbeat_interval: int = Field(default=30)

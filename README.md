@@ -18,7 +18,7 @@ Result: **10 rounds of 1000-line code iteration uses ~15k tokens instead of ~120
 pip install -e ".[all]"
 
 # Start daemon
-fusion-artifacts-engine start --port 8892
+fusion-artifacts-engine start --port 11451
 
 # Check status
 fusion-artifacts-engine status
@@ -45,7 +45,7 @@ security:
 The engine exposes an HTTP JSON-RPC 2.0 server. Example:
 
 ```bash
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"artifact.create","params":{"session_id":"sess_1","name":"hello.py","type":"code","content":"print(\"hello\")"},"id":1}'
 ```
@@ -174,7 +174,7 @@ When `change_log` is omitted, it is auto-generated from the content diff (e.g., 
 The `artifact.update` method supports an optional `expected_content_hash` parameter. When provided, the update will fail with a hash mismatch error if the current content hash doesn't match, preventing lost updates in concurrent scenarios.
 
 ```bash
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.update","params":{"artifact_id":"art_xxx","content":"...","expected_content_hash":"sha256:abc123"}}'
 ```
 
@@ -182,19 +182,19 @@ curl -X POST http://127.0.0.1:8892 \
 
 **Export code** — get artifact content as source code:
 ```bash
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.export_code","params":{"artifact_id":"art_xxx","language":"python"}}'
 ```
 
 **Import code** — create artifact from code:
 ```bash
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.import_code","params":{"session_id":"s1","code":"def foo(): pass","language":"python"}}'
 ```
 
 **Watch** — poll for changes since a version:
 ```bash
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.watch","params":{"artifact_id":"art_xxx","action":"poll","since_version":3}}'
 ```
 
@@ -204,11 +204,11 @@ Artifacts can be scoped to a `project_id` for multi-project isolation:
 
 ```bash
 # Create with project scope
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.create","params":{"session_id":"s1","name":"app.py","type":"code","content":"...","project_id":"my-project"}}'
 
 # List artifacts in a project
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.list","params":{"session_id":"s1","project_id":"my-project"}}'
 ```
 
@@ -218,11 +218,11 @@ Artifacts support arbitrary JSON metadata for filtering and classification:
 
 ```bash
 # Create with metadata
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.create","params":{"session_id":"s1","name":"Button.tsx","type":"react","content":"...","metadata":{"framework":"react","component_name":"Button"}}}'
 
 # List artifacts filtered by metadata
-curl -X POST http://127.0.0.1:8892 \
+curl -X POST http://127.0.0.1:11451 \
   -d '{"method":"artifact.list","params":{"session_id":"s1","metadata_filter":{"framework":"react"}}}'
 ```
 
@@ -274,7 +274,7 @@ POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id":
 
 Server-Sent Events endpoint for real-time push-based artifact change notifications:
 ```bash
-curl -N http://127.0.0.1:8892/api/v1/events/stream
+curl -N http://127.0.0.1:11451/api/v1/events/stream
 ```
 Returns `text/event-stream` with heartbeat every 30 seconds (configurable via `sse.heartbeat_interval`).
 
@@ -282,7 +282,7 @@ Events are pushed in real-time via an internal EventBus — no polling required.
 
 Filter by artifact kind:
 ```bash
-curl -N "http://127.0.0.1:8892/api/v1/events/stream?kind=app"
+curl -N "http://127.0.0.1:11451/api/v1/events/stream?kind=app"
 ```
 
 ## Python SDK
@@ -383,7 +383,7 @@ asyncio.run(main())
 # default_config.yaml
 server:
   host: "127.0.0.1"
-  port: 8892
+  port: 11451
 
 storage:
   root: "~/.fusion/artifacts"

@@ -107,7 +107,7 @@ fusion-artifacts-engine 要成为 **"可迭代、可分享、可沉淀、可治�
 - **缺失**：```` ```artifact ```` 围栏解析
 
 **配置层**（`fusion_artifacts_engine/config.py`）
-- `ArtifactEngineConfig`：storage_root, db_name, mlx_url, safe_context_threshold(180000), output_reserve_tokens(8192), auto_create_threshold_lines(30), auto_create_threshold_chars(1500), small_content_limit(10240), artifact_id_prefix("art_"), server_host("127.0.0.1"), server_port(8892)
+- `ArtifactEngineConfig`：storage_root, db_name, mlx_url, safe_context_threshold(180000), output_reserve_tokens(8192), auto_create_threshold_lines(30), auto_create_threshold_chars(1500), small_content_limit(10240), artifact_id_prefix("art_"), server_host("127.0.0.1"), server_port(11451)
 
 ### 2.2 既有差异化（已实现，需保留并强化）
 

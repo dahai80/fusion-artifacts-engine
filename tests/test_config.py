@@ -10,7 +10,7 @@ def test_default_config():
     config = ArtifactEngineConfig()
     assert config.storage_root == Path.home() / ".fusion" / "artifacts"
     assert config.server_host == "127.0.0.1"
-    assert config.server_port == 8892
+    assert config.server_port == 11451
     assert config.allow_no_auth is True
     assert config.artifact_id_prefix == "art_"
 

@@ -2,7 +2,7 @@
 
 server:
   host: "127.0.0.1"
-  port: 8892
+  port: 11451
 
 storage:
   root: "~/.fusion/artifacts"
