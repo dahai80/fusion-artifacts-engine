@@ -430,6 +430,14 @@ source .venv/bin/activate
 pytest tests/ -v
 ```
 
+### Test Coverage
+
+```bash
+pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
+```
+
+Current coverage: **92%** across 278+ tests.
+
 ## License
 
 Apache License 2.0

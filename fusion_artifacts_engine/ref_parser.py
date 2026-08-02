@@ -28,7 +28,7 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
             name=m.group("name").strip(),
             type=m.group("type").strip(),
             version=ver,
-            size_bytes=int(m.group("tokens")),
+            size_bytes=int(m.group("size_bytes")),
             summary=(m.group("summary") or "").strip(),
         ))
     for m in _XML_ARTIFACT_PATTERN.finditer(content):
@@ -43,7 +43,7 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
             name=m.group("name").strip(),
             type=m.group("type").strip(),
             version=ver,
-            size_bytes=int(m.group("tokens")),
+            size_bytes=int(m.group("size_bytes")),
             summary=(m.group("summary") or "").strip(),
         ))
     logger.debug("Parsed %s refs from message", len(refs))
