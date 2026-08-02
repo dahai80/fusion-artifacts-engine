@@ -1,5 +1,7 @@
 # Fusion Artifacts Engine
 
+English | **[中文](./README_CN.md)**
+
 Structured artifact CRUD middleware for the Fusion architecture. Physically separates generated artifacts from chat messages to solve context overflow in long AI conversations.
 
 ## How It Works
@@ -417,7 +419,7 @@ Storage: SQLite (WAL) + Filesystem
 
 ## Roadmap
 
-The refactoring blueprint to make fusion-artifacts-engine competitive with Claude Artifacts is documented in [fusion-artifact-enhance-ar.md](./fusion-artifact-enhance-ar.md) (AR = Architecture Refactor). It covers:
+The refactoring blueprint to make fusion-artifacts-engine competitive with Claude Artifacts (AR = Architecture Refactor) covers:
 
 - Competitive gap matrix vs Claude Artifacts
 - Data model expansion, new engine ops (rename/star/pin/duplicate/snapshot/share/recycle/migrate-KB), SSE event bus, REST `/api/v1` parity, optimistic locking

@@ -1,0 +1,445 @@
+# Fusion Artifacts Engine
+
+**[English](./README.md)** | 中文
+
+Fusion 架构的结构化产物 CRUD 中间件。将生成产物与聊天消息物理分离，解决长 AI 对话中的上下文溢出问题。
+
+## 工作原理
+
+当模型生成长内容（代码、文档、HTML 应用）时，引擎：
+1. 独立存储完整内容
+2. 在对话中用轻量引用替换（约 30 tokens）
+3. 仅在模型需要时按需返回内容
+
+效果：**10 轮 1000 行代码迭代仅使用约 15k tokens，而非约 120k**。
+
+## 快速开始
+
+```bash
+# 安装
+pip install -e ".[all]"
+
+# 启动守护进程
+fusion-artifacts-engine start --port 11451
+
+# 查看状态
+fusion-artifacts-engine status
+```
+
+## 认证
+
+引擎通过 `X-API-Key` 请求头进行 API Key 认证。
+
+- 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>`
+- 若**未**配置 `api_key`，默认**允许**请求（`allow_no_auth: true`）
+- 生产环境建议设置 `api_key` 并将 `allow_no_auth` 设为 `false` 以强制认证
+
+```yaml
+# default_config.yaml
+security:
+  api_key: ""
+  allow_no_auth: true
+  recycle_retention_days: 7
+```
+
+## JSON-RPC API
+
+引擎暴露 HTTP JSON-RPC 2.0 服务。示例：
+
+```bash
+curl -X POST http://127.0.0.1:11451 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"artifact.create","params":{"session_id":"sess_1","name":"hello.py","type":"code","content":"print(\"hello\")"},"id":1}'
+```
+
+### 核心方法
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id?, metadata?, owner_user_id?, ownership_type? | 创建产物 + v1 |
+| `artifact.get` | artifact_id, project_id? | 获取元数据 |
+| `artifact.get_content` | artifact_id, version? | 获取版本内容 |
+| `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | 列出会话产物 |
+| `artifact.delete` | artifact_id, soft_delete?, project_id? | 软/硬删除产物 |
+| `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | 创建新版本（乐观锁） |
+| `artifact.version_list` | artifact_id | 列出所有版本 |
+| `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |
+| `artifact.export` | artifact_id, include_versions? | 导出产物数据 |
+| `artifact.export_session` | session_id, output_dir | 批量导出会话 |
+| `artifact.import` | session_id, data | 导入产物 |
+| `artifact.export_code` | artifact_id, language? | 导出为源代码 |
+| `artifact.import_code` | session_id, code, language?, name?, metadata? | 从代码创建产物 |
+| `artifact.watch` | artifact_id, action, watcher_id?, since_version? | 监听变更 |
+| `ping` | — | 健康检查 |
+
+### 生命周期方法 (P1)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.rename` | artifact_id, name | 重命名产物 |
+| `artifact.star` | artifact_id, starred | 收藏/取消收藏 |
+| `artifact.pin` | artifact_id, pinned, chat_id? | 固定/取消固定到聊天 |
+| `artifact.duplicate` | artifact_id | 复制产物（新 ID） |
+| `artifact.list_all` | owner_user_id?, ownership_type?, folder_id?, is_starred? | 列出所有产物（跨会话） |
+
+### 回收站方法 (P1)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.list_recycle` | — | 列出已软删除的产物 |
+| `artifact.restore` | artifact_id | 从回收站恢复 |
+| `artifact.purge_expired` | — | 硬删除过期的回收项 |
+
+### 分享方法 (P1)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.create_share` | artifact_id, max_accesses?, expires_at? | 创建分享链接 |
+| `artifact.get_shared` | share_id | 获取分享的产物（公开） |
+| `artifact.revoke_share` | artifact_id | 撤销分享链接 |
+
+### 快照方法 (P2)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.create_snapshot` | artifact_id, label? | 为当前内容创建命名快照 |
+| `artifact.list_snapshots` | artifact_id | 列出快照 |
+
+### 文件夹方法 (P2)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.create_folder` | name, parent_id? | 创建文件夹 |
+| `artifact.list_folders` | — | 列出所有文件夹 |
+| `artifact.rename_folder` | folder_id, name | 重命名文件夹 |
+| `artifact.delete_folder` | folder_id | 删除文件夹 |
+| `artifact.move_to_folder` | artifact_id, folder_id | 移动产物到文件夹 |
+
+### 标签方法 (P4)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.add_tag` | artifact_id, tag_name | 添加标签（不存在则创建） |
+| `artifact.remove_tag` | artifact_id, tag_name | 移除标签 |
+| `artifact.list_tags` | — | 列出所有标签 |
+| `artifact.list_artifact_tags` | artifact_id | 列出产物的标签 |
+
+### 事件方法 (P4)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.emit_event` | artifact_id, event_type, payload? | 发射事件 |
+| `artifact.list_events` | artifact_id?, event_type?, limit? | 列出事件 |
+
+### 项目知识库方法 (P3)
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.move_to_project_kb` | artifact_id | 移动产物到项目知识库 |
+
+### 外部模块方法
+
+| 方法 | 参数 | 说明 |
+|---|---|---|
+| `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | 从外部模块创建产物（如 fusion-mlx） |
+| `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | 按来源模块列出产物 |
+
+### 产物分类（Kind）
+
+语义分类，匹配用户对产物的认知方式：
+
+| Kind | 说明 |
+|---|---|
+| `app` | 交互式 Web 应用、仪表盘、网站 |
+| `code` | 代码片段、算法、脚本 |
+| `document` | 结构化文档、报告、模板 |
+| `game` | 可玩游戏、模拟、交互挑战 |
+| `tool` | 生产力工具、计算器、规划器 |
+| `template` | 创意项目、测验、可复用模式 |
+
+未指定 `kind` 时，根据 `type` 自动推断：
+- `html` / `react` → `app`
+- `markdown` → `document`
+- `code` → `code`
+- `data` → `tool`
+
+### 版本来源追踪
+
+每个版本记录其 `source`：
+- `manual` — 用户手动编辑
+- `ai_generation` — AI 驱动更新
+
+省略 `change_log` 时，从内容差异自动生成（如 "+5 行, -2 行"）。
+
+### 乐观锁
+
+`artifact.update` 方法支持可选的 `expected_content_hash` 参数。提供时，若当前内容哈希不匹配则更新失败，防止并发场景下的更新丢失。
+
+```bash
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.update","params":{"artifact_id":"art_xxx","content":"...","expected_content_hash":"sha256:abc123"}}'
+```
+
+### 代码-产物同步
+
+**导出代码** — 获取产物内容作为源代码：
+```bash
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.export_code","params":{"artifact_id":"art_xxx","language":"python"}}'
+```
+
+**导入代码** — 从代码创建产物：
+```bash
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.import_code","params":{"session_id":"s1","code":"def foo(): pass","language":"python"}}'
+```
+
+**监听** — 轮询自某版本以来的变更：
+```bash
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.watch","params":{"artifact_id":"art_xxx","action":"poll","since_version":3}}'
+```
+
+### 项目作用域
+
+产物可按 `project_id` 限定作用域，实现多项目隔离：
+
+```bash
+# 创建时指定项目
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.create","params":{"session_id":"s1","name":"app.py","type":"code","content":"...","project_id":"my-project"}}'
+
+# 列出项目内的产物
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.list","params":{"session_id":"s1","project_id":"my-project"}}'
+```
+
+### 元数据
+
+产物支持任意 JSON 元数据，用于过滤和分类：
+
+```bash
+# 创建时附带元数据
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.create","params":{"session_id":"s1","name":"Button.tsx","type":"react","content":"...","metadata":{"framework":"react","component_name":"Button"}}}'
+
+# 按元数据过滤列出
+curl -X POST http://127.0.0.1:11451 \
+  -d '{"method":"artifact.list","params":{"session_id":"s1","metadata_filter":{"framework":"react"}}}'
+```
+
+元数据以 JSON 格式存储在 SQLite 中，通过 `json_extract()` 查询。可将 `metadata_filter` 与 `project_id` 组合进行作用域查询。
+
+## REST API
+
+### REST /api/v1 (P3)
+
+与 JSON-RPC 并行的 RESTful CRUD API：
+
+**GET** 端点：
+```bash
+GET /api/v1/artifacts          # 列出产物（支持查询参数：created_by, since, until, kind, type, sort, page, page_size）
+GET /api/v1/external?source_module=fusion-mlx&workspace_id=ws-001  # 按来源模块列出产物
+GET /api/v1/folders            # 列出文件夹
+GET /api/v1/tags               # 列出标签
+GET /api/v1/events             # 列出事件
+GET /api/v1/recycle            # 列出回收站
+```
+
+`GET /api/v1/artifacts` 查询参数：
+- `created_by` — 按所有者过滤
+- `since` / `until` — 按创建时间过滤（Unix 时间戳）
+- `kind` — 按分类过滤（app/code/document/game/tool/template）
+- `type` — 按类型过滤（code/markdown/html/react/data）
+- `sort` — 排序字段（updated_at, created_at, name, starred）
+- `page` / `page_size` — 分页
+
+**POST** 端点（基于动作）：
+```bash
+POST /api/v1/rename            # {"artifact_id": "...", "name": "..."}
+POST /api/v1/star              # {"artifact_id": "...", "starred": true}
+POST /api/v1/pin               # {"artifact_id": "...", "pinned": true}
+POST /api/v1/duplicate         # {"artifact_id": "..."}
+POST /api/v1/restore           # {"artifact_id": "..."}
+POST /api/v1/move-to-kb        # {"artifact_id": "..."}
+POST /api/v1/move-to-folder    # {"artifact_id": "...", "folder_id": "..."}
+POST /api/v1/snapshot          # {"artifact_id": "...", "label": "..."}
+POST /api/v1/share             # {"artifact_id": "...", "max_accesses": 10}
+POST /api/v1/tags              # {"artifact_id": "...", "tag_name": "..."}
+POST /api/v1/folders           # {"name": "...", "parent_id": "..."}
+POST /api/v1/events            # {"artifact_id": "...", "event_type": "..."}
+POST /api/v1/purge             # {}
+POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id": "ws-001", "name": "...", "type": "code", "content": "..."}
+```
+
+### SSE 事件流 (P4)
+
+Server-Sent Events 端点，实时推送产物变更通知：
+```bash
+curl -N http://127.0.0.1:11451/api/v1/events/stream
+```
+返回 `text/event-stream`，每 30 秒发送心跳（可通过 `sse.heartbeat_interval` 配置）。
+
+事件通过内部 EventBus 实时推送——无需轮询。支持的事件类型：`artifact.created`、`artifact.updated`、`artifact.deleted`。
+
+按产物分类过滤：
+```bash
+curl -N "http://127.0.0.1:11451/api/v1/events/stream?kind=app"
+```
+
+## Python SDK
+
+```python
+import asyncio
+from fusion_artifacts_engine import ArtifactEngine, ArtifactEngineConfig
+
+engine = ArtifactEngine()
+
+async def main():
+    # 创建并指定分类
+    art, ver, ref = await engine.create_artifact(
+        "sess_1", "app.py", "code", "print('hello')\n" * 50,
+        summary="主应用", kind="tool"
+    )
+    print(f"已创建: {art.id} kind={art.kind}")
+
+    # 更新并追踪来源
+    v2, ref2 = await engine.create_version(
+        art.id, "print('world')\n" * 60,
+        change_log="", source="ai_generation"
+    )
+
+    # 导出为代码
+    code_data = engine.export_code(art.id, "python")
+
+    # 从代码导入
+    new_art, _, _ = await engine.import_code(
+        "s1", "def bar(): pass", language="python", name="bar.py"
+    )
+
+    # 生命周期操作
+    await engine.rename_artifact(art.id, "new_name.py")
+    await engine.star_artifact(art.id, True)
+    await engine.duplicate_artifact(art.id)
+
+    # 分享
+    share = await engine.create_share(art.id, max_accesses=10)
+
+    # 文件夹与标签
+    folder = await engine.create_folder("我的文件夹")
+    await engine.move_to_folder(art.id, folder.id)
+    await engine.add_tag(art.id, "重要")
+
+    engine.close()
+
+asyncio.run(main())
+```
+
+## 支持的产物类型
+
+| 类型 | 说明 |
+|---|---|
+| `code` | Python、JS、Rust 等 |
+| `markdown` | 文档、README |
+| `html` | 网页、仪表盘 |
+| `react` | React/JSX 组件 |
+| `data` | JSON、CSV、YAML |
+
+## 存储
+
+- **元数据**：SQLite，位于 `~/.fusion/artifacts/meta.db`
+- **内容**：`~/.fusion/artifacts/content/{art_id}/v{num}.{ext}`
+- 小内容（<10KB）内联存储在 SQLite 中
+- 大内容存储在文件系统
+
+### 数据模型
+
+**Artifact** — 核心实体，包含所有权、生命周期和组织字段：
+- 所有权：`owner_user_id`、`ownership_type`（personal/team/project）
+- 生命周期：`is_deleted`、`deleted_at`（软删除）、`is_starred`、`is_pinned`、`pinned_chat_id`
+- 组织：`folder_id`、`share_id`、`in_project_kb`、`content_hash`、`active_in_session`
+- 外部来源：`source_module`、`workspace_id`、`workflow_run_id`
+
+**ArtifactVersion** — 版本化内容，支持快照：
+- 快照：`snapshot_type`（auto/named）、`snapshot_label`、`author`、`parent_version`
+- 大小：`size_bytes`（内容字节长度）
+
+**ArtifactShare** — 分享链接，包含访问控制：
+- `share_id`（shr_*）、`max_accesses`、`access_count`、`expires_at`、`is_revoked`
+
+**ArtifactFolder** — 层级式产物组织
+
+**ArtifactTag** — 标签，通过 `artifact_tag_map` 实现多对多
+
+**ArtifactEvent** — 产物变更审计日志
+
+## 安全
+
+- **Fail-closed 认证**：未配置 API Key 时拒绝请求，除非 `allow_no_auth=True`
+- **乐观锁**：通过 `expected_content_hash` 检测并发更新
+- **路径穿越防护**：导出路径经过清洗
+
+## 配置
+
+```yaml
+# default_config.yaml
+server:
+  host: "127.0.0.1"
+  port: 11451
+
+storage:
+  root: "~/.fusion/artifacts"
+  db_name: "meta.db"
+  small_content_limit: 10240
+
+thresholds:
+  auto_create_lines: 30
+  auto_create_chars: 1500
+
+artifact:
+  id_prefix: "art_"
+
+security:
+  allow_no_auth: true
+  recycle_retention_days: 7
+
+sse:
+  heartbeat_interval: 30
+```
+
+## 架构
+
+```
+产品层: Fusion Code (tool_use) | Fusion Studio (GUI)
+---------------------------------------------------------
+中间件: Artifacts Engine (Python 守护进程, JSON-RPC 2.0 + REST /api/v1 + SSE)
+---------------------------------------------------------
+存储层: SQLite (WAL) + 文件系统
+```
+
+## 路线图
+
+使 fusion-artifacts-engine 达到 Claude Artifacts 竞争力的重构蓝图（AR = Architecture Refactor）涵盖：
+
+- 与 Claude Artifacts 的竞争力差距矩阵
+- 数据模型扩展、新引擎操作（rename/star/pin/duplicate/snapshot/share/recycle/migrate-KB）、SSE 事件总线、REST `/api/v1` 对等、乐观锁
+- 4 阶段实施计划（P1-P4）— **所有阶段已实现**
+
+## 运行测试
+
+```bash
+source .venv/bin/activate
+pytest tests/ -v
+```
+
+### 测试覆盖率
+
+```bash
+pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
+```
+
+当前覆盖率：**92%**，278+ 测试用例。
+
+## 许可证
+
+Apache License 2.0
