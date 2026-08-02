@@ -149,6 +149,7 @@ class ArtifactEngine:
         self.storage.save_artifact_and_version(artifact, version)
         if project_id:
             self.storage.move_to_project_kb(artifact_id, project_id)
+            artifact = self.storage.get_artifact(artifact_id)
             logger.info("Auto-archived external artifact %s to project %s", artifact_id, project_id)
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
         logger.info("Created external artifact: %s source=%s ws=%s size=%d", artifact_id, source_module, workspace_id, size)
