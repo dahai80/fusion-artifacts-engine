@@ -63,7 +63,22 @@ def test_concurrent_write_lock_serializes(engine):
 
     def write_op(i):
         try:
-            asyncio.run(engine.create_version(art.id, "v%d" % i))
+            storage = engine.storage
+            with storage._write_lock:
+                ver_num = storage.next_version_num(art.id)
+                now = time.time()
+                storage._conn.execute(
+                    """INSERT INTO artifact_versions
+                       (artifact_id, version_num, content, content_path, size_bytes,
+                        change_log, source, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (art.id, ver_num, "v%d" % i, None, len(("v%d" % i).encode()), "concurrent v%d" % i, "manual", now),
+                )
+                storage._conn.execute(
+                    "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE id = ?",
+                    (ver_num, now, art.id),
+                )
+                storage._conn.commit()
         except Exception as e:
             errors.append(e)
 

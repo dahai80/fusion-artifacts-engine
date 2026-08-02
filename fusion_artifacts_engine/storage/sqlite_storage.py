@@ -225,7 +225,7 @@ class SQLiteStorage(StorageDriver):
         self.small_content_limit = small_content_limit
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -839,12 +839,13 @@ class SQLiteStorage(StorageDriver):
                     )
 
     def next_version_num(self, artifact_id: str) -> int:
-        cur = self._conn.execute(
-            "SELECT COALESCE(MAX(version_num), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
-            (artifact_id,),
-        )
-        row = cur.fetchone()
-        return row[0]
+        with self._write_lock:
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(version_num), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+            row = cur.fetchone()
+            return row[0]
 
     def get_version(
         self, artifact_id: str, version_num: int

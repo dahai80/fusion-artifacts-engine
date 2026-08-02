@@ -166,7 +166,32 @@ def test_rest_create_artifact(rest_server):
 
 
 # ── REST POST: update artifact version via REST ──
-# This path goes through the dead code path, so test via JSON-RPC instead
+
+
+def test_rest_update_artifact(rest_server):
+    art_id = _create_artifact("s_rest_update", "update.py")
+    resp = rest_post(
+        f"/api/v1/artifacts/{art_id}",
+        {"content": "updated content v2"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "version" in data
+    assert "ref_text" in data
+    assert data["version"]["version_num"] == 2
+
+
+# ── REST POST: delete artifact via REST ──
+
+
+def test_rest_delete_artifact(rest_server):
+    art_id = _create_artifact("s_rest_delete", "delete.py")
+    resp = rest_post(
+        f"/api/v1/artifacts/{art_id}",
+        {"action": "delete", "soft_delete": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
 
 
 # ── REST POST: 404 unknown path ──

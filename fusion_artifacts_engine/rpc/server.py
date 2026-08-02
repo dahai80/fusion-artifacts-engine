@@ -231,7 +231,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             return
 
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
-            if len(path_parts) == 4:
+            if len(path_parts) == 4 and path_parts[3] == "create":
                 result = self._run_async(
                     engine.create_artifact(
                         session_id=data.get("session_id", ""),
