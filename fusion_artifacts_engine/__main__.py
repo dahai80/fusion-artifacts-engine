@@ -63,6 +63,7 @@ def main():
     elif args.command == "status":
         import os
         import httpx
+
         config = load_config()
         host = config.server_host
         port = config.server_port

@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class RPCHandler:
-
     def __init__(self, engine: ArtifactEngine):
         self.engine = engine
         self._method_map = self._build_methods()
@@ -95,11 +94,19 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        event_bus.publish("artifact.created", {"artifact_id": artifact.id, "kind": artifact.kind})
-        return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
+        event_bus.publish(
+            "artifact.created", {"artifact_id": artifact.id, "kind": artifact.kind}
+        )
+        return {
+            "artifact": artifact.model_dump(),
+            "version": version.model_dump(),
+            "ref_text": ref_text,
+        }
 
     async def _get(self, params: dict) -> dict:
-        artifact = self.engine.get_artifact(params["artifact_id"], project_id=params.get("project_id"))
+        artifact = self.engine.get_artifact(
+            params["artifact_id"], project_id=params.get("project_id")
+        )
         if artifact is None:
             raise ValueError(f"Artifact not found: {params['artifact_id']}")
         return {"artifact": artifact.model_dump()}
@@ -116,7 +123,11 @@ class RPCHandler:
         result = self.engine.get_version_content(params["artifact_id"], version)
         if result is None:
             raise ValueError("Version not found")
-        return {"content": result.content, "token_count": result.size_bytes, "version": result.version_num}
+        return {
+            "content": result.content,
+            "token_count": result.size_bytes,
+            "version": result.version_num,
+        }
 
     async def _list(self, params: dict) -> dict:
         artifacts = self.engine.list_artifacts(
@@ -128,7 +139,11 @@ class RPCHandler:
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
     async def _delete(self, params: dict) -> dict:
-        ok = self.engine.delete_artifact(params["artifact_id"], params.get("soft_delete", True), project_id=params.get("project_id"))
+        ok = self.engine.delete_artifact(
+            params["artifact_id"],
+            params.get("soft_delete", True),
+            project_id=params.get("project_id"),
+        )
         event_bus.publish("artifact.deleted", {"artifact_id": params["artifact_id"]})
         return {"ok": ok}
 
@@ -138,8 +153,10 @@ class RPCHandler:
         if source not in valid_sources:
             raise ValueError(f"Invalid source, must be one of {valid_sources}")
         version, ref_text = await self.engine.create_version(
-            params["artifact_id"], params["content"],
-            params.get("change_log", ""), source=source,
+            params["artifact_id"],
+            params["content"],
+            params.get("change_log", ""),
+            source=source,
             expected_content_hash=params.get("expected_content_hash"),
         )
         event_bus.publish("artifact.updated", {"artifact_id": params["artifact_id"]})
@@ -183,12 +200,19 @@ class RPCHandler:
         for art in artifacts:
             content = self.engine.get_version_content(art.id)
             if content:
-                safe_name = art.name.replace("/", "_").replace("\\", "_").replace("..", "_").replace("\x00", "_")
+                safe_name = (
+                    art.name.replace("/", "_")
+                    .replace("\\", "_")
+                    .replace("..", "_")
+                    .replace("\x00", "_")
+                )
                 path = output_dir / safe_name
                 try:
                     path.resolve().relative_to(storage_root)
                 except ValueError:
-                    logger.warning("Skipping artifact name that escapes export dir: %s", art.name)
+                    logger.warning(
+                        "Skipping artifact name that escapes export dir: %s", art.name
+                    )
                     continue
                 path.write_text(content.content, encoding="utf-8")
                 count += 1
@@ -231,7 +255,11 @@ class RPCHandler:
             name=params.get("name", ""),
             metadata=params.get("metadata"),
         )
-        return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
+        return {
+            "artifact": artifact.model_dump(),
+            "version": version.model_dump(),
+            "ref_text": ref_text,
+        }
 
     async def _watch(self, params: dict) -> dict:
         artifact_id = params["artifact_id"]
@@ -252,7 +280,9 @@ class RPCHandler:
             events = self.engine.get_watch_events(artifact_id, since_version)
             return {"artifact_id": artifact_id, "events": events}
         else:
-            raise ValueError(f"Invalid action: {action}, must be register/unregister/poll")
+            raise ValueError(
+                f"Invalid action: {action}, must be register/unregister/poll"
+            )
 
     async def _ping(self, params: dict) -> dict:
         return {"pong": True, "version": get_package_version()}
@@ -262,7 +292,9 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _star(self, params: dict) -> dict:
-        ok = self.engine.star_artifact(params["artifact_id"], params.get("starred", True))
+        ok = self.engine.star_artifact(
+            params["artifact_id"], params.get("starred", True)
+        )
         return {"ok": ok}
 
     async def _pin(self, params: dict) -> dict:
@@ -274,7 +306,9 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _duplicate(self, params: dict) -> dict:
-        dup = self.engine.duplicate_artifact(params["artifact_id"], params.get("new_name"))
+        dup = self.engine.duplicate_artifact(
+            params["artifact_id"], params.get("new_name")
+        )
         if dup is None:
             raise ValueError("Failed to duplicate artifact")
         return {"artifact": dup.model_dump()}
@@ -437,8 +471,19 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        event_bus.publish("artifact.created", {"artifact_id": artifact.id, "source_module": artifact.source_module, "kind": artifact.kind})
-        return {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text}
+        event_bus.publish(
+            "artifact.created",
+            {
+                "artifact_id": artifact.id,
+                "source_module": artifact.source_module,
+                "kind": artifact.kind,
+            },
+        )
+        return {
+            "artifact": artifact.model_dump(),
+            "version": version.model_dump(),
+            "ref_text": ref_text,
+        }
 
     async def _list_by_source(self, params: dict) -> dict:
         artifacts = self.engine.list_by_source(

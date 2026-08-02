@@ -9,14 +9,45 @@ _RENDERABLE_MERMAID_RE = re.compile(
     r"^\s*(graph\s+[A-Z]{2}|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|flowchart)",
     re.IGNORECASE | re.MULTILINE,
 )
-_RENDERABLE_REACT_RE = re.compile(r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function|jsx|tsx)", re.IGNORECASE)
+_RENDERABLE_REACT_RE = re.compile(
+    r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function|jsx|tsx)",
+    re.IGNORECASE,
+)
 _RENDERABLE_HTML_RE = re.compile(r"^\s*(<!DOCTYPE\s+html|<html[\s>])", re.IGNORECASE)
 
 _CODE_LANGS = {
-    "python", "py", "javascript", "js", "typescript", "ts", "rust", "go",
-    "java", "c", "cpp", "c++", "csharp", "cs", "ruby", "rb", "php",
-    "swift", "kotlin", "shell", "bash", "sh", "sql", "yaml", "yml",
-    "toml", "json", "xml", "html", "css", "scss", "dockerfile",
+    "python",
+    "py",
+    "javascript",
+    "js",
+    "typescript",
+    "ts",
+    "rust",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "c++",
+    "csharp",
+    "cs",
+    "ruby",
+    "rb",
+    "php",
+    "swift",
+    "kotlin",
+    "shell",
+    "bash",
+    "sh",
+    "sql",
+    "yaml",
+    "yml",
+    "toml",
+    "json",
+    "xml",
+    "html",
+    "css",
+    "scss",
+    "dockerfile",
 }
 
 _DATA_EXTS = {".json", ".csv", ".tsv", ".yaml", ".yml", ".toml", ".xml"}
@@ -92,10 +123,21 @@ def extract_name_hint(content: str, lang_hint: str = "") -> str:
         if line.startswith("# file:") or line.startswith("// file:"):
             return line.split(":", 1)[1].strip()
     ext_map = {
-        "python": ".py", "py": ".py", "javascript": ".js", "js": ".js",
-        "typescript": ".ts", "ts": ".ts", "rust": ".rs", "go": ".go",
-        "html": ".html", "css": ".css", "shell": ".sh", "bash": ".sh",
-        "sql": ".sql", "markdown": ".md", "md": ".md",
+        "python": ".py",
+        "py": ".py",
+        "javascript": ".js",
+        "js": ".js",
+        "typescript": ".ts",
+        "ts": ".ts",
+        "rust": ".rs",
+        "go": ".go",
+        "html": ".html",
+        "css": ".css",
+        "shell": ".sh",
+        "bash": ".sh",
+        "sql": ".sql",
+        "markdown": ".md",
+        "md": ".md",
     }
     ext = ext_map.get(lang_hint.lower(), ".txt")
     return f"artifact{ext}"

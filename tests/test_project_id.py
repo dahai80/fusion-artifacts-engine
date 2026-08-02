@@ -35,49 +35,64 @@ def rpc(method, params=None, req_id=1):
 
 
 def test_create_with_project_id(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_proj",
-        "name": "proj_art.py",
-        "type": "code",
-        "content": "print('proj')",
-        "project_id": "proj-1",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_proj",
+            "name": "proj_art.py",
+            "type": "code",
+            "content": "print('proj')",
+            "project_id": "proj-1",
+        },
+    )
     assert "result" in r
     assert r["result"]["artifact"]["project_id"] == "proj-1"
 
 
 def test_create_without_project_id(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_proj",
-        "name": "no_proj.py",
-        "type": "code",
-        "content": "print('no proj')",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_proj",
+            "name": "no_proj.py",
+            "type": "code",
+            "content": "print('no proj')",
+        },
+    )
     assert "result" in r
     assert r["result"]["artifact"]["project_id"] is None
 
 
 def test_list_filter_by_project_id(rpc_server):
-    rpc("artifact.create", {
-        "session_id": "s_filter",
-        "name": "pa.py",
-        "type": "code",
-        "content": "a",
-        "project_id": "proj-a",
-    })
-    rpc("artifact.create", {
-        "session_id": "s_filter",
-        "name": "pb.py",
-        "type": "code",
-        "content": "b",
-        "project_id": "proj-b",
-    })
-    rpc("artifact.create", {
-        "session_id": "s_filter",
-        "name": "pn.py",
-        "type": "code",
-        "content": "n",
-    })
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_filter",
+            "name": "pa.py",
+            "type": "code",
+            "content": "a",
+            "project_id": "proj-a",
+        },
+    )
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_filter",
+            "name": "pb.py",
+            "type": "code",
+            "content": "b",
+            "project_id": "proj-b",
+        },
+    )
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_filter",
+            "name": "pn.py",
+            "type": "code",
+            "content": "n",
+        },
+    )
     ra = rpc("artifact.list", {"session_id": "s_filter", "project_id": "proj-a"})
     assert all(a["project_id"] == "proj-a" for a in ra["result"]["artifacts"])
     rb = rpc("artifact.list", {"session_id": "s_filter", "project_id": "proj-b"})
@@ -87,13 +102,16 @@ def test_list_filter_by_project_id(rpc_server):
 
 
 def test_get_artifact_with_project_id(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_get_proj",
-        "name": "gp.py",
-        "type": "code",
-        "content": "x",
-        "project_id": "proj-get",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_get_proj",
+            "name": "gp.py",
+            "type": "code",
+            "content": "x",
+            "project_id": "proj-get",
+        },
+    )
     art_id = r["result"]["artifact"]["id"]
     r2 = rpc("artifact.get", {"artifact_id": art_id})
     assert r2["result"]["artifact"]["project_id"] == "proj-get"

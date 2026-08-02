@@ -3,7 +3,11 @@ import tempfile
 from pathlib import Path
 import pytest
 import yaml
-from fusion_artifacts_engine.config import ArtifactEngineConfig, load_config, _flatten_yaml_config
+from fusion_artifacts_engine.config import (
+    ArtifactEngineConfig,
+    load_config,
+    _flatten_yaml_config,
+)
 
 
 def test_default_config():
@@ -23,7 +27,11 @@ def test_extra_fields_forbidden():
 def test_flatten_yaml_config():
     data = {
         "server": {"host": "0.0.0.0", "port": 9000},
-        "storage": {"root": "/tmp/artifacts", "db_name": "test.db", "small_content_limit": 2048},
+        "storage": {
+            "root": "/tmp/artifacts",
+            "db_name": "test.db",
+            "small_content_limit": 2048,
+        },
         "mlx": {"url": "http://mlx:8890"},
         "thresholds": {"auto_create_lines": 50, "auto_create_chars": 3000},
         "artifact": {"id_prefix": "test_"},

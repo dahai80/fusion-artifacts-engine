@@ -1,5 +1,4 @@
 from fusion_artifacts_engine.auto_identifier import (
-    should_create_artifact,
     detect_artifact_type,
     detect_renderable_type,
     extract_name_hint,
@@ -48,7 +47,10 @@ def test_detect_artifact_type_default_code():
 
 
 def test_detect_renderable_type_svg_content():
-    assert detect_renderable_type('<svg xmlns="http://www.w3.org/2000/svg"></svg>') == "svg"
+    assert (
+        detect_renderable_type('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+        == "svg"
+    )
 
 
 def test_detect_renderable_type_mermaid_content():
@@ -61,7 +63,12 @@ def test_detect_renderable_type_html_content():
 
 
 def test_detect_renderable_type_react_content():
-    assert detect_renderable_type("import React from 'react'; export default function App() {}") == "react"
+    assert (
+        detect_renderable_type(
+            "import React from 'react'; export default function App() {}"
+        )
+        == "react"
+    )
 
 
 def test_detect_renderable_type_by_name_svg():

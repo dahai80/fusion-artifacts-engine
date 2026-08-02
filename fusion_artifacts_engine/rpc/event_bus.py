@@ -34,7 +34,10 @@ class EventBus:
                     dead.append(q)
             for q in dead:
                 self._subscribers.remove(q)
-                logger.warning("EventBus dropped full subscriber, remaining=%d", len(self._subscribers))
+                logger.warning(
+                    "EventBus dropped full subscriber, remaining=%d",
+                    len(self._subscribers),
+                )
 
 
 event_bus = EventBus()

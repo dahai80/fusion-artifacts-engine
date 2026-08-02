@@ -9,10 +9,12 @@ logger = logging.getLogger(__name__)
 
 _PACKAGE_DIR = Path(__file__).parent
 _DEFAULT_CONFIG_PATH = _PACKAGE_DIR / "default_config.yaml"
-_USER_CONFIG_PATH = Path(os.environ.get(
-    "FUSION_ARTIFACTS_CONFIG",
-    str(Path.home() / ".fusion" / "artifacts" / "config.yaml"),
-))
+_USER_CONFIG_PATH = Path(
+    os.environ.get(
+        "FUSION_ARTIFACTS_CONFIG",
+        str(Path.home() / ".fusion" / "artifacts" / "config.yaml"),
+    )
+)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

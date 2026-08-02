@@ -2,11 +2,15 @@ import time
 import hashlib
 import logging
 from typing import Optional
-from pathlib import Path
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.models import (
-    Artifact, ArtifactVersion, ArtifactShare, ArtifactFolder,
-    ArtifactTag, ArtifactEvent, infer_kind,
+    Artifact,
+    ArtifactVersion,
+    ArtifactShare,
+    ArtifactFolder,
+    ArtifactTag,
+    ArtifactEvent,
+    infer_kind,
 )
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.ref_parser import generate_ref_text
@@ -45,7 +49,6 @@ def _size_bytes(content: str) -> int:
 
 
 class ArtifactEngine:
-
     def __init__(self, config: Optional[ArtifactEngineConfig] = None):
         self.config = config or ArtifactEngineConfig()
         self.storage = SQLiteStorage(
@@ -54,7 +57,9 @@ class ArtifactEngine:
             small_content_limit=self.config.small_content_limit,
         )
         self._watchers: dict[str, list[str]] = {}
-        logger.info("ArtifactEngine initialized: storage_root=%s", self.config.storage_root)
+        logger.info(
+            "ArtifactEngine initialized: storage_root=%s", self.config.storage_root
+        )
 
     async def create_artifact(
         self,
@@ -150,9 +155,19 @@ class ArtifactEngine:
         if project_id:
             self.storage.move_to_project_kb(artifact_id, project_id)
             artifact = self.storage.get_artifact(artifact_id)
-            logger.info("Auto-archived external artifact %s to project %s", artifact_id, project_id)
+            logger.info(
+                "Auto-archived external artifact %s to project %s",
+                artifact_id,
+                project_id,
+            )
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
-        logger.info("Created external artifact: %s source=%s ws=%s size=%d", artifact_id, source_module, workspace_id, size)
+        logger.info(
+            "Created external artifact: %s source=%s ws=%s size=%d",
+            artifact_id,
+            source_module,
+            workspace_id,
+            size,
+        )
         return artifact, version, ref_text
 
     def list_by_source(
@@ -163,16 +178,33 @@ class ArtifactEngine:
     ) -> list[Artifact]:
         return self.storage.list_by_source(source_module, workspace_id, workflow_run_id)
 
-    def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
+    def get_artifact(
+        self, artifact_id: str, project_id: Optional[str] = None
+    ) -> Optional[Artifact]:
         return self.storage.get_artifact(artifact_id, project_id)
 
-    def list_artifacts(self, session_id: str, include_deleted: bool = False, project_id: Optional[str] = None, metadata_filter: Optional[dict] = None) -> list[Artifact]:
-        return self.storage.list_artifacts(session_id, include_deleted, project_id, metadata_filter)
+    def list_artifacts(
+        self,
+        session_id: str,
+        include_deleted: bool = False,
+        project_id: Optional[str] = None,
+        metadata_filter: Optional[dict] = None,
+    ) -> list[Artifact]:
+        return self.storage.list_artifacts(
+            session_id, include_deleted, project_id, metadata_filter
+        )
 
-    def delete_artifact(self, artifact_id: str, soft_delete: bool = True, project_id: Optional[str] = None) -> bool:
+    def delete_artifact(
+        self,
+        artifact_id: str,
+        soft_delete: bool = True,
+        project_id: Optional[str] = None,
+    ) -> bool:
         return self.storage.delete_artifact(artifact_id, soft_delete, project_id)
 
-    def get_version_content(self, artifact_id: str, version: Optional[int] = None) -> Optional[ArtifactVersion]:
+    def get_version_content(
+        self, artifact_id: str, version: Optional[int] = None
+    ) -> Optional[ArtifactVersion]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             return None
@@ -194,28 +226,47 @@ class ArtifactEngine:
         try:
             target = self.storage.get_version(artifact_id, target_version)
         except FileNotFoundError as e:
-            logger.error("Content file missing for %s v%s: %s", artifact_id, target_version, e)
-            raise ValueError(f"Version content not found: {artifact_id} v{target_version}") from e
+            logger.error(
+                "Content file missing for %s v%s: %s", artifact_id, target_version, e
+            )
+            raise ValueError(
+                f"Version content not found: {artifact_id} v{target_version}"
+            ) from e
         if target is None:
             raise ValueError(f"Version not found: {artifact_id} v{target_version}")
         version, ref_text = await self.create_version(
             artifact_id, target.content, f"Rollback to v{target_version}"
         )
-        logger.info("Rolled back %s to v%s, new v%s", artifact_id, target_version, version.version_num)
+        logger.info(
+            "Rolled back %s to v%s, new v%s",
+            artifact_id,
+            target_version,
+            version.version_num,
+        )
         return version, ref_text
 
     def should_create_artifact(self, content: str, content_type: str = "text") -> bool:
         return should_create_artifact(
-            content, content_type,
+            content,
+            content_type,
             self.config.auto_create_threshold_lines,
             self.config.auto_create_threshold_chars,
         )
 
     _LANG_EXT = {
-        "python": "py", "javascript": "js", "typescript": "ts",
-        "html": "html", "css": "css", "markdown": "md",
-        "json": "json", "yaml": "yaml", "rust": "rs",
-        "go": "go", "java": "java", "c": "c", "cpp": "cpp",
+        "python": "py",
+        "javascript": "js",
+        "typescript": "ts",
+        "html": "html",
+        "css": "css",
+        "markdown": "md",
+        "json": "json",
+        "yaml": "yaml",
+        "rust": "rs",
+        "go": "go",
+        "java": "java",
+        "c": "c",
+        "cpp": "cpp",
     }
 
     _EXT_LANG = {v: k for k, v in _LANG_EXT.items()}
@@ -276,7 +327,9 @@ class ArtifactEngine:
             self._watchers[artifact_id] = []
         if watcher_id not in self._watchers[artifact_id]:
             self._watchers[artifact_id].append(watcher_id)
-            logger.info("Watcher registered: %s for artifact %s", watcher_id, artifact_id)
+            logger.info(
+                "Watcher registered: %s for artifact %s", watcher_id, artifact_id
+            )
 
     def unregister_watcher(self, artifact_id: str, watcher_id: str) -> None:
         if artifact_id in self._watchers:
@@ -285,20 +338,29 @@ class ArtifactEngine:
             ]
             if not self._watchers[artifact_id]:
                 del self._watchers[artifact_id]
-            logger.info("Watcher unregistered: %s for artifact %s", watcher_id, artifact_id)
+            logger.info(
+                "Watcher unregistered: %s for artifact %s", watcher_id, artifact_id
+            )
 
     def get_watch_events(self, artifact_id: str, since_version: int = 0) -> list[dict]:
         versions = self.storage.list_versions(artifact_id)
         events = []
         for v in versions:
             if v.version_num > since_version:
-                events.append({
-                    "artifact_id": artifact_id,
-                    "version": v.version_num,
-                    "change_log": v.change_log,
-                    "created_at": v.created_at,
-                })
-        logger.debug("Watch events for %s since v%d: %d events", artifact_id, since_version, len(events))
+                events.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "version": v.version_num,
+                        "change_log": v.change_log,
+                        "created_at": v.created_at,
+                    }
+                )
+        logger.debug(
+            "Watch events for %s since v%d: %d events",
+            artifact_id,
+            since_version,
+            len(events),
+        )
         return events
 
     def get_artifact_raw_content(self, artifact_id: str) -> Optional[dict]:
@@ -308,9 +370,20 @@ class ArtifactEngine:
         version = self.get_version_content(artifact_id)
         if version is None:
             return None
-        content_type_map = {"html": "text/html", "react": "text/html", "markdown": "text/markdown", "code": "text/plain", "data": "application/json"}
+        content_type_map = {
+            "html": "text/html",
+            "react": "text/html",
+            "markdown": "text/markdown",
+            "code": "text/plain",
+            "data": "application/json",
+        }
         ct = content_type_map.get(artifact.type, "text/plain")
-        return {"content": version.content, "content_type": ct, "artifact_id": artifact_id, "version": version.version_num}
+        return {
+            "content": version.content,
+            "content_type": ct,
+            "artifact_id": artifact_id,
+            "version": version.version_num,
+        }
 
     # ── P1: lifecycle + global repo ────────────────────────────
 
@@ -330,15 +403,21 @@ class ArtifactEngine:
         logger.info("Star artifact %s starred=%s ok=%s", artifact_id, starred, ok)
         return ok
 
-    def pin_artifact(self, artifact_id: str, chat_id: Optional[str] = None, pinned: bool = True) -> bool:
+    def pin_artifact(
+        self, artifact_id: str, chat_id: Optional[str] = None, pinned: bool = True
+    ) -> bool:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         ok = self.storage.pin_artifact(artifact_id, chat_id, pinned)
-        logger.info("Pin artifact %s pinned=%s chat=%s ok=%s", artifact_id, pinned, chat_id, ok)
+        logger.info(
+            "Pin artifact %s pinned=%s chat=%s ok=%s", artifact_id, pinned, chat_id, ok
+        )
         return ok
 
-    def duplicate_artifact(self, artifact_id: str, new_name: Optional[str] = None) -> Optional[Artifact]:
+    def duplicate_artifact(
+        self, artifact_id: str, new_name: Optional[str] = None
+    ) -> Optional[Artifact]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -354,13 +433,17 @@ class ArtifactEngine:
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Artifact], int]:
-        artifacts, total = self.storage.list_all_artifacts(filters, sort, page, page_size)
+        artifacts, total = self.storage.list_all_artifacts(
+            filters, sort, page, page_size
+        )
         logger.info("list_all_artifacts: %d/%d page=%d", len(artifacts), total, page)
         return artifacts, total
 
     # ── P1: recycle bin ────────────────────────────────────────
 
-    def list_recycle(self, page: int = 1, page_size: int = 20) -> tuple[list[Artifact], int]:
+    def list_recycle(
+        self, page: int = 1, page_size: int = 20
+    ) -> tuple[list[Artifact], int]:
         artifacts, total = self.storage.list_recycle(page, page_size)
         logger.info("list_recycle: %d/%d page=%d", len(artifacts), total, page)
         return artifacts, total
@@ -373,7 +456,9 @@ class ArtifactEngine:
     def purge_expired(self) -> int:
         retention_days = getattr(self.config, "recycle_retention_days", 7)
         count = self.storage.purge_expired(retention_days)
-        logger.info("Purged %d expired artifacts (retention=%d days)", count, retention_days)
+        logger.info(
+            "Purged %d expired artifacts (retention=%d days)", count, retention_days
+        )
         return count
 
     # ── P1: optimistic lock ────────────────────────────────────
@@ -392,7 +477,9 @@ class ArtifactEngine:
         if expected_content_hash is not None:
             current_hash = artifact.content_hash
             if current_hash is not None and current_hash != expected_content_hash:
-                raise ValueError(f"Optimistic lock failed: expected hash {expected_content_hash}, got {current_hash}")
+                raise ValueError(
+                    f"Optimistic lock failed: expected hash {expected_content_hash}, got {current_hash}"
+                )
         if not change_log:
             old = self.storage.get_version(artifact_id, artifact.current_version)
             change_log = _auto_changelog(old.content if old else "", content)
@@ -416,8 +503,21 @@ class ArtifactEngine:
         if not artifact.summary:
             artifact.summary = _truncate_summary(content)
         self.storage.save_artifact(artifact)
-        ref_text = generate_ref_text(artifact_id, artifact.name, artifact.type, new_version, size, artifact.summary)
-        logger.info("Created version: %s v%s size=%d hash=%s", artifact_id, new_version, size, content_hash)
+        ref_text = generate_ref_text(
+            artifact_id,
+            artifact.name,
+            artifact.type,
+            new_version,
+            size,
+            artifact.summary,
+        )
+        logger.info(
+            "Created version: %s v%s size=%d hash=%s",
+            artifact_id,
+            new_version,
+            size,
+            content_hash,
+        )
         return version, ref_text
 
     # ── P1: share ──────────────────────────────────────────────
@@ -433,10 +533,15 @@ class ArtifactEngine:
             raise ValueError(f"Artifact not found: {artifact_id}")
         existing = self.storage.get_share_by_artifact(artifact_id)
         if existing is not None:
-            logger.info("Returning existing share %s for artifact %s", existing.share_id, artifact_id)
+            logger.info(
+                "Returning existing share %s for artifact %s",
+                existing.share_id,
+                artifact_id,
+            )
             return existing
         import uuid
         from datetime import datetime, timezone
+
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         share = ArtifactShare(
@@ -465,6 +570,7 @@ class ArtifactEngine:
             return None
         if share.expires_at:
             from datetime import datetime, timezone
+
             now_iso = datetime.now(timezone.utc).isoformat()
             if now_iso > share.expires_at:
                 logger.info("Share %s expired", share_id)
@@ -474,7 +580,13 @@ class ArtifactEngine:
         if artifact is None:
             return None
         version = self.get_version_content(share.artifact_id)
-        content_type_map = {"html": "text/html", "react": "text/html", "markdown": "text/markdown", "code": "text/plain", "data": "application/json"}
+        content_type_map = {
+            "html": "text/html",
+            "react": "text/html",
+            "markdown": "text/markdown",
+            "code": "text/plain",
+            "data": "application/json",
+        }
         ct = content_type_map.get(artifact.type, "text/plain")
         return {
             "artifact": artifact.model_dump(),
@@ -520,7 +632,9 @@ class ArtifactEngine:
         artifact.current_version = new_ver_num
         artifact.updated_at = now
         self.storage.save_artifact(artifact)
-        logger.info("Created snapshot: %s v%d label=%s", artifact_id, new_ver_num, label)
+        logger.info(
+            "Created snapshot: %s v%d label=%s", artifact_id, new_ver_num, label
+        )
         return snapshot
 
     def list_snapshots(self, artifact_id: str) -> list[ArtifactVersion]:
@@ -528,9 +642,15 @@ class ArtifactEngine:
 
     # ── P2: folders ────────────────────────────────────────────
 
-    def create_folder(self, name: str, parent_id: Optional[str] = None, project_id: Optional[str] = None) -> ArtifactFolder:
+    def create_folder(
+        self,
+        name: str,
+        parent_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> ArtifactFolder:
         import uuid
         from datetime import datetime, timezone
+
         folder_id = f"fld_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         folder = ArtifactFolder(
@@ -564,8 +684,11 @@ class ArtifactEngine:
 
     # ── P4: tags ───────────────────────────────────────────────
 
-    def add_tag(self, artifact_id: str, tag_name: str, color: Optional[str] = None) -> ArtifactTag:
+    def add_tag(
+        self, artifact_id: str, tag_name: str, color: Optional[str] = None
+    ) -> ArtifactTag:
         import uuid
+
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -607,6 +730,7 @@ class ArtifactEngine:
     ) -> ArtifactEvent:
         import uuid
         from datetime import datetime, timezone
+
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         event = ArtifactEvent(
@@ -618,7 +742,9 @@ class ArtifactEngine:
             created_at=now_iso,
         )
         self.storage.save_event(event)
-        logger.info("Emitted event: %s type=%s artifact=%s", event_id, event_type, artifact_id)
+        logger.info(
+            "Emitted event: %s type=%s artifact=%s", event_id, event_type, artifact_id
+        )
         return event
 
     def list_events(
@@ -629,7 +755,9 @@ class ArtifactEngine:
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:
-        events, total = self.storage.list_events(artifact_id, session_id, since_ts, page, page_size)
+        events, total = self.storage.list_events(
+            artifact_id, session_id, since_ts, page, page_size
+        )
         logger.info("list_events: %d/%d page=%d", len(events), total, page)
         return events, total
 
@@ -640,7 +768,12 @@ class ArtifactEngine:
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         ok = self.storage.move_to_project_kb(artifact_id, project_id)
-        logger.info("Moved artifact %s to project_kb project=%s ok=%s", artifact_id, project_id, ok)
+        logger.info(
+            "Moved artifact %s to project_kb project=%s ok=%s",
+            artifact_id,
+            project_id,
+            ok,
+        )
         return ok
 
     def close(self) -> None:

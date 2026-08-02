@@ -1,11 +1,7 @@
 import sys
 import time
-import tempfile
-import shutil
 import threading
-from pathlib import Path
 from unittest.mock import patch
-import pytest
 from fusion_artifacts_engine.__main__ import main
 
 
@@ -27,7 +23,10 @@ def test_no_command(capsys):
     with patch.object(sys, "argv", ["fusion-artifacts-engine"]):
         main()
     captured = capsys.readouterr()
-    assert "fusion-artifacts-engine" in captured.out.lower() or "usage" in captured.out.lower()
+    assert (
+        "fusion-artifacts-engine" in captured.out.lower()
+        or "usage" in captured.out.lower()
+    )
 
 
 def test_start_with_config(tmp_path):
@@ -37,11 +36,18 @@ def test_start_with_config(tmp_path):
     storage_dir.mkdir()
 
     def run_main():
-        with patch.object(sys, "argv", [
-            "fusion-artifacts-engine", "start",
-            "--config", str(config_file),
-            "--storage-root", str(storage_dir),
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "fusion-artifacts-engine",
+                "start",
+                "--config",
+                str(config_file),
+                "--storage-root",
+                str(storage_dir),
+            ],
+        ):
             main()
 
     thread = threading.Thread(target=run_main, daemon=True)
@@ -49,6 +55,7 @@ def test_start_with_config(tmp_path):
     time.sleep(2)
 
     import httpx
+
     try:
         resp = httpx.post(
             "http://127.0.0.1:19998",
@@ -66,12 +73,20 @@ def test_start_with_host_port(tmp_path):
     storage_dir.mkdir()
 
     def run_main():
-        with patch.object(sys, "argv", [
-            "fusion-artifacts-engine", "start",
-            "--host", "127.0.0.1",
-            "--port", "19997",
-            "--storage-root", str(storage_dir),
-        ]):
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "fusion-artifacts-engine",
+                "start",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "19997",
+                "--storage-root",
+                str(storage_dir),
+            ],
+        ):
             main()
 
     thread = threading.Thread(target=run_main, daemon=True)

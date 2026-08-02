@@ -22,6 +22,7 @@ def setup_logging(level: int = logging.INFO) -> None:
 def get_package_version() -> str:
     try:
         from importlib.metadata import version as pkg_version
+
         return pkg_version("fusion-artifacts-engine")
     except Exception:
         return "0.1.0"

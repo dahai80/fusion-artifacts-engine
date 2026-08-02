@@ -1,15 +1,16 @@
 import time
-import json
 import tempfile
 import shutil
 from pathlib import Path
 import pytest
-from fusion_artifacts_engine.config import ArtifactEngineConfig
-from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.models import (
-    Artifact, ArtifactVersion, ArtifactShare, ArtifactFolder,
-    ArtifactTag, ArtifactEvent,
+    Artifact,
+    ArtifactVersion,
+    ArtifactShare,
+    ArtifactFolder,
+    ArtifactTag,
+    ArtifactEvent,
 )
 
 
@@ -24,16 +25,33 @@ def storage():
     shutil.rmtree(tmp)
 
 
-def _make_artifact(artifact_id="art1", session_id="sess1", name="test.py", atype="code", **kw):
+def _make_artifact(
+    artifact_id="art1", session_id="sess1", name="test.py", atype="code", **kw
+):
     now = time.time()
-    return Artifact(id=artifact_id, session_id=session_id, name=name, type=atype,
-                    current_version=1, summary="", created_at=now, updated_at=now, **kw)
+    return Artifact(
+        id=artifact_id,
+        session_id=session_id,
+        name=name,
+        type=atype,
+        current_version=1,
+        summary="",
+        created_at=now,
+        updated_at=now,
+        **kw,
+    )
 
 
 def _make_version(artifact_id="art1", version_num=1, content="hello"):
-    return ArtifactVersion(artifact_id=artifact_id, version_num=version_num,
-                           content=content, size_bytes=len(content.encode("utf-8")),
-                           change_log="", source="manual", created_at=time.time())
+    return ArtifactVersion(
+        artifact_id=artifact_id,
+        version_num=version_num,
+        content=content,
+        size_bytes=len(content.encode("utf-8")),
+        change_log="",
+        source="manual",
+        created_at=time.time(),
+    )
 
 
 # ── save_artifact_and_version ──
@@ -308,10 +326,17 @@ def test_list_snapshots(storage):
     art = _make_artifact()
     ver1 = _make_version()
     storage.save_artifact_and_version(art, ver1)
-    ver2 = ArtifactVersion(artifact_id="art1", version_num=2, content="snap",
-                           size_bytes=4, change_log="", source="manual",
-                           created_at=time.time(), snapshot_type="named",
-                           snapshot_label="milestone")
+    ver2 = ArtifactVersion(
+        artifact_id="art1",
+        version_num=2,
+        content="snap",
+        size_bytes=4,
+        change_log="",
+        source="manual",
+        created_at=time.time(),
+        snapshot_type="named",
+        snapshot_label="milestone",
+    )
     storage.save_version(ver2)
     snaps = storage.list_snapshots("art1")
     assert len(snaps) == 1
@@ -325,9 +350,16 @@ def test_share_crud(storage):
     art = _make_artifact()
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
-    share = ArtifactShare(share_id="shr1", artifact_id="art1", created_by="user1",
-                          created_at="2026-01-01", expires_at=None, revoked=False,
-                          access_count=0, last_access_at=None)
+    share = ArtifactShare(
+        share_id="shr1",
+        artifact_id="art1",
+        created_by="user1",
+        created_at="2026-01-01",
+        expires_at=None,
+        revoked=False,
+        access_count=0,
+        last_access_at=None,
+    )
     storage.save_share(share)
     got = storage.get_share("shr1")
     assert got is not None
@@ -363,8 +395,13 @@ def test_revoke_share_not_found(storage):
 
 
 def test_folder_crud(storage):
-    folder = ArtifactFolder(folder_id="f1", name="Test", parent_id=None,
-                            project_id="p1", created_at="2026-01-01")
+    folder = ArtifactFolder(
+        folder_id="f1",
+        name="Test",
+        parent_id=None,
+        project_id="p1",
+        created_at="2026-01-01",
+    )
     storage.save_folder(folder)
     got = storage.get_folder("f1")
     assert got is not None
@@ -442,9 +479,14 @@ def test_get_tag_by_name_not_found(storage):
 
 
 def test_event_crud(storage):
-    event = ArtifactEvent(event_id="e1", artifact_id=None, session_id="s1",
-                          event_type="test", payload={"k": "v"},
-                          created_at="2026-01-01T00:00:00")
+    event = ArtifactEvent(
+        event_id="e1",
+        artifact_id=None,
+        session_id="s1",
+        event_type="test",
+        payload={"k": "v"},
+        created_at="2026-01-01T00:00:00",
+    )
     storage.save_event(event)
     events, total = storage.list_events(session_id="s1")
     assert total >= 1
@@ -478,7 +520,9 @@ def test_move_to_project_kb(storage):
 
 
 def test_list_by_source(storage):
-    art = _make_artifact(source_module="fusion-mlx", workspace_id="ws1", workflow_run_id="run1")
+    art = _make_artifact(
+        source_module="fusion-mlx", workspace_id="ws1", workflow_run_id="run1"
+    )
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     results = storage.list_by_source("fusion-mlx")
@@ -539,13 +583,20 @@ def test_list_all_since_until(storage):
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     now = time.time()
-    arts, total = storage.list_all_artifacts(filters={"since": now - 100, "until": now + 100})
+    arts, total = storage.list_all_artifacts(
+        filters={"since": now - 100, "until": now + 100}
+    )
     assert total >= 1
 
 
 def test_list_all_folder_filter(storage):
-    folder = ArtifactFolder(folder_id="f1", name="Test", parent_id=None,
-                            project_id="p1", created_at="2026-01-01")
+    folder = ArtifactFolder(
+        folder_id="f1",
+        name="Test",
+        parent_id=None,
+        project_id="p1",
+        created_at="2026-01-01",
+    )
     storage.save_folder(folder)
     art = _make_artifact(folder_id="f1")
     ver = _make_version()

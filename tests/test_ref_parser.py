@@ -1,4 +1,7 @@
-from fusion_artifacts_engine.ref_parser import parse_refs_from_message, generate_ref_text
+from fusion_artifacts_engine.ref_parser import (
+    parse_refs_from_message,
+    generate_ref_text,
+)
 
 
 def test_generate_ref_text_without_summary():
@@ -16,7 +19,7 @@ def test_generate_ref_text_with_summary():
 
 
 def test_parse_refs_from_message_tool_result_format():
-    msg = '[Artifact: hello.py | ID: art_abc123 | Version: v1 | Type: code | Size: 42 | Summary: test]'
+    msg = "[Artifact: hello.py | ID: art_abc123 | Version: v1 | Type: code | Size: 42 | Summary: test]"
     refs = parse_refs_from_message(msg)
     assert len(refs) == 1
     r = refs[0]
@@ -27,7 +30,7 @@ def test_parse_refs_from_message_tool_result_format():
 
 
 def test_parse_refs_from_message_no_summary():
-    msg = '[Artifact: hello.py | ID: art_abc123 | Version: v1 | Type: code | Size: 42]'
+    msg = "[Artifact: hello.py | ID: art_abc123 | Version: v1 | Type: code | Size: 42]"
     refs = parse_refs_from_message(msg)
     assert len(refs) == 1
 
@@ -64,11 +67,11 @@ def test_parse_refs_xml_version_non_numeric():
     msg = '<artifact id="art_y1" name="z.py" type="code" version="xyz" size_bytes="10"></artifact>'
     refs = parse_refs_from_message(msg)
     assert len(refs) == 1
-    assert refs[0].version == 'xyz'
+    assert refs[0].version == "xyz"
 
 
 def test_parse_refs_xml_no_summary():
     msg = '<artifact id="art_z1" name="a.py" type="code" version="1" size_bytes="10"></artifact>'
     refs = parse_refs_from_message(msg)
     assert len(refs) == 1
-    assert refs[0].summary == ''
+    assert refs[0].summary == ""

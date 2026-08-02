@@ -23,7 +23,9 @@ def engine(tmp_dir):
 
 @pytest.mark.asyncio
 async def test_create_artifact(engine):
-    art, ver, ref = await engine.create_artifact("s1", "test.py", "code", "print('hi')", summary="test")
+    art, ver, ref = await engine.create_artifact(
+        "s1", "test.py", "code", "print('hi')", summary="test"
+    )
     assert art.id.startswith("art_")
     assert art.name == "test.py"
     assert ver.version_num == 1
@@ -74,5 +76,3 @@ async def test_rollback_version(engine):
     v3, _ = await engine.rollback_version(art.id, 1)
     assert v3.version_num == 3
     assert v3.content == "original"
-
-

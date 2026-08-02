@@ -80,6 +80,7 @@ def test_concurrent_write_lock_serializes(engine):
 
 def test_rpc_server_ping(tmp_path):
     import socket
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -112,6 +113,7 @@ def test_rpc_server_ping(tmp_path):
 
 def test_rpc_concurrent_requests(tmp_path):
     import socket
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -135,7 +137,9 @@ def test_rpc_concurrent_requests(tmp_path):
         try:
             req = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": i}).encode()
             resp = urllib.request.urlopen(
-                "http://127.0.0.1:%d/" % port, data=req, timeout=5,
+                "http://127.0.0.1:%d/" % port,
+                data=req,
+                timeout=5,
             )
             data = json.loads(resp.read())
             results.append(data.get("result", {}).get("pong", False))

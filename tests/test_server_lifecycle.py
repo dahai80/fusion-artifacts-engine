@@ -2,7 +2,6 @@ import time
 import tempfile
 import shutil
 from pathlib import Path
-import pytest
 import httpx
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
@@ -31,14 +30,18 @@ def test_server_start_stop():
 
 def test_server_sse_connect():
     tmp = Path(tempfile.mkdtemp())
-    cfg = ArtifactEngineConfig(storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1)
+    cfg = ArtifactEngineConfig(
+        storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1
+    )
     engine = ArtifactEngine(cfg)
     server = ArtifactRPCServer(engine, host="127.0.0.1", port=19911)
     server.start_async()
     time.sleep(0.5)
 
     try:
-        with httpx.stream("GET", "http://127.0.0.1:19911/api/v1/events/stream", timeout=5.0) as resp:
+        with httpx.stream(
+            "GET", "http://127.0.0.1:19911/api/v1/events/stream", timeout=5.0
+        ) as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.headers.get("content-type", "")
     except Exception:
@@ -81,7 +84,7 @@ def test_server_rest_body_too_large():
 
     big = "x" * (11 * 1024 * 1024)
     resp = httpx.post(
-        f"http://127.0.0.1:19913/api/v1/artifacts/create",
+        "http://127.0.0.1:19913/api/v1/artifacts/create",
         json={"session_id": "s1", "name": "t.py", "type": "code", "content": big},
         timeout=5.0,
     )

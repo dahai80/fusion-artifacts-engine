@@ -1,4 +1,3 @@
-import time
 import tempfile
 import shutil
 from pathlib import Path
@@ -28,6 +27,7 @@ def engine(tmp_dir):
 @pytest.mark.asyncio
 async def test_truncate_summary():
     from fusion_artifacts_engine.engine import _truncate_summary
+
     assert _truncate_summary("short") == "short"
     long = "a" * 300
     result = _truncate_summary(long)
@@ -38,6 +38,7 @@ async def test_truncate_summary():
 @pytest.mark.asyncio
 async def test_auto_changelog():
     from fusion_artifacts_engine.engine import _auto_changelog
+
     assert "+3 lines" in _auto_changelog("a\n", "a\nb\nc\nd\n")
     assert "-2 lines" in _auto_changelog("a\nb\nc\n", "a\n")
     assert "content modified" in _auto_changelog("abc", "xyz")
@@ -47,6 +48,7 @@ async def test_auto_changelog():
 @pytest.mark.asyncio
 async def test_size_bytes():
     from fusion_artifacts_engine.engine import _size_bytes
+
     assert _size_bytes("hello") == 5
     assert _size_bytes("你好") == 6
 
@@ -566,7 +568,12 @@ async def test_add_tag_not_found(engine):
 
 @pytest.mark.asyncio
 async def test_emit_event(engine):
-    event = engine.emit_event("artifact.created", artifact_id="art_123", session_id="s1", payload={"key": "val"})
+    event = engine.emit_event(
+        "artifact.created",
+        artifact_id="art_123",
+        session_id="s1",
+        payload={"key": "val"},
+    )
     assert event.event_id.startswith("evt_")
     assert event.event_type == "artifact.created"
 
@@ -584,7 +591,9 @@ async def test_list_events(engine):
 
 @pytest.mark.asyncio
 async def test_move_to_project_kb(engine):
-    art, _, _ = await engine.create_artifact("s1", "kb.py", "code", "x", project_id="p1")
+    art, _, _ = await engine.create_artifact(
+        "s1", "kb.py", "code", "x", project_id="p1"
+    )
     ok = engine.move_to_project_kb(art.id, "p1")
     assert ok
 
@@ -600,7 +609,9 @@ async def test_move_to_project_kb_not_found(engine):
 
 @pytest.mark.asyncio
 async def test_create_artifact_auto_summary(engine):
-    art, _, _ = await engine.create_artifact("s1", "auto.py", "code", "some content here")
+    art, _, _ = await engine.create_artifact(
+        "s1", "auto.py", "code", "some content here"
+    )
     assert art.summary == "some content here"
 
 
@@ -613,7 +624,10 @@ async def test_create_artifact_auto_kind(engine):
 @pytest.mark.asyncio
 async def test_create_artifact_with_metadata(engine):
     art, _, _ = await engine.create_artifact(
-        "s1", "meta.py", "code", "x",
+        "s1",
+        "meta.py",
+        "code",
+        "x",
         metadata={"framework": "flask"},
     )
     assert art.metadata == {"framework": "flask"}

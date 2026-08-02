@@ -23,14 +23,16 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
             ver = str(int(ver))
         except ValueError:
             pass
-        refs.append(ArtifactRef(
-            artifact_id=m.group("id"),
-            name=m.group("name").strip(),
-            type=m.group("type").strip(),
-            version=ver,
-            size_bytes=int(m.group("size_bytes")),
-            summary=(m.group("summary") or "").strip(),
-        ))
+        refs.append(
+            ArtifactRef(
+                artifact_id=m.group("id"),
+                name=m.group("name").strip(),
+                type=m.group("type").strip(),
+                version=ver,
+                size_bytes=int(m.group("size_bytes")),
+                summary=(m.group("summary") or "").strip(),
+            )
+        )
     for m in _XML_ARTIFACT_PATTERN.finditer(content):
         ver = m.group("version")
         if ver != "latest":
@@ -38,14 +40,16 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
                 ver = str(int(ver))
             except ValueError:
                 pass
-        refs.append(ArtifactRef(
-            artifact_id=m.group("id"),
-            name=m.group("name").strip(),
-            type=m.group("type").strip(),
-            version=ver,
-            size_bytes=int(m.group("size_bytes")),
-            summary=(m.group("summary") or "").strip(),
-        ))
+        refs.append(
+            ArtifactRef(
+                artifact_id=m.group("id"),
+                name=m.group("name").strip(),
+                type=m.group("type").strip(),
+                version=ver,
+                size_bytes=int(m.group("size_bytes")),
+                summary=(m.group("summary") or "").strip(),
+            )
+        )
     logger.debug("Parsed %s refs from message", len(refs))
     return refs
 

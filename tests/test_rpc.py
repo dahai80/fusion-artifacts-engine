@@ -40,13 +40,16 @@ def test_ping(rpc_server):
 
 
 def test_create_and_get(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_rpc",
-        "name": "test.py",
-        "type": "code",
-        "content": "print('hello')",
-        "summary": "test",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rpc",
+            "name": "test.py",
+            "type": "code",
+            "content": "print('hello')",
+            "summary": "test",
+        },
+    )
     assert "result" in r
     art_id = r["result"]["artifact"]["id"]
     r2 = rpc("artifact.get", {"artifact_id": art_id})
@@ -54,52 +57,65 @@ def test_create_and_get(rpc_server):
 
 
 def test_list(rpc_server):
-    rpc("artifact.create", {
-        "session_id": "s_rpc_list",
-        "name": "list_test.py",
-        "type": "code",
-        "content": "code",
-    })
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rpc_list",
+            "name": "list_test.py",
+            "type": "code",
+            "content": "code",
+        },
+    )
     r = rpc("artifact.list", {"session_id": "s_rpc_list"})
     assert len(r["result"]["artifacts"]) >= 1
 
 
 def test_update(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_rpc_upd",
-        "name": "upd.py",
-        "type": "code",
-        "content": "v1",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rpc_upd",
+            "name": "upd.py",
+            "type": "code",
+            "content": "v1",
+        },
+    )
     art_id = r["result"]["artifact"]["id"]
-    r2 = rpc("artifact.update", {"artifact_id": art_id, "content": "v2", "change_log": "update"})
+    r2 = rpc(
+        "artifact.update",
+        {"artifact_id": art_id, "content": "v2", "change_log": "update"},
+    )
     assert r2["result"]["version"]["version_num"] == 2
 
 
 def test_get_content(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_rpc_gc",
-        "name": "gc.py",
-        "type": "code",
-        "content": "the content",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rpc_gc",
+            "name": "gc.py",
+            "type": "code",
+            "content": "the content",
+        },
+    )
     art_id = r["result"]["artifact"]["id"]
     r2 = rpc("artifact.get_content", {"artifact_id": art_id})
     assert r2["result"]["content"] == "the content"
 
 
 def test_delete(rpc_server):
-    r = rpc("artifact.create", {
-        "session_id": "s_rpc_del",
-        "name": "del.py",
-        "type": "code",
-        "content": "bye",
-    })
+    r = rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rpc_del",
+            "name": "del.py",
+            "type": "code",
+            "content": "bye",
+        },
+    )
     art_id = r["result"]["artifact"]["id"]
     r2 = rpc("artifact.delete", {"artifact_id": art_id})
     assert r2["result"]["ok"] is True
-
-
 
 
 def test_unknown_method(rpc_server):

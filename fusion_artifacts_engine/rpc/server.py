@@ -5,7 +5,6 @@ import queue
 import logging
 import asyncio
 import threading
-import time as _t
 from urllib.parse import urlparse, parse_qs
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -37,27 +36,32 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
-
     def _is_authed(self) -> bool:
         if not _API_KEY:
             allow_no_auth = getattr(
                 self.server._rpc_handler.engine.config,
-                "allow_no_auth", True,
+                "allow_no_auth",
+                True,
             )
             if allow_no_auth:
                 return True
-            logger.warning("Auth rejected: no API_KEY configured and allow_no_auth=False")
+            logger.warning(
+                "Auth rejected: no API_KEY configured and allow_no_auth=False"
+            )
             return False
         api_key = self.headers.get("X-API-Key", "")
         return hmac.compare_digest(api_key, _API_KEY)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
         if jsonrpc:
-            self._send_response(401, {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32600, "message": "Unauthorized"},
-            })
+            self._send_response(
+                401,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "Unauthorized"},
+                },
+            )
         else:
             self._send_rest_response(401, {"error": "Unauthorized"})
 
@@ -71,37 +75,51 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
-                self._send_response(413, {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32603, "message": "Request body too large"},
-                })
+                self._send_response(
+                    413,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32603, "message": "Request body too large"},
+                    },
+                )
                 return
             body = self.rfile.read(length)
             try:
                 request = json.loads(body.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                self._send_response(200, {
-                    "jsonrpc": "2.0", "id": None,
-                    "error": {"code": -32700, "message": f"Parse error: {e}"},
-                })
+                self._send_response(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": f"Parse error: {e}"},
+                    },
+                )
                 return
             if not isinstance(request, dict) or "jsonrpc" not in request:
-                self._send_response(200, {
-                    "jsonrpc": "2.0", "id": request.get("id") if isinstance(request, dict) else None,
-                    "error": {"code": -32600, "message": "Invalid Request"},
-                })
+                self._send_response(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request.get("id") if isinstance(request, dict) else None,
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    },
+                )
                 return
             logger.debug("RPC request: %s", request.get("method"))
             response = self._run_async(self._handle(request))
             self._send_response(200, response)
         except Exception as e:
             logger.error("RPC error: %s", e, exc_info=True)
-            self._send_response(200, {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32603, "message": "Internal error"},
-            })
+            self._send_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32603, "message": "Internal error"},
+                },
+            )
 
     def do_GET(self):
         if self.path.startswith("/api/v1/events/stream"):
@@ -133,9 +151,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if len(path_parts) == 5 and path_parts[4] == "versions":
                 artifact_id = path_parts[3]
                 versions = engine.list_versions(artifact_id)
-                self._send_rest_response(200, {
-                    "versions": [v.model_dump() for v in versions],
-                })
+                self._send_rest_response(
+                    200,
+                    {
+                        "versions": [v.model_dump() for v in versions],
+                    },
+                )
                 return
             if len(path_parts) == 6 and path_parts[4] == "versions":
                 artifact_id = path_parts[3]
@@ -155,25 +176,37 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         if len(path_parts) >= 3 and path_parts[2] == "artifacts":
             session_id = query.get("session_id", [""])[0]
-            include_deleted = query.get("include_deleted", ["false"])[0].lower() == "true"
+            include_deleted = (
+                query.get("include_deleted", ["false"])[0].lower() == "true"
+            )
             project_id = query.get("project_id", [None])[0]
             if session_id:
-                artifacts = engine.list_artifacts(session_id, include_deleted, project_id)
-                self._send_rest_response(200, {
-                    "artifacts": [a.model_dump() for a in artifacts],
-                    "total": len(artifacts),
-                })
+                artifacts = engine.list_artifacts(
+                    session_id, include_deleted, project_id
+                )
+                self._send_rest_response(
+                    200,
+                    {
+                        "artifacts": [a.model_dump() for a in artifacts],
+                        "total": len(artifacts),
+                    },
+                )
             else:
                 page = int(query.get("page", ["1"])[0])
                 page_size = int(query.get("page_size", ["20"])[0])
                 sort = query.get("sort", ["updated_at"])[0]
                 artifacts, total = engine.list_all_artifacts(
-                    page=page, page_size=page_size, sort=sort,
+                    page=page,
+                    page_size=page_size,
+                    sort=sort,
                 )
-                self._send_rest_response(200, {
-                    "artifacts": [a.model_dump() for a in artifacts],
-                    "total": total,
-                })
+                self._send_rest_response(
+                    200,
+                    {
+                        "artifacts": [a.model_dump() for a in artifacts],
+                        "total": total,
+                    },
+                )
             return
 
         self._send_rest_response(404, {"error": "Not found"})
@@ -199,40 +232,53 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
             if len(path_parts) == 4:
-                result = self._run_async(engine.create_artifact(
-                    session_id=data.get("session_id", ""),
-                    name=data.get("name", ""),
-                    artifact_type=data.get("type", "code"),
-                    content=data.get("content", ""),
-                    summary=data.get("summary", ""),
-                    kind=data.get("kind"),
-                    project_id=data.get("project_id"),
-                    metadata=data.get("metadata"),
-                ))
+                result = self._run_async(
+                    engine.create_artifact(
+                        session_id=data.get("session_id", ""),
+                        name=data.get("name", ""),
+                        artifact_type=data.get("type", "code"),
+                        content=data.get("content", ""),
+                        summary=data.get("summary", ""),
+                        kind=data.get("kind"),
+                        project_id=data.get("project_id"),
+                        metadata=data.get("metadata"),
+                    )
+                )
                 artifact, version, ref_text = result
-                self._send_rest_response(201, {
-                    "artifact": artifact.model_dump(),
-                    "version": version.model_dump(),
-                    "ref_text": ref_text,
-                })
+                self._send_rest_response(
+                    201,
+                    {
+                        "artifact": artifact.model_dump(),
+                        "version": version.model_dump(),
+                        "ref_text": ref_text,
+                    },
+                )
                 return
             artifact_id = path_parts[3]
             if len(path_parts) == 4:
                 action = data.get("action", "")
                 if action == "delete":
-                    ok = engine.delete_artifact(artifact_id, soft_delete=data.get("soft_delete", True))
+                    ok = engine.delete_artifact(
+                        artifact_id, soft_delete=data.get("soft_delete", True)
+                    )
                     self._send_rest_response(200, {"ok": ok})
                 else:
-                    result = self._run_async(engine.create_version(
-                        artifact_id, data.get("content", ""),
-                        change_log=data.get("change_log", ""),
-                        expected_content_hash=data.get("expected_content_hash"),
-                    ))
+                    result = self._run_async(
+                        engine.create_version(
+                            artifact_id,
+                            data.get("content", ""),
+                            change_log=data.get("change_log", ""),
+                            expected_content_hash=data.get("expected_content_hash"),
+                        )
+                    )
                     version, ref_text = result
-                    self._send_rest_response(200, {
-                        "version": version.model_dump(),
-                        "ref_text": ref_text,
-                    })
+                    self._send_rest_response(
+                        200,
+                        {
+                            "version": version.model_dump(),
+                            "ref_text": ref_text,
+                        },
+                    )
                 return
             self._send_rest_response(404, {"error": "Not found"})
             return
@@ -265,7 +311,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     if event is None:
                         break
                     data = json.dumps(event)
-                    self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode("utf-8"))
+                    self.wfile.write(
+                        f"event: artifact\ndata: {data}\n\n".encode("utf-8")
+                    )
                     self.wfile.flush()
                 except queue.Empty:
                     try:
@@ -304,12 +352,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             result = await rpc_handler.dispatch(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except RpcError as e:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": e.code, "message": e.message}}
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": e.code, "message": e.message},
+            }
         except ValueError as e:
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": str(e)}}
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": str(e)},
+            }
         except Exception as e:
             logger.error("Dispatch error for %s: %s", method, e, exc_info=True)
-            return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": "Internal error"}}
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32603, "message": "Internal error"},
+            }
 
     def _send_response(self, code: int, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
@@ -329,8 +389,12 @@ def _async_loop_thread(loop: asyncio.AbstractEventLoop) -> None:
 
 
 class ArtifactRPCServer:
-
-    def __init__(self, engine: ArtifactEngine, host: Optional[str] = None, port: Optional[int] = None):
+    def __init__(
+        self,
+        engine: ArtifactEngine,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+    ):
         self.engine = engine
         self.host = host or getattr(engine.config, "server_host", "127.0.0.1")
         self.port = port or getattr(engine.config, "server_port", 11451)
@@ -341,7 +405,9 @@ class ArtifactRPCServer:
 
     def _start_loop(self) -> None:
         self._async_loop = asyncio.new_event_loop()
-        self._loop_thread = threading.Thread(target=_async_loop_thread, args=(self._async_loop,), daemon=True)
+        self._loop_thread = threading.Thread(
+            target=_async_loop_thread, args=(self._async_loop,), daemon=True
+        )
         self._loop_thread.start()
         logger.info("Persistent async event loop started")
 

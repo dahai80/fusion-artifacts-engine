@@ -45,7 +45,10 @@ def rest_post(path, data=None, **kwargs):
 
 
 def _create_artifact(session_id="s_rest", name="r.py", atype="code", content="rest"):
-    r = rpc("artifact.create", {"session_id": session_id, "name": name, "type": atype, "content": content})
+    r = rpc(
+        "artifact.create",
+        {"session_id": session_id, "name": name, "type": atype, "content": content},
+    )
     return r["result"]["artifact"]["id"]
 
 
@@ -146,9 +149,15 @@ def test_rest_get_root_404(rest_server):
 
 
 def test_rest_create_artifact(rest_server):
-    resp = rest_post("/api/v1/artifacts/create", {
-        "session_id": "s_rest_create", "name": "create.py", "type": "code", "content": "new",
-    })
+    resp = rest_post(
+        "/api/v1/artifacts/create",
+        {
+            "session_id": "s_rest_create",
+            "name": "create.py",
+            "type": "code",
+            "content": "new",
+        },
+    )
     assert resp.status_code == 201
     data = resp.json()
     assert "artifact" in data
@@ -211,7 +220,11 @@ def test_rpc_invalid_request(rest_server):
 
 def test_rpc_body_too_large(rest_server):
     big = "x" * (11 * 1024 * 1024)
-    resp = httpx.post(BASE, json={"jsonrpc": "2.0", "method": "ping", "id": 1, "params": {"d": big}}, timeout=5.0)
+    resp = httpx.post(
+        BASE,
+        json={"jsonrpc": "2.0", "method": "ping", "id": 1, "params": {"d": big}},
+        timeout=5.0,
+    )
     assert resp.status_code == 413
 
 
@@ -219,7 +232,16 @@ def test_rpc_body_too_large(rest_server):
 
 
 def test_rest_list_with_project(rest_server):
-    rpc("artifact.create", {"session_id": "s_rest_proj", "name": "proj.py", "type": "code", "content": "x", "project_id": "proj1"})
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_rest_proj",
+            "name": "proj.py",
+            "type": "code",
+            "content": "x",
+            "project_id": "proj1",
+        },
+    )
     resp = rest_get("/api/v1/artifacts?session_id=s_rest_proj&project_id=proj1")
     assert resp.status_code == 200
 
