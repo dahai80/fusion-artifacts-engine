@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
     version_num INTEGER NOT NULL,
     content TEXT DEFAULT '',
     content_path TEXT,
-    token_count INTEGER NOT NULL DEFAULT 0,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
     change_log TEXT DEFAULT '',
     source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation')),
     created_at REAL NOT NULL,
@@ -150,7 +150,7 @@ def _version_from_row(row: sqlite3.Row) -> ArtifactVersion:
         version_num=row["version_num"],
         content=row["content"] or "",
         content_path=row["content_path"],
-        token_count=row["token_count"],
+        size_bytes=row["size_bytes"],
         change_log=row["change_log"] or "",
         source=row["source"] if "source" in keys else "manual",
         created_at=row["created_at"],
@@ -236,6 +236,7 @@ class SQLiteStorage(StorageDriver):
         self._migrate_kb_column()
         self._migrate_snapshot_columns()
         self._migrate_source_module_columns()
+        self._migrate_size_bytes_column()
         logger.info("SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir)
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
@@ -364,17 +365,17 @@ class SQLiteStorage(StorageDriver):
                 content = ""
             self._conn.execute(
                 """INSERT INTO artifact_versions
-                   (artifact_id, version_num, content, content_path, token_count,
+                   (artifact_id, version_num, content, content_path, size_bytes,
                     change_log, source, created_at, snapshot_type, snapshot_label,
                     author, parent_version)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (version.artifact_id, version.version_num, content, content_path,
-                 version.token_count, version.change_log, version.source,
+                 version.size_bytes, version.change_log, version.source,
                  version.created_at, version.snapshot_type, version.snapshot_label,
                  version.author, version.parent_version),
             )
             self._conn.commit()
-        logger.info("Saved artifact+version: %s v%d tokens=%d", artifact.id, version.version_num, version.token_count)
+        logger.info("Saved artifact+version: %s v%d size=%d", artifact.id, version.version_num, version.size_bytes)
 
     def get_artifact(self, artifact_id: str, project_id: Optional[str] = None) -> Optional[Artifact]:
         if project_id is not None:
@@ -569,7 +570,7 @@ class SQLiteStorage(StorageDriver):
             artifact_id=new_id,
             version_num=1,
             content=ver.content,
-            token_count=ver.token_count,
+            size_bytes=ver.size_bytes,
             change_log=f"Duplicated from {artifact_id}",
             source="manual",
             created_at=now,
@@ -660,17 +661,17 @@ class SQLiteStorage(StorageDriver):
                 try:
                     self._conn.execute(
                         """INSERT INTO artifact_versions
-                           (artifact_id, version_num, content, content_path, token_count,
+                           (artifact_id, version_num, content, content_path, size_bytes,
                             change_log, source, created_at, snapshot_type, snapshot_label,
                             author, parent_version)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (version.artifact_id, version.version_num, content, content_path,
-                         version.token_count, version.change_log, version.source,
+                         version.size_bytes, version.change_log, version.source,
                          version.created_at, version.snapshot_type, version.snapshot_label,
                          version.author, version.parent_version),
                     )
                     self._conn.commit()
-                    logger.info("Saved version: %s v%d tokens=%d", version.artifact_id, version.version_num, version.token_count)
+                    logger.info("Saved version: %s v%d size=%d", version.artifact_id, version.version_num, version.size_bytes)
                     return
                 except sqlite3.IntegrityError:
                     if attempt >= max_retries - 1:
@@ -1123,3 +1124,13 @@ class SQLiteStorage(StorageDriver):
     def close(self) -> None:
         self._conn.close()
         logger.info("SQLiteStorage closed")
+
+    def _migrate_size_bytes_column(self) -> None:
+        try:
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(artifact_versions)").fetchall()]
+            if "token_count" in cols and "size_bytes" not in cols:
+                self._conn.execute("ALTER TABLE artifact_versions RENAME COLUMN token_count TO size_bytes")
+                self._conn.commit()
+                logger.info("Migrated artifact_versions: token_count -> size_bytes")
+        except Exception as e:
+            logger.warning("Migration size_bytes failed: %s", e)

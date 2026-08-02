@@ -1,6 +1,6 @@
 #!/bin/bash
 # fusion-artifacts-engine lifecycle manager (start|stop|restart|status)
-# JSON-RPC artifact engine on 127.0.0.1:8892 (ping method).
+# JSON-RPC artifact engine on 127.0.0.1:11451 (ping method).
 # Callers: fusion-studio UpstreamServiceManager (auto-start on launch + manual start).
 # Affected API: start.sh start|stop|restart|status; status exits 0 if running, 1 if not.
 # Data schemas: PID file .fusion-artifacts-engine.pid; logs/stdout.log + logs/stderr.log.
@@ -13,7 +13,7 @@ cd "$SCRIPT_DIR"
 
 VENV="${SCRIPT_DIR}/.venv"
 HOST="${FUSION_ARTIFACTS_HOST:-127.0.0.1}"
-PORT="${FUSION_ARTIFACTS_PORT:-8892}"
+PORT="${FUSION_ARTIFACTS_PORT:-11451}"
 PID_FILE="${SCRIPT_DIR}/.fusion-artifacts-engine.pid"
 LOG_DIR="${SCRIPT_DIR}/logs"
 STDOUT_LOG="${LOG_DIR}/stdout.log"
@@ -49,7 +49,7 @@ is_healthy() {
     FAE_HOST="$HOST" FAE_PORT="$PORT" python3 - <<'PY' 2>/dev/null
 import os, sys, json, urllib.request
 host = os.environ.get("FAE_HOST", "127.0.0.1")
-port = os.environ.get("FAE_PORT", "8892")
+port = os.environ.get("FAE_PORT", "11451")
 body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
 req = urllib.request.Request(f"http://{host}:{port}", data=body,
                              headers={"Content-Type": "application/json"})

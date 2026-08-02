@@ -5,11 +5,6 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field
 import yaml
 
-# User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
-# Importers/callers: __main__.py calls load_config(), engine.py receives ArtifactEngineConfig, server.py reads config.server_host/server_port
-# Affected API: ArtifactEngineConfig gains server_host/server_port fields; new load_config() function; DEFAULT_* constants removed
-# Data schemas: YAML config with server/storage/mlx/thresholds/artifact sections; ArtifactEngineConfig Pydantic model
-
 logger = logging.getLogger(__name__)
 
 _PACKAGE_DIR = Path(__file__).parent
@@ -52,15 +47,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     if "small_content_limit" in storage:
         flat["small_content_limit"] = storage["small_content_limit"]
 
-    mlx = data.get("mlx", {})
-    if "url" in mlx:
-        flat["mlx_url"] = mlx["url"]
-
     thresholds = data.get("thresholds", {})
-    if "safe_context" in thresholds:
-        flat["safe_context_threshold"] = thresholds["safe_context"]
-    if "output_reserve" in thresholds:
-        flat["output_reserve_tokens"] = thresholds["output_reserve"]
     if "auto_create_lines" in thresholds:
         flat["auto_create_threshold_lines"] = thresholds["auto_create_lines"]
     if "auto_create_chars" in thresholds:
@@ -94,9 +81,6 @@ def load_config(user_config_path: Optional[Path] = None) -> "ArtifactEngineConfi
         "FUSION_ARTIFACTS_HOST": ("server_host", str),
         "FUSION_ARTIFACTS_PORT": ("server_port", int),
         "FUSION_ARTIFACTS_STORAGE_ROOT": ("storage_root", lambda v: Path(v)),
-        "FUSION_ARTIFACTS_MLX_URL": ("mlx_url", str),
-        "FUSION_ARTIFACTS_SAFE_CONTEXT": ("safe_context_threshold", int),
-        "FUSION_ARTIFACTS_OUTPUT_RESERVE": ("output_reserve_tokens", int),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -111,6 +95,10 @@ def load_config(user_config_path: Optional[Path] = None) -> "ArtifactEngineConfi
 
     server_host = merged.pop("server_host", None)
     server_port = merged.pop("server_port", None)
+
+    # Remove stale keys from user config that no longer exist in model
+    for stale in ("mlx_url", "safe_context_threshold", "output_reserve_tokens"):
+        merged.pop(stale, None)
 
     config = ArtifactEngineConfig(**merged)
 
@@ -127,17 +115,14 @@ class ArtifactEngineConfig(BaseModel):
 
     storage_root: Path = Field(default=Path.home() / ".fusion" / "artifacts")
     db_name: str = Field(default="meta.db")
-    mlx_url: str = Field(default="http://localhost:8890")
-    safe_context_threshold: int = Field(default=180_000)
-    output_reserve_tokens: int = Field(default=8192)
     auto_create_threshold_lines: int = Field(default=30)
     auto_create_threshold_chars: int = Field(default=1500)
     small_content_limit: int = Field(default=10240)
     artifact_id_prefix: str = Field(default="art_")
     server_host: str = Field(default="127.0.0.1")
-    server_port: int = Field(default=8892)
+    server_port: int = Field(default=11451)
     recycle_retention_days: int = Field(default=7)
-    allow_no_auth: bool = Field(default=False)
+    allow_no_auth: bool = Field(default=True)
     sse_heartbeat_interval: int = Field(default=30)
 
     @property

@@ -97,37 +97,3 @@ def test_get_artifact_with_project_id(rpc_server):
     art_id = r["result"]["artifact"]["id"]
     r2 = rpc("artifact.get", {"artifact_id": art_id})
     assert r2["result"]["artifact"]["project_id"] == "proj-get"
-
-
-def test_token_count_api(rpc_server):
-    resp = httpx.post(
-        f"http://127.0.0.1:{PORT}/api/token-count",
-        json={"text": "Hello, world! This is a test."},
-        timeout=5.0,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "token_count" in data
-    assert isinstance(data["token_count"], int)
-    assert data["token_count"] > 0
-
-
-def test_token_count_api_empty(rpc_server):
-    resp = httpx.post(
-        f"http://127.0.0.1:{PORT}/api/token-count",
-        json={"text": ""},
-        timeout=5.0,
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["token_count"] == 0
-
-
-def test_token_count_api_invalid_json(rpc_server):
-    resp = httpx.post(
-        f"http://127.0.0.1:{PORT}/api/token-count",
-        content=b"not json",
-        headers={"Content-Type": "application/json"},
-        timeout=5.0,
-    )
-    assert resp.status_code == 400

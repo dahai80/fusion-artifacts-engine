@@ -100,9 +100,6 @@ def test_delete(rpc_server):
     assert r2["result"]["ok"] is True
 
 
-def test_check_safety(rpc_server):
-    r = rpc("artifact.check_safety", {"messages": [{"role": "user", "content": "hello"}]})
-    assert r["result"]["safe"] is True
 
 
 def test_unknown_method(rpc_server):

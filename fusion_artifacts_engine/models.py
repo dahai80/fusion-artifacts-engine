@@ -58,7 +58,7 @@ class ArtifactVersion(BaseModel):
     version_num: int
     content: str = ""
     content_path: Optional[str] = None
-    token_count: int = 0
+    size_bytes: int = 0
     change_log: str = ""
     source: str = "manual"
     created_at: float = Field(default_factory=time.time)
@@ -73,7 +73,7 @@ class ArtifactRef(BaseModel):
     name: str
     type: ArtifactType
     version: str
-    token_count: int = 0
+    size_bytes: int = 0
     summary: str = ""
 
 

@@ -31,17 +31,12 @@ class RPCHandler:
             "artifact.update": self._update,
             "artifact.version_list": self._version_list,
             "artifact.version_rollback": self._version_rollback,
-            "artifact.inject": self._inject,
-            "artifact.check_safety": self._check_safety,
             "artifact.export": self._export,
             "artifact.export_session": self._export_session,
             "artifact.import": self._import_artifact,
             "artifact.export_code": self._export_code,
             "artifact.import_code": self._import_code,
             "artifact.watch": self._watch,
-            "artifact.sync": self._sync,
-            "artifact.render": self._render,
-            "artifact.interact": self._interact,
             # P1: lifecycle + global repo
             "artifact.rename": self._rename,
             "artifact.star": self._star,
@@ -121,7 +116,7 @@ class RPCHandler:
         result = self.engine.get_version_content(params["artifact_id"], version)
         if result is None:
             raise ValueError("Version not found")
-        return {"content": result.content, "token_count": result.token_count, "version": result.version_num}
+        return {"content": result.content, "token_count": result.size_bytes, "version": result.version_num}
 
     async def _list(self, params: dict) -> dict:
         artifacts = self.engine.list_artifacts(
@@ -159,18 +154,6 @@ class RPCHandler:
             params["artifact_id"], params["target_version"]
         )
         return {"version": version.model_dump(), "ref_text": ref_text}
-
-    async def _inject(self, params: dict) -> dict:
-        messages, total, safe = await self.engine.inject(
-            params["messages"], params.get("max_context")
-        )
-        return {"messages": messages, "total_tokens": total, "safe": safe}
-
-    async def _check_safety(self, params: dict) -> dict:
-        safe, current, remaining = await self.engine.check_safety(
-            params["messages"], params.get("max_context")
-        )
-        return {"safe": safe, "current_tokens": current, "remaining_tokens": remaining}
 
     async def _export(self, params: dict) -> dict:
         artifact = self.engine.get_artifact(params["artifact_id"])
@@ -271,38 +254,8 @@ class RPCHandler:
         else:
             raise ValueError(f"Invalid action: {action}, must be register/unregister/poll")
 
-    async def _sync(self, params: dict) -> dict:
-        direction = params.get("direction", "artifact_to_code")
-        if direction not in ("artifact_to_code", "code_to_artifact"):
-            raise ValueError("direction must be 'artifact_to_code' or 'code_to_artifact'")
-        result = await self.engine.sync_artifact_file(
-            params["artifact_id"], params["code_path"], direction
-        )
-        return result
-
     async def _ping(self, params: dict) -> dict:
         return {"pong": True, "version": get_package_version()}
-
-    async def _render(self, params: dict) -> dict:
-        result = await self.engine.render_artifact(
-            session_id=params.get("session_id", ""),
-            content=params.get("content", ""),
-            artifact_type=params.get("type", "auto"),
-            viewport=params.get("viewport"),
-            project_id=params.get("project_id"),
-        )
-        return result
-
-    async def _interact(self, params: dict) -> dict:
-        result = await self.engine.interact_artifact(
-            artifact_id=params["artifact_id"],
-            action=params.get("action", "state_change"),
-            payload=params.get("payload", {}),
-            session_id=params.get("session_id", ""),
-        )
-        return result
-
-    # ── P1: lifecycle + global repo ────────────────────────────
 
     async def _rename(self, params: dict) -> dict:
         ok = self.engine.rename_artifact(params["artifact_id"], params["new_name"])

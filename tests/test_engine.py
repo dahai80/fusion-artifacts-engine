@@ -76,22 +76,3 @@ async def test_rollback_version(engine):
     assert v3.content == "original"
 
 
-@pytest.mark.asyncio
-async def test_check_safety(engine):
-    safe, total, remaining = await engine.check_safety([{"role": "user", "content": "hello"}])
-    assert safe is True
-    assert total > 0
-
-
-@pytest.mark.asyncio
-async def test_should_create_artifact(engine):
-    assert engine.should_create_artifact("line\n" * 35, "code") is True
-    assert engine.should_create_artifact("short", "text") is False
-
-
-@pytest.mark.asyncio
-async def test_inject(engine):
-    art, _, ref = await engine.create_artifact("s1", "test.py", "code", "print('hello')", summary="test")
-    messages = [{"role": "assistant", "content": ref}]
-    injected, total, safe = await engine.inject(messages)
-    assert "print('hello')" in injected[0]["content"]

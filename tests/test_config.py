@@ -10,9 +10,8 @@ def test_default_config():
     config = ArtifactEngineConfig()
     assert config.storage_root == Path.home() / ".fusion" / "artifacts"
     assert config.server_host == "127.0.0.1"
-    assert config.server_port == 8892
-    assert config.safe_context_threshold == 180_000
-    assert config.output_reserve_tokens == 8192
+    assert config.server_port == 11451
+    assert config.allow_no_auth is True
     assert config.artifact_id_prefix == "art_"
 
 
@@ -26,7 +25,7 @@ def test_flatten_yaml_config():
         "server": {"host": "0.0.0.0", "port": 9000},
         "storage": {"root": "/tmp/artifacts", "db_name": "test.db", "small_content_limit": 2048},
         "mlx": {"url": "http://mlx:8890"},
-        "thresholds": {"safe_context": 100_000, "output_reserve": 4096, "auto_create_lines": 50, "auto_create_chars": 3000},
+        "thresholds": {"auto_create_lines": 50, "auto_create_chars": 3000},
         "artifact": {"id_prefix": "test_"},
     }
     flat = _flatten_yaml_config(data)
@@ -34,8 +33,6 @@ def test_flatten_yaml_config():
     assert flat["server_port"] == 9000
     assert flat["storage_root"] == Path("/tmp/artifacts")
     assert flat["db_name"] == "test.db"
-    assert flat["mlx_url"] == "http://mlx:8890"
-    assert flat["safe_context_threshold"] == 100_000
     assert flat["artifact_id_prefix"] == "test_"
 
 
