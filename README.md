@@ -1,13 +1,13 @@
 # Fusion Artifacts Engine
 
-Artifact management middleware for the Fusion architecture. Physically separates generated artifacts from chat messages to solve context overflow in long AI conversations.
+Structured artifact CRUD middleware for the Fusion architecture. Physically separates generated artifacts from chat messages to solve context overflow in long AI conversations.
 
 ## How It Works
 
 When a model generates long content (code, documents, HTML apps), the engine:
 1. Stores the full content independently
 2. Replaces it in the conversation with a lightweight reference (~30 tokens)
-3. Injects full content on-demand only when the model needs it
+3. Returns content on-demand only when the model needs it
 
 Result: **10 rounds of 1000-line code iteration uses ~15k tokens instead of ~120k**.
 
@@ -29,14 +29,15 @@ fusion-artifacts-engine status
 The engine uses API key authentication via the `X-API-Key` header.
 
 - If `api_key` is configured, all requests must include `X-API-Key: <key>`
-- If `api_key` is **not** configured, requests are **rejected by default** (fail-closed)
-- Set `allow_no_auth: true` in config to allow unauthenticated access (dev/test only)
+- If `api_key` is **not** configured, requests are **allowed by default** (`allow_no_auth: true`)
+- Set `api_key` and `allow_no_auth: false` to enforce auth in production
 
 ```yaml
 # default_config.yaml
 security:
-  api_key: ""           # Set to enable auth
-  allow_no_auth: false  # Set true for dev/test without auth
+  api_key: ""
+  allow_no_auth: true
+  recycle_retention_days: 7
 ```
 
 ## JSON-RPC API
@@ -61,17 +62,12 @@ curl -X POST http://127.0.0.1:8892 \
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | Create new version (optimistic lock) |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
-| `artifact.inject` | messages, max_context? | Pre-request content injection |
-| `artifact.check_safety` | messages, max_context? | Token safety check |
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
 | `artifact.export_session` | session_id, output_dir | Batch export session |
 | `artifact.import` | session_id, data | Import artifact |
 | `artifact.export_code` | artifact_id, language? | Export as source code |
 | `artifact.import_code` | session_id, code, language?, name?, metadata? | Create artifact from code |
 | `artifact.watch` | artifact_id, action, watcher_id?, since_version? | Watch for changes |
-| `artifact.sync` | artifact_id, code_path, direction | Bidirectional code sync |
-| `artifact.render` | session_id, content, type?, viewport?, project_id? | Detect renderable content, create artifact |
-| `artifact.interact` | artifact_id, action, payload, session_id? | Canvas interaction → version update |
 | `ping` | — | Health check |
 
 ### Lifecycle Methods (P1)
@@ -202,17 +198,6 @@ curl -X POST http://127.0.0.1:8892 \
   -d '{"method":"artifact.watch","params":{"artifact_id":"art_xxx","action":"poll","since_version":3}}'
 ```
 
-**Sync** — bidirectional file sync:
-```bash
-# Artifact → file
-curl -X POST http://127.0.0.1:8892 \
-  -d '{"method":"artifact.sync","params":{"artifact_id":"art_xxx","code_path":"/path/to/file.py","direction":"artifact_to_code"}}'
-
-# File → artifact
-curl -X POST http://127.0.0.1:8892 \
-  -d '{"method":"artifact.sync","params":{"artifact_id":"art_xxx","code_path":"/path/to/file.py","direction":"code_to_artifact"}}'
-```
-
 ### Project Scope
 
 Artifacts can be scoped to a `project_id` for multi-project isolation:
@@ -244,42 +229,6 @@ curl -X POST http://127.0.0.1:8892 \
 Metadata is stored as JSON in SQLite and queried via `json_extract()`. You can combine `metadata_filter` with `project_id` for scoped queries.
 
 ## REST API
-
-### Render API
-
-REST endpoints for fusion-studio canvas integration. The engine detects renderable content types (HTML, SVG, Mermaid, React) and returns a URL for iframe embedding.
-
-**Render** — detect + create artifact for canvas:
-```bash
-curl -X POST http://127.0.0.1:8892/api/artifact/render \
-  -H "Content-Type: application/json" \
-  -d '{"content":"<!DOCTYPE html><html><body>Hello</body></html>","session_id":"s1","type":"auto","viewport":{"width":800,"height":600}}'
-```
-Response: `{"renderable": true, "artifact_id": "art_xxx", "artifact_type": "html", "render_url": "/api/artifact/content/art_xxx", "viewport": {"width": 800, "height": 600}}`
-
-Supported `type` values: `"auto"` (detect), `"html"`, `"svg"`, `"mermaid"`, `"react"`. SVG content is wrapped in an HTML page; Mermaid content is wrapped with the Mermaid.js runtime.
-
-**Get Content** — serve artifact content for iframe (auth required, CSP sandboxed):
-```bash
-curl http://127.0.0.1:8892/api/artifact/content/art_xxx
-```
-Returns raw content with `Content-Security-Policy` and `X-Content-Type-Options: nosniff` headers.
-
-**Interact** — bidirectional canvas → chat context:
-```bash
-curl -X POST http://127.0.0.1:8892/api/artifact/interact \
-  -H "Content-Type: application/json" \
-  -d '{"artifact_id":"art_xxx","action":"user_edit","payload":{"content":"<!DOCTYPE html><html><body>Updated</body></html>"}}'
-```
-Actions: `user_click`, `user_edit`, `state_change`. Creates a new artifact version and returns a `ref_text` for chat context injection.
-
-### Share API (P1)
-
-Public endpoint for shared artifact access (no auth required):
-```bash
-curl http://127.0.0.1:8892/api/share/shr_xxx
-```
-Returns artifact content with CSP sandbox headers. Access is tracked and expired/revoked shares return 410 Gone.
 
 ### REST /api/v1 (P3)
 
@@ -336,18 +285,6 @@ Filter by artifact kind:
 curl -N "http://127.0.0.1:8892/api/v1/events/stream?kind=app"
 ```
 
-### Token Count API
-
-Standalone HTTP endpoint for token counting (outside JSON-RPC):
-
-```bash
-curl -X POST http://127.0.0.1:8892/api/token-count \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Hello, world!"}'
-```
-
-Response: `{"token_count": 4}`
-
 ## Python SDK
 
 ```python
@@ -378,13 +315,6 @@ async def main():
         "s1", "def bar(): pass", language="python", name="bar.py"
     )
 
-    # Sync artifact to file
-    await engine.sync_artifact_file(art.id, "/path/to/file.py", "artifact_to_code")
-
-    # Inject for model context
-    messages = [{"role": "assistant", "content": ref}]
-    injected, total, safe = await engine.inject(messages)
-
     # Lifecycle operations
     await engine.rename_artifact(art.id, "new_name.py")
     await engine.star_artifact(art.id, True)
@@ -402,17 +332,6 @@ async def main():
 
 asyncio.run(main())
 ```
-
-## Tool Use Schemas
-
-For integration with fusion-code, register these tool schemas:
-
-```python
-from fusion_artifacts_engine.tool_schemas.create_artifact import CREATE_ARTIFACT_SCHEMA
-from fusion_artifacts_engine.tool_schemas.update_artifact import UPDATE_ARTIFACT_SCHEMA
-```
-
-When the model calls `create_artifact`, the engine returns a `[Artifact: ...]` reference that replaces the full content in chat history.
 
 ## Supported Artifact Types
 
@@ -441,6 +360,7 @@ When the model calls `create_artifact`, the engine returns a `[Artifact: ...]` r
 
 **ArtifactVersion** — versioned content with snapshot support:
 - Snapshot: `snapshot_type` (auto/named), `snapshot_label`, `author`, `parent_version`
+- Size: `size_bytes` (byte length of content, replaces former `token_count`)
 
 **ArtifactShare** — share links with access control:
 - `share_id` (shr_*), `max_accesses`, `access_count`, `expires_at`, `is_revoked`
@@ -454,10 +374,8 @@ When the model calls `create_artifact`, the engine returns a `[Artifact: ...]` r
 ## Security
 
 - **Fail-closed auth**: rejects requests when no API key is configured unless `allow_no_auth=True`
-- **CSP sandbox**: all artifact content responses include `Content-Security-Policy` header
-- **X-Content-Type-Options**: `nosniff` on all content responses
-- **IDOR protection**: artifact content endpoint requires authentication
 - **Optimistic locking**: concurrent update detection via `expected_content_hash`
+- **Path traversal protection**: export paths are sanitized
 
 ## Configuration
 
@@ -469,43 +387,41 @@ server:
 
 storage:
   root: "~/.fusion/artifacts"
+  db_name: "meta.db"
+  small_content_limit: 10240
+
+thresholds:
+  auto_create_lines: 30
+  auto_create_chars: 1500
+
+artifact:
+  id_prefix: "art_"
 
 security:
-  api_key: ""
-  allow_no_auth: false
+  allow_no_auth: true
   recycle_retention_days: 7
 
 sse:
   heartbeat_interval: 30
 ```
 
-## Token Counting Strategy
-
-Three-tier fallback:
-1. fusion-mlx `/v1/messages/count_tokens` — most accurate
-2. tiktoken (cl100k_base) — fast, good approximation
-3. `len(text) // 4` — heuristic fallback
-
 ## Architecture
 
 ```
-Product Layer: Fusion Code (tool_use) │ Fusion Studio (GUI)
-─────────────────────────────────────────────────────────────
+Product Layer: Fusion Code (tool_use) | Fusion Studio (GUI)
+---------------------------------------------------------
 Middleware: Artifacts Engine (Python daemon, JSON-RPC 2.0 + REST /api/v1 + SSE)
-─────────────────────────────────────────────────────────────
+---------------------------------------------------------
 Storage: SQLite (WAL) + Filesystem
-─────────────────────────────────────────────────────────────
-Inference: fusion-mlx (local) │ Cloud APIs
 ```
 
 ## Roadmap
 
 The refactoring blueprint to make fusion-artifacts-engine competitive with Claude Artifacts is documented in [fusion-artifact-enhance-ar.md](./fusion-artifact-enhance-ar.md) (AR = Architecture Refactor). It covers:
 
-- Competitive gap matrix vs Claude Artifacts (追平 9 项 / 超越 5 项 / 二期 1 项)
-- Data model expansion, new engine ops (rename/star/pin/duplicate/snapshot/share/recycle/migrate-KB), rendering hardening (CSP sandbox, Mermaid/Markdown localization), ```artifact fence parsing, SSE event bus, REST `/api/v1` parity, optimistic locking
+- Competitive gap matrix vs Claude Artifacts
+- Data model expansion, new engine ops (rename/star/pin/duplicate/snapshot/share/recycle/migrate-KB), SSE event bus, REST `/api/v1` parity, optimistic locking
 - 4-phase implementation plan (P1-P4) — **all phases implemented**
-- Cross-repo issue/PR proposals for fusion-studio / fusion-agent-studio / fusion-projects / fusion-mlx / fusion-cowork (GUI designs in md ASCII mockups)
 
 ## Running Tests
 

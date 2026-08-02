@@ -9,12 +9,7 @@ storage:
   db_name: "meta.db"
   small_content_limit: 10240
 
-mlx:
-  url: "http://localhost:8890"
-
 thresholds:
-  safe_context: 180000
-  output_reserve: 8192
   auto_create_lines: 30
   auto_create_chars: 1500
 
@@ -22,7 +17,7 @@ artifact:
   id_prefix: "art_"
 
 security:
-  allow_no_auth: false
+  allow_no_auth: true
   recycle_retention_days: 7
 
 sse:

@@ -42,7 +42,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not _API_KEY:
             allow_no_auth = getattr(
                 self.server._rpc_handler.engine.config,
-                "allow_no_auth", False,
+                "allow_no_auth", True,
             )
             if allow_no_auth:
                 return True
@@ -62,15 +62,6 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(401, {"error": "Unauthorized"})
 
     def do_POST(self):
-        if self.path == "/api/token-count":
-            self._handle_token_count()
-            return
-        if self.path == "/api/artifact/render":
-            self._handle_render()
-            return
-        if self.path == "/api/artifact/interact":
-            self._handle_interact()
-            return
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_post()
             return
@@ -119,221 +110,82 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_get()
             return
-        if self.path.startswith("/api/artifact/content/"):
-            self._handle_artifact_content()
-            return
-        if self.path.startswith("/api/share/"):
-            self._handle_shared_content()
-            return
         self._send_rest_response(404, {"error": "Not found"})
-
-    def _handle_token_count(self) -> None:
-        if not self._is_authed():
-            self._send_auth_denied(jsonrpc=False)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            if length > _MAX_BODY_SIZE:
-                self._send_rest_response(413, {"error": "Request body too large"})
-                return
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                self._send_rest_response(400, {"error": f"Parse error: {e}"})
-                return
-            text = data.get("text", "")
-            model = data.get("model")
-            engine = self.server._rpc_handler.engine
-            token_count = self._run_async(engine.token_counter.count(text, model))
-            self._send_rest_response(200, {"token_count": token_count})
-        except Exception as e:
-            logger.error("token-count error: %s", e, exc_info=True)
-            self._send_rest_response(500, {"error": "Internal error"})
-
-    def _handle_artifact_content(self) -> None:
-        if not self._is_authed():
-            self._send_rest_response(401, {"error": "Unauthorized"})
-            return
-        artifact_id = self.path.split("/")[-1]
-        engine = self.server._rpc_handler.engine
-        result = engine.get_artifact_raw_content(artifact_id)
-        if result is None:
-            self._send_rest_response(404, {"error": "Artifact not found"})
-            return
-        body = result["content"].encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", result["content_type"])
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Security-Policy", _CSP_HEADER)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _handle_shared_content(self) -> None:
-        share_id = self.path.split("/")[-1]
-        engine = self.server._rpc_handler.engine
-        result = engine.get_shared_artifact(share_id)
-        if result is None:
-            self._send_rest_response(404, {"error": "Shared artifact not found or expired"})
-            return
-        content = result.get("content", "")
-        content_type = result.get("content_type", "text/html")
-        body = content.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Content-Security-Policy", _CSP_HEADER)
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _handle_render(self) -> None:
-        if not self._is_authed():
-            self._send_auth_denied(jsonrpc=False)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            if length > _MAX_BODY_SIZE:
-                self._send_rest_response(413, {"error": "Request body too large"})
-                return
-            body = self.rfile.read(length)
-            data = json.loads(body.decode("utf-8"))
-            engine = self.server._rpc_handler.engine
-            result = self._run_async(engine.render_artifact(
-                session_id=data.get("session_id", ""),
-                content=data.get("content", ""),
-                artifact_type=data.get("type", "auto"),
-                viewport=data.get("viewport"),
-                project_id=data.get("project_id"),
-            ))
-            self._send_rest_response(200, result)
-        except Exception as e:
-            logger.error("render error: %s", e, exc_info=True)
-            self._send_rest_response(500, {"error": "Internal error"})
-
-    def _handle_interact(self) -> None:
-        if not self._is_authed():
-            self._send_auth_denied(jsonrpc=False)
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            if length > _MAX_BODY_SIZE:
-                self._send_rest_response(413, {"error": "Request body too large"})
-                return
-            body = self.rfile.read(length)
-            data = json.loads(body.decode("utf-8"))
-            engine = self.server._rpc_handler.engine
-            result = self._run_async(engine.interact_artifact(
-                artifact_id=data["artifact_id"],
-                action=data.get("action", "state_change"),
-                payload=data.get("payload", {}),
-                session_id=data.get("session_id", ""),
-            ))
-            self._send_rest_response(200, result)
-        except ValueError as e:
-            self._send_rest_response(400, {"error": str(e)})
-        except Exception as e:
-            logger.error("interact error: %s", e, exc_info=True)
-            self._send_rest_response(500, {"error": "Internal error"})
-
-    # ── P3: REST /api/v1 ───────────────────────────────────────
 
     def _handle_rest_v1_get(self) -> None:
         if not self._is_authed():
-            self._send_rest_response(401, {"error": "Unauthorized"})
+            self._send_auth_denied(jsonrpc=False)
             return
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        path = parsed.path[len("/api/v1/"):]
-        parts = path.strip("/").split("/")
         engine = self.server._rpc_handler.engine
-        try:
-            if not parts or parts[0] == "":
-                self._send_rest_response(200, {"api": "v1", "status": "ok"})
-            elif parts[0] == "artifacts" and len(parts) >= 2:
-                artifact_id = parts[1]
-                if len(parts) == 2:
-                    artifact = engine.get_artifact(artifact_id)
-                    if artifact is None:
-                        self._send_rest_response(404, {"error": "Artifact not found"})
-                        return
-                    self._send_rest_response(200, artifact.model_dump())
-                elif len(parts) == 3 and parts[2] == "versions":
-                    versions = engine.list_versions(artifact_id)
-                    self._send_rest_response(200, {"versions": [v.model_dump() for v in versions]})
-                elif len(parts) == 3 and parts[2] == "snapshots":
-                    snapshots = engine.list_snapshots(artifact_id)
-                    self._send_rest_response(200, {"snapshots": [s.model_dump() for s in snapshots]})
-                elif len(parts) == 3 and parts[2] == "tags":
-                    tags = engine.list_artifact_tags(artifact_id)
-                    self._send_rest_response(200, {"tags": [t.model_dump() for t in tags]})
-                else:
-                    self._send_rest_response(404, {"error": "Not found"})
-            elif parts[0] == "artifacts":
-                filters = {}
-                created_by = qs.get("created_by", [None])[0]
-                since = qs.get("since", [None])[0]
-                until = qs.get("until", [None])[0]
-                kind = qs.get("kind", [None])[0]
-                type_ = qs.get("type", [None])[0]
-                if created_by:
-                    filters["owner_user_id"] = created_by
-                if since:
-                    try:
-                        filters["since"] = float(since)
-                    except ValueError:
-                        pass
-                if until:
-                    try:
-                        filters["until"] = float(until)
-                    except ValueError:
-                        pass
-                if kind:
-                    filters["kind"] = kind
-                if type_:
-                    filters["type"] = type_
-                sort = qs.get("sort", ["updated_at"])[0]
-                page = int(qs.get("page", ["1"])[0])
-                page_size = int(qs.get("page_size", ["20"])[0])
-                artifacts, total = engine.list_all_artifacts(
-                    filters=filters or None, sort=sort, page=page, page_size=page_size,
-                )
-                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in artifacts], "total": total})
-            elif parts[0] == "external":
-                source_module = qs.get("source_module", [None])[0]
-                if not source_module:
-                    self._send_rest_response(400, {"error": "source_module query param required"})
+        parsed = urlparse(self.path)
+        path_parts = [p for p in parsed.path.split("/") if p]
+        query = parse_qs(parsed.query)
+
+        if len(path_parts) >= 4 and path_parts[2] == "artifacts":
+            if len(path_parts) == 4:
+                artifact_id = path_parts[3]
+                artifact = engine.get_artifact(artifact_id)
+                if artifact is None:
+                    self._send_rest_response(404, {"error": "Artifact not found"})
                     return
-                workspace_id = qs.get("workspace_id", [None])[0]
-                workflow_run_id = qs.get("workflow_run_id", [None])[0]
-                artifacts = engine.list_by_source(source_module, workspace_id=workspace_id, workflow_run_id=workflow_run_id)
-                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in artifacts]})
-            elif parts[0] == "folders":
-                folders = engine.list_folders()
-                self._send_rest_response(200, {"folders": [f.model_dump() for f in folders]})
-            elif parts[0] == "tags":
-                tags = engine.list_tags()
-                self._send_rest_response(200, {"tags": [t.model_dump() for t in tags]})
-            elif parts[0] == "events":
-                events, total = engine.list_events()
-                self._send_rest_response(200, {"events": [e.model_dump() for e in events], "total": total})
-            elif parts[0] == "recycle":
-                arts, total = engine.list_recycle()
-                self._send_rest_response(200, {"artifacts": [a.model_dump() for a in arts], "total": total})
+                self._send_rest_response(200, {"artifact": artifact.model_dump()})
+                return
+            if len(path_parts) == 5 and path_parts[4] == "versions":
+                artifact_id = path_parts[3]
+                versions = engine.list_versions(artifact_id)
+                self._send_rest_response(200, {
+                    "versions": [v.model_dump() for v in versions],
+                })
+                return
+            if len(path_parts) == 6 and path_parts[4] == "versions":
+                artifact_id = path_parts[3]
+                try:
+                    ver_num = int(path_parts[5])
+                except ValueError:
+                    self._send_rest_response(400, {"error": "Invalid version number"})
+                    return
+                version = engine.get_version_content(artifact_id, ver_num)
+                if version is None:
+                    self._send_rest_response(404, {"error": "Version not found"})
+                    return
+                self._send_rest_response(200, {"version": version.model_dump()})
+                return
+            self._send_rest_response(404, {"error": "Not found"})
+            return
+
+        if len(path_parts) >= 3 and path_parts[2] == "artifacts":
+            session_id = query.get("session_id", [""])[0]
+            include_deleted = query.get("include_deleted", ["false"])[0].lower() == "true"
+            project_id = query.get("project_id", [None])[0]
+            if session_id:
+                artifacts = engine.list_artifacts(session_id, include_deleted, project_id)
+                self._send_rest_response(200, {
+                    "artifacts": [a.model_dump() for a in artifacts],
+                    "total": len(artifacts),
+                })
             else:
-                self._send_rest_response(404, {"error": "Not found"})
-        except Exception as e:
-            logger.error("REST v1 GET error: %s", e, exc_info=True)
-            self._send_rest_response(500, {"error": "Internal error"})
+                page = int(query.get("page", ["1"])[0])
+                page_size = int(query.get("page_size", ["20"])[0])
+                sort = query.get("sort", ["updated_at"])[0]
+                artifacts, total = engine.list_all_artifacts(
+                    page=page, page_size=page_size, sort=sort,
+                )
+                self._send_rest_response(200, {
+                    "artifacts": [a.model_dump() for a in artifacts],
+                    "total": total,
+                })
+            return
+
+        self._send_rest_response(404, {"error": "Not found"})
 
     def _handle_rest_v1_post(self) -> None:
         if not self._is_authed():
-            self._send_rest_response(401, {"error": "Unauthorized"})
+            self._send_auth_denied(jsonrpc=False)
             return
-        path = self.path[len("/api/v1/"):]
-        parts = path.strip("/").split("/")
         engine = self.server._rpc_handler.engine
+        parsed = urlparse(self.path)
+        path_parts = [p for p in parsed.path.split("/") if p]
+
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -342,125 +194,86 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             data = json.loads(body.decode("utf-8")) if body else {}
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            self._send_rest_response(400, {"error": f"Parse error: {e}"})
+            self._send_rest_response(400, {"error": f"Invalid JSON: {e}"})
             return
-        try:
-            if parts[0] == "artifacts" and len(parts) >= 2:
-                artifact_id = parts[1]
-                if len(parts) == 2:
-                    action = data.get("action", "")
-                    if action == "rename":
-                        ok = engine.rename_artifact(artifact_id, data["new_name"])
-                        self._send_rest_response(200, {"ok": ok})
-                    elif action == "star":
-                        ok = engine.star_artifact(artifact_id, data.get("starred", True))
-                        self._send_rest_response(200, {"ok": ok})
-                    elif action == "pin":
-                        ok = engine.pin_artifact(artifact_id, data.get("chat_id"), data.get("pinned", True))
-                        self._send_rest_response(200, {"ok": ok})
-                    elif action == "duplicate":
-                        dup = engine.duplicate_artifact(artifact_id, data.get("new_name"))
-                        self._send_rest_response(200, {"artifact": dup.model_dump()} if dup else {"error": "Duplicate failed"})
-                    elif action == "restore":
-                        ok = engine.restore_artifact(artifact_id)
-                        self._send_rest_response(200, {"ok": ok})
-                    elif action == "move_to_kb":
-                        ok = engine.move_to_project_kb(artifact_id, data["project_id"])
-                        self._send_rest_response(200, {"ok": ok})
-                    elif action == "move_to_folder":
-                        ok = engine.move_to_folder(artifact_id, data.get("folder_id"))
-                        self._send_rest_response(200, {"ok": ok})
-                    else:
-                        self._send_rest_response(400, {"error": f"Unknown action: {action}"})
-                elif len(parts) == 3 and parts[2] == "snapshot":
-                    snapshot = self._run_async(engine.create_snapshot(
-                        artifact_id, label=data.get("label"), author=data.get("author"),
-                    ))
-                    self._send_rest_response(200, {"version": snapshot.model_dump()})
-                elif len(parts) == 3 and parts[2] == "share":
-                    share = engine.create_share(
-                        artifact_id, created_by=data.get("created_by"), expires_at=data.get("expires_at"),
-                    )
-                    self._send_rest_response(200, {"share": share.model_dump()})
-                elif len(parts) == 3 and parts[2] == "tags":
-                    tag = engine.add_tag(artifact_id, data["tag_name"], color=data.get("color"))
-                    self._send_rest_response(200, {"tag": tag.model_dump()})
-                else:
-                    self._send_rest_response(404, {"error": "Not found"})
-            elif parts[0] == "folders":
-                folder = engine.create_folder(data["name"], parent_id=data.get("parent_id"), project_id=data.get("project_id"))
-                self._send_rest_response(200, {"folder": folder.model_dump()})
-            elif parts[0] == "events":
-                event = engine.emit_event(
-                    data["event_type"], artifact_id=data.get("artifact_id"),
-                    session_id=data.get("session_id"), payload=data.get("payload"),
-                )
-                event_bus.publish(event.event_type, {"artifact_id": event.artifact_id, "session_id": event.session_id, "payload": event.payload})
-                self._send_rest_response(200, {"event": event.model_dump()})
-            elif parts[0] == "purge":
-                count = engine.purge_expired()
-                self._send_rest_response(200, {"purged": count})
-            elif parts[0] == "external" and len(parts) >= 2 and parts[1] == "create":
-                artifact, version, ref_text = self._run_async(engine.create_external_artifact(
-                    source_module=data["source_module"],
-                    workspace_id=data["workspace_id"],
-                    name=data["name"],
+
+        if len(path_parts) >= 4 and path_parts[2] == "artifacts":
+            if len(path_parts) == 4:
+                result = self._run_async(engine.create_artifact(
+                    session_id=data.get("session_id", ""),
+                    name=data.get("name", ""),
                     artifact_type=data.get("type", "code"),
-                    content=data["content"],
-                    workflow_run_id=data.get("workflow_run_id"),
+                    content=data.get("content", ""),
                     summary=data.get("summary", ""),
                     kind=data.get("kind"),
                     project_id=data.get("project_id"),
                     metadata=data.get("metadata"),
                 ))
-                event_bus.publish("artifact.created", {"artifact_id": artifact.id, "source_module": artifact.source_module})
-                self._send_rest_response(200, {"artifact": artifact.model_dump(), "version": version.model_dump(), "ref_text": ref_text})
-            else:
-                self._send_rest_response(404, {"error": "Not found"})
-        except ValueError as e:
-            self._send_rest_response(400, {"error": str(e)})
-        except Exception as e:
-            logger.error("REST v1 POST error: %s", e, exc_info=True)
-            self._send_rest_response(500, {"error": "Internal error"})
+                artifact, version, ref_text = result
+                self._send_rest_response(201, {
+                    "artifact": artifact.model_dump(),
+                    "version": version.model_dump(),
+                    "ref_text": ref_text,
+                })
+                return
+            artifact_id = path_parts[3]
+            if len(path_parts) == 4:
+                action = data.get("action", "")
+                if action == "delete":
+                    ok = engine.delete_artifact(artifact_id, soft_delete=data.get("soft_delete", True))
+                    self._send_rest_response(200, {"ok": ok})
+                else:
+                    result = self._run_async(engine.create_version(
+                        artifact_id, data.get("content", ""),
+                        change_log=data.get("change_log", ""),
+                        expected_content_hash=data.get("expected_content_hash"),
+                    ))
+                    version, ref_text = result
+                    self._send_rest_response(200, {
+                        "version": version.model_dump(),
+                        "ref_text": ref_text,
+                    })
+                return
+            self._send_rest_response(404, {"error": "Not found"})
+            return
 
-    # ── P4: SSE (push-based via EventBus) ─────────────────────
+        self._send_rest_response(404, {"error": "Not found"})
 
     def _handle_sse(self) -> None:
         if not self._is_authed():
-            self._send_rest_response(401, {"error": "Unauthorized"})
+            self._send_auth_denied(jsonrpc=False)
             return
-        parsed = urlparse(self.path)
-        qs = parse_qs(parsed.query)
-        kind_filter = qs.get("kind", [None])[0]
-        engine = self.server._rpc_handler.engine
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
-        sub = event_bus.subscribe()
-        watcher_id = f"sse_{id(self)}_{threading.get_ident()}"
-        logger.info("SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter)
+
+        watcher_id = f"sse_{id(self)}"
+        sub = queue.Queue()
+        event_bus.subscribe(sub)
+
+        engine = self.server._rpc_handler.engine
+        heartbeat_interval = engine.config.sse_heartbeat_interval
+
+        logger.info("SSE connected: watcher=%s", watcher_id)
         try:
-            self.wfile.write(b": connected\n\n")
-            self.wfile.flush()
-            heartbeat_interval = getattr(engine.config, "sse_heartbeat_interval", 30)
             while True:
                 try:
-                    try:
-                        event = sub.get(timeout=heartbeat_interval)
-                    except queue.Empty:
-                        self.wfile.write(b": heartbeat\n\n")
-                        self.wfile.flush()
-                        continue
-                    if kind_filter:
-                        event_kind = event.get("payload", {}).get("kind") if isinstance(event.get("payload"), dict) else None
-                        if event_kind and event_kind != kind_filter:
-                            continue
+                    event = sub.get(timeout=heartbeat_interval)
+                    if event is None:
+                        break
                     data = json.dumps(event)
                     self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode("utf-8"))
                     self.wfile.flush()
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    continue
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 except Exception as e:

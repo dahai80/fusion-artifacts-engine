@@ -1,8 +1,6 @@
 import time
-import uuid
 import hashlib
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 from fusion_artifacts_engine.config import ArtifactEngineConfig
@@ -11,10 +9,8 @@ from fusion_artifacts_engine.models import (
     ArtifactTag, ArtifactEvent, infer_kind,
 )
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
-from fusion_artifacts_engine.token_counter import TokenCounter
 from fusion_artifacts_engine.ref_parser import generate_ref_text
-from fusion_artifacts_engine.injection import inject_artifacts_to_messages
-from fusion_artifacts_engine.auto_identifier import should_create_artifact, detect_renderable_type
+from fusion_artifacts_engine.auto_identifier import should_create_artifact
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
@@ -44,6 +40,10 @@ def _auto_changelog(old_content: str, new_content: str) -> str:
     return ", ".join(parts)
 
 
+def _size_bytes(content: str) -> int:
+    return len(content.encode("utf-8"))
+
+
 class ArtifactEngine:
 
     def __init__(self, config: Optional[ArtifactEngineConfig] = None):
@@ -53,9 +53,7 @@ class ArtifactEngine:
             content_dir=self.config.content_dir,
             small_content_limit=self.config.small_content_limit,
         )
-        self.token_counter = TokenCounter(mlx_url=self.config.mlx_url)
         self._watchers: dict[str, list[str]] = {}
-        self._sync_registry: dict[str, dict] = {}
         logger.info("ArtifactEngine initialized: storage_root=%s", self.config.storage_root)
 
     async def create_artifact(
@@ -89,18 +87,18 @@ class ArtifactEngine:
             created_at=now,
             updated_at=now,
         )
-        token_count = self.token_counter.count_sync(content)
+        size = _size_bytes(content)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=1,
             content=content,
-            token_count=token_count,
+            size_bytes=size,
             change_log=change_log,
             created_at=now,
         )
         self.storage.save_artifact_and_version(artifact, version)
-        ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, token_count, summary)
-        logger.info("Created artifact: %s name=%s tokens=%s", artifact_id, name, token_count)
+        ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
+        logger.info("Created artifact: %s name=%s size=%d", artifact_id, name, size)
         return artifact, version, ref_text
 
     async def create_external_artifact(
@@ -139,12 +137,12 @@ class ArtifactEngine:
             workspace_id=workspace_id,
             workflow_run_id=workflow_run_id,
         )
-        token_count = self.token_counter.count_sync(content)
+        size = _size_bytes(content)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=1,
             content=content,
-            token_count=token_count,
+            size_bytes=size,
             change_log="Created by external module",
             created_at=now,
         )
@@ -152,8 +150,8 @@ class ArtifactEngine:
         if project_id:
             self.storage.move_to_project_kb(artifact_id, project_id)
             logger.info("Auto-archived external artifact %s to project %s", artifact_id, project_id)
-        ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, token_count, summary)
-        logger.info("Created external artifact: %s source=%s ws=%s tokens=%s", artifact_id, source_module, workspace_id, token_count)
+        ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
+        logger.info("Created external artifact: %s source=%s ws=%s size=%d", artifact_id, source_module, workspace_id, size)
         return artifact, version, ref_text
 
     def list_by_source(
@@ -204,37 +202,6 @@ class ArtifactEngine:
         )
         logger.info("Rolled back %s to v%s, new v%s", artifact_id, target_version, version.version_num)
         return version, ref_text
-
-    async def inject(
-        self,
-        messages: list[dict],
-        max_context: Optional[int] = None,
-    ) -> tuple[list[dict], int, bool]:
-        mc = max_context or self.config.safe_context_threshold
-
-        async def get_content(artifact_id: str, version: str) -> Optional[str]:
-            ver_num = None
-            if version != "latest":
-                try:
-                    ver_num = int(version)
-                except ValueError:
-                    pass
-            result = self.get_version_content(artifact_id, ver_num)
-            return result.content if result else None
-
-        return await inject_artifacts_to_messages(
-            messages, get_content, self.token_counter, mc, self.config.output_reserve_tokens
-        )
-
-    async def check_safety(
-        self,
-        messages: list[dict],
-        max_context: Optional[int] = None,
-    ) -> tuple[bool, int, int]:
-        mc = max_context or self.config.safe_context_threshold
-        return await self.token_counter.check_safety(
-            messages, mc, self.config.output_reserve_tokens
-        )
 
     def should_create_artifact(self, content: str, content_type: str = "text") -> bool:
         return should_create_artifact(
@@ -333,125 +300,6 @@ class ArtifactEngine:
         logger.debug("Watch events for %s since v%d: %d events", artifact_id, since_version, len(events))
         return events
 
-    async def sync_artifact_file(self, artifact_id: str, code_path: str, direction: str = "artifact_to_code") -> dict:
-        path = Path(code_path).resolve()
-        storage_root = Path(self.config.storage_root).resolve()
-        try:
-            path.relative_to(storage_root)
-        except ValueError:
-            raise ValueError(f"code_path must be under storage root {storage_root}")
-        artifact = self.storage.get_artifact(artifact_id)
-        if artifact is None:
-            raise ValueError(f"Artifact not found: {artifact_id}")
-        version = self.get_version_content(artifact_id)
-        if version is None:
-            raise ValueError(f"No content for artifact: {artifact_id}")
-        content_hash = hashlib.sha256(version.content.encode("utf-8")).hexdigest()[:16]
-        if direction == "artifact_to_code":
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(version.content, encoding="utf-8")
-            self._sync_registry[artifact_id] = {
-                "path": str(path),
-                "hash": content_hash,
-                "version": version.version_num,
-            }
-            logger.info("Synced artifact %s v%d -> %s", artifact_id, version.version_num, path)
-            return {"direction": "artifact_to_code", "path": str(path), "version": version.version_num}
-        elif direction == "code_to_artifact":
-            if not path.exists():
-                raise ValueError(f"Code file not found: {path}")
-            code_content = path.read_text(encoding="utf-8")
-            file_hash = hashlib.sha256(code_content.encode("utf-8")).hexdigest()[:16]
-            reg = self._sync_registry.get(artifact_id)
-            if reg and reg.get("hash") == file_hash:
-                return {"direction": "code_to_artifact", "status": "no_change", "version": version.version_num}
-            new_version, ref = await self.create_version(
-                artifact_id, code_content, f"Synced from {path}"
-            )
-            new_content_hash = hashlib.sha256(code_content.encode("utf-8")).hexdigest()[:16]
-            self._sync_registry[artifact_id] = {
-                "path": str(path),
-                "hash": new_content_hash,
-                "version": new_version.version_num,
-            }
-            logger.info("Synced %s -> artifact %s v%d", path, artifact_id, new_version.version_num)
-            return {"direction": "code_to_artifact", "path": str(path), "version": new_version.version_num, "ref_text": ref}
-        else:
-            raise ValueError(f"Invalid direction: {direction}, must be 'artifact_to_code' or 'code_to_artifact'")
-
-    _RENDER_TYPE_MAP = {
-        "html": "html",
-        "svg": "html",
-        "mermaid": "html",
-        "react": "react",
-    }
-
-    async def render_artifact(
-        self,
-        session_id: str,
-        content: str,
-        artifact_type: str = "auto",
-        viewport: Optional[dict] = None,
-        project_id: Optional[str] = None,
-    ) -> dict:
-        if artifact_type == "auto":
-            detected = detect_renderable_type(content)
-            if detected is None:
-                logger.info("render_artifact: content not renderable")
-                return {"renderable": False, "artifact_type": None, "artifact_id": None, "render_url": None, "viewport": viewport}
-            artifact_type = detected
-        elif artifact_type not in ("html", "svg", "mermaid", "react"):
-            return {"renderable": False, "artifact_type": artifact_type, "artifact_id": None, "render_url": None, "viewport": viewport}
-        store_type = self._RENDER_TYPE_MAP.get(artifact_type, "html")
-        name_map = {"html": "render.html", "svg": "render.svg", "mermaid": "render.mermaid", "react": "render.tsx"}
-        name = name_map.get(artifact_type, "render.html")
-        wrapped_content = content
-        if artifact_type == "svg":
-            wrapped_content = f'<html><body style="margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh">{content}</body></html>'
-        elif artifact_type == "mermaid":
-            wrapped_content = (
-                '<html><head><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" integrity="sha384-T/0lMUdJpd2S1ZHtRiofG3htU3xPCrFVeAQ1UUE2TJwlEJSV5NUwn30kP28n238E" crossorigin="anonymous"></script>'
-                '<style>body{margin:0;display:flex;justify-content:center;align-items:center;min-height:100vh}</style></head>'
-                f'<body><pre class="mermaid">{content}</pre>'
-                '<script>mermaid.initialize({startOnLoad:true});</script></body></html>'
-            )
-        artifact, version, ref_text = await self.create_artifact(
-            session_id=session_id, name=name, artifact_type=store_type,
-            content=wrapped_content, project_id=project_id,
-        )
-        render_url = f"/api/artifact/content/{artifact.id}"
-        logger.info("render_artifact: created %s type=%s renderable=True", artifact.id, artifact_type)
-        return {
-            "renderable": True,
-            "artifact_id": artifact.id,
-            "artifact_type": artifact_type,
-            "render_url": render_url,
-            "viewport": viewport or {"width": 800, "height": 600},
-        }
-
-    async def interact_artifact(
-        self,
-        artifact_id: str,
-        action: str,
-        payload: dict,
-        session_id: str = "",
-    ) -> dict:
-        valid_actions = ("user_click", "user_edit", "state_change")
-        if action not in valid_actions:
-            raise ValueError(f"Invalid action: {action}, must be one of {valid_actions}")
-        artifact = self.storage.get_artifact(artifact_id)
-        if artifact is None:
-            raise ValueError(f"Artifact not found: {artifact_id}")
-        new_content = payload.get("content", "")
-        if not new_content:
-            logger.info("interact_artifact: %s action=%s no content change", artifact_id, action)
-            return {"ok": True, "artifact_id": artifact_id, "version": artifact.current_version, "ref_text": ""}
-        version, ref_text = await self.create_version(
-            artifact_id, new_content, change_log=f"Canvas interaction: {action}",
-        )
-        logger.info("interact_artifact: %s action=%s new_version=%d", artifact_id, action, version.version_num)
-        return {"ok": True, "artifact_id": artifact_id, "version": version.version_num, "ref_text": ref_text}
-
     def get_artifact_raw_content(self, artifact_id: str) -> Optional[dict]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
@@ -549,12 +397,12 @@ class ArtifactEngine:
             change_log = _auto_changelog(old.content if old else "", content)
         new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
-        token_count = self.token_counter.count_sync(content)
+        size = _size_bytes(content)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=new_version,
             content=content,
-            token_count=token_count,
+            size_bytes=size,
             change_log=change_log,
             source=source,
             created_at=now,
@@ -567,8 +415,8 @@ class ArtifactEngine:
         if not artifact.summary:
             artifact.summary = _truncate_summary(content)
         self.storage.save_artifact(artifact)
-        ref_text = generate_ref_text(artifact_id, artifact.name, artifact.type, new_version, token_count, artifact.summary)
-        logger.info("Created version: %s v%s tokens=%s hash=%s", artifact_id, new_version, token_count, content_hash)
+        ref_text = generate_ref_text(artifact_id, artifact.name, artifact.type, new_version, size, artifact.summary)
+        logger.info("Created version: %s v%s size=%d hash=%s", artifact_id, new_version, size, content_hash)
         return version, ref_text
 
     # ── P1: share ──────────────────────────────────────────────
@@ -586,6 +434,8 @@ class ArtifactEngine:
         if existing is not None:
             logger.info("Returning existing share %s for artifact %s", existing.share_id, artifact_id)
             return existing
+        import uuid
+        from datetime import datetime, timezone
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         share = ArtifactShare(
@@ -613,6 +463,7 @@ class ArtifactEngine:
             logger.info("Share %s is revoked", share_id)
             return None
         if share.expires_at:
+            from datetime import datetime, timezone
             now_iso = datetime.now(timezone.utc).isoformat()
             if now_iso > share.expires_at:
                 logger.info("Share %s expired", share_id)
@@ -655,7 +506,7 @@ class ArtifactEngine:
             artifact_id=artifact_id,
             version_num=new_ver_num,
             content=current.content,
-            token_count=current.token_count,
+            size_bytes=current.size_bytes,
             change_log=f"Snapshot: {label}" if label else "Snapshot",
             source="manual",
             created_at=now,
@@ -677,6 +528,8 @@ class ArtifactEngine:
     # ── P2: folders ────────────────────────────────────────────
 
     def create_folder(self, name: str, parent_id: Optional[str] = None, project_id: Optional[str] = None) -> ArtifactFolder:
+        import uuid
+        from datetime import datetime, timezone
         folder_id = f"fld_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         folder = ArtifactFolder(
@@ -711,6 +564,7 @@ class ArtifactEngine:
     # ── P4: tags ───────────────────────────────────────────────
 
     def add_tag(self, artifact_id: str, tag_name: str, color: Optional[str] = None) -> ArtifactTag:
+        import uuid
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -750,6 +604,8 @@ class ArtifactEngine:
         session_id: Optional[str] = None,
         payload: Optional[dict] = None,
     ) -> ArtifactEvent:
+        import uuid
+        from datetime import datetime, timezone
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         now_iso = datetime.now(timezone.utc).isoformat()
         event = ArtifactEvent(
