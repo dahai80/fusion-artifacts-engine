@@ -66,6 +66,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.load` | artifact_id, preview_only?, section? | 加载产物（预览/章节/全文，含章节token数） |
 | `context.budget` | session_id, context_window? | 会话令牌预算汇总 |
 | `artifact.auto_compact` | artifact_id, token_budget | 自动压缩产物至令牌预算内 |
+| `artifact.version_diff` | artifact_id, from_version, to_version | 两版本间统一差异对比 |
 | `artifact.version_list` | artifact_id | 列出所有版本 |
 | `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |
 | `artifact.export` | artifact_id, include_versions? | 导出产物数据 |
@@ -449,7 +450,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，330+ 测试用例。
+当前覆盖率：**92%**，338+ 测试用例。
 
 ## 许可证
 

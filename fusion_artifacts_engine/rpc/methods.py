@@ -81,6 +81,8 @@ class RPCHandler:
             "context.budget": self._budget,
             # AE-7: auto_compact
             "artifact.auto_compact": self._auto_compact,
+            # #36: version_diff
+            "artifact.version_diff": self._version_diff,
             "ping": self._ping,
         }
 
@@ -541,5 +543,13 @@ class RPCHandler:
         result = await self.engine.auto_compact(
             artifact_id=params["artifact_id"],
             token_budget=params["token_budget"],
+        )
+        return result
+
+    async def _version_diff(self, params: dict) -> dict:
+        result = self.engine.version_diff(
+            artifact_id=params["artifact_id"],
+            from_version=params["from_version"],
+            to_version=params["to_version"],
         )
         return result

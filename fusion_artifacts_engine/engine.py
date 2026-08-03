@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 import json
 import logging
@@ -1179,6 +1180,51 @@ class ArtifactEngine:
             "compacted_tokens": compacted_tokens,
             "savings_pct": 0.0,
             "compacted": False,
+        }
+
+    # ── #36: version_diff ───────────────────────────────────────
+
+    def version_diff(
+        self, artifact_id: str, from_version: int, to_version: int
+    ) -> dict:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        from_ver = self.storage.get_version(artifact_id, from_version)
+        if from_ver is None:
+            raise ValueError(
+                f"Version {from_version} not found for artifact: {artifact_id}"
+            )
+        to_ver = self.storage.get_version(artifact_id, to_version)
+        if to_ver is None:
+            raise ValueError(
+                f"Version {to_version} not found for artifact: {artifact_id}"
+            )
+        from_lines = from_ver.content.splitlines(keepends=True)
+        to_lines = to_ver.content.splitlines(keepends=True)
+        diff_lines = list(
+            difflib.unified_diff(
+                from_lines,
+                to_lines,
+                fromfile=f"v{from_version}",
+                tofile=f"v{to_version}",
+            )
+        )
+        diff_text = "".join(diff_lines)
+        lines_added = sum(1 for dl in diff_lines if dl.startswith("+") and not dl.startswith("+++"))
+        lines_removed = sum(1 for dl in diff_lines if dl.startswith("-") and not dl.startswith("---"))
+        logger.info(
+            "Version diff %s v%d->v%d: +%d -%d lines",
+            artifact_id,
+            from_version,
+            to_version,
+            lines_added,
+            lines_removed,
+        )
+        return {
+            "diff": diff_text,
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
         }
 
     def close(self) -> None:
