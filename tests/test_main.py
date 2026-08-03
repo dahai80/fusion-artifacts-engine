@@ -1,7 +1,8 @@
 import sys
-import time
 import threading
+import time
 from unittest.mock import patch
+
 from fusion_artifacts_engine.__main__ import main
 
 
@@ -64,8 +65,8 @@ def test_start_with_config(tmp_path):
         )
         assert resp.status_code == 200
         assert resp.json()["result"]["pong"] is True
-    except Exception:
-        pass
+    except (httpx.ConnectError, httpx.TimeoutException, OSError, ValueError):
+        pass  # server not reachable, skip
 
 
 def test_start_with_host_port(tmp_path):

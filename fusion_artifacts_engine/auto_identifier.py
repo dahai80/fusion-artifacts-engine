@@ -1,5 +1,6 @@
-import re
 import logging
+import re
+
 from fusion_artifacts_engine.models import ArtifactType
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def detect_renderable_type(content: str, name: str = "") -> str | None:
             return "react"
         if name_lower.endswith((".html", ".htm")):
             return "html"
-        if name_lower.endswith(".mermaid") or name_lower.endswith(".mmd"):
+        if name_lower.endswith((".mermaid", ".mmd")):
             return "mermaid"
     if _RENDERABLE_SVG_RE.search(content):
         return "svg"
@@ -118,9 +119,9 @@ def extract_name_hint(content: str, lang_hint: str = "") -> str:
     lines = content.strip().split("\n")
     for line in lines[:5]:
         line = line.strip()
-        if line.startswith("# filename:") or line.startswith("// filename:"):
+        if line.startswith(("# filename:", "// filename:")):
             return line.split(":", 1)[1].strip()
-        if line.startswith("# file:") or line.startswith("// file:"):
+        if line.startswith(("# file:", "// file:")):
             return line.split(":", 1)[1].strip()
     ext_map = {
         "python": ".py",

@@ -1,9 +1,10 @@
-import os
 import logging
+import os
 from pathlib import Path
-from typing import Any, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any
+
 import yaml
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     except FileNotFoundError:
         logger.debug("Config file not found: %s", path)
         return {}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("Failed to load config %s: %s", path, e)
         return {}
 
@@ -72,7 +73,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     return flat
 
 
-def load_config(user_config_path: Optional[Path] = None) -> "ArtifactEngineConfig":
+def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
     default_data = _flatten_yaml_config(_load_yaml(_DEFAULT_CONFIG_PATH))
     user_path = user_config_path or _USER_CONFIG_PATH
     user_data = _flatten_yaml_config(_load_yaml(user_path))

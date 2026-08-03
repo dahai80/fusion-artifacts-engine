@@ -1,20 +1,22 @@
-import time
 import hashlib
 import logging
-from typing import Optional
+import time
+from datetime import UTC
+from typing import ClassVar
+
+from fusion_artifacts_engine.auto_identifier import should_create_artifact
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.models import (
     Artifact,
-    ArtifactVersion,
-    ArtifactShare,
-    ArtifactFolder,
-    ArtifactTag,
     ArtifactEvent,
+    ArtifactFolder,
+    ArtifactShare,
+    ArtifactTag,
+    ArtifactVersion,
     infer_kind,
 )
-from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.ref_parser import generate_ref_text
-from fusion_artifacts_engine.auto_identifier import should_create_artifact
+from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,7 @@ def _size_bytes(content: str) -> int:
 
 
 class ArtifactEngine:
-    def __init__(self, config: Optional[ArtifactEngineConfig] = None):
+    def __init__(self, config: ArtifactEngineConfig | None = None):
         self.config = config or ArtifactEngineConfig()
         self.storage = SQLiteStorage(
             db_path=self.config.db_path,
@@ -69,9 +71,9 @@ class ArtifactEngine:
         content: str,
         summary: str = "",
         change_log: str = "Initial version",
-        kind: Optional[str] = None,
-        project_id: Optional[str] = None,
-        metadata: Optional[dict] = None,
+        kind: str | None = None,
+        project_id: str | None = None,
+        metadata: dict | None = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
@@ -113,11 +115,11 @@ class ArtifactEngine:
         name: str,
         artifact_type: str,
         content: str,
-        workflow_run_id: Optional[str] = None,
+        workflow_run_id: str | None = None,
         summary: str = "",
-        kind: Optional[str] = None,
-        project_id: Optional[str] = None,
-        metadata: Optional[dict] = None,
+        kind: str | None = None,
+        project_id: str | None = None,
+        metadata: dict | None = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         session_id = f"ext_{source_module}_{workspace_id}"
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
@@ -173,22 +175,22 @@ class ArtifactEngine:
     def list_by_source(
         self,
         source_module: str,
-        workspace_id: Optional[str] = None,
-        workflow_run_id: Optional[str] = None,
+        workspace_id: str | None = None,
+        workflow_run_id: str | None = None,
     ) -> list[Artifact]:
         return self.storage.list_by_source(source_module, workspace_id, workflow_run_id)
 
     def get_artifact(
-        self, artifact_id: str, project_id: Optional[str] = None
-    ) -> Optional[Artifact]:
+        self, artifact_id: str, project_id: str | None = None
+    ) -> Artifact | None:
         return self.storage.get_artifact(artifact_id, project_id)
 
     def list_artifacts(
         self,
         session_id: str,
         include_deleted: bool = False,
-        project_id: Optional[str] = None,
-        metadata_filter: Optional[dict] = None,
+        project_id: str | None = None,
+        metadata_filter: dict | None = None,
     ) -> list[Artifact]:
         return self.storage.list_artifacts(
             session_id, include_deleted, project_id, metadata_filter
@@ -198,13 +200,13 @@ class ArtifactEngine:
         self,
         artifact_id: str,
         soft_delete: bool = True,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
     ) -> bool:
         return self.storage.delete_artifact(artifact_id, soft_delete, project_id)
 
     def get_version_content(
-        self, artifact_id: str, version: Optional[int] = None
-    ) -> Optional[ArtifactVersion]:
+        self, artifact_id: str, version: int | None = None
+    ) -> ArtifactVersion | None:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             return None
@@ -253,7 +255,7 @@ class ArtifactEngine:
             self.config.auto_create_threshold_chars,
         )
 
-    _LANG_EXT = {
+    _LANG_EXT: ClassVar[dict[str, str]] = {
         "python": "py",
         "javascript": "js",
         "typescript": "ts",
@@ -269,7 +271,7 @@ class ArtifactEngine:
         "cpp": "cpp",
     }
 
-    _EXT_LANG = {v: k for k, v in _LANG_EXT.items()}
+    _EXT_LANG: ClassVar[dict[str, str]] = {v: k for k, v in _LANG_EXT.items()}
 
     def export_code(self, artifact_id: str, language: str = "") -> dict:
         artifact = self.storage.get_artifact(artifact_id)
@@ -302,7 +304,7 @@ class ArtifactEngine:
         code: str,
         language: str = "",
         name: str = "",
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         meta = metadata or {}
         artifact_type = "code"
@@ -363,7 +365,7 @@ class ArtifactEngine:
         )
         return events
 
-    def get_artifact_raw_content(self, artifact_id: str) -> Optional[dict]:
+    def get_artifact_raw_content(self, artifact_id: str) -> dict | None:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             return None
@@ -404,7 +406,7 @@ class ArtifactEngine:
         return ok
 
     def pin_artifact(
-        self, artifact_id: str, chat_id: Optional[str] = None, pinned: bool = True
+        self, artifact_id: str, chat_id: str | None = None, pinned: bool = True
     ) -> bool:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
@@ -416,8 +418,8 @@ class ArtifactEngine:
         return ok
 
     def duplicate_artifact(
-        self, artifact_id: str, new_name: Optional[str] = None
-    ) -> Optional[Artifact]:
+        self, artifact_id: str, new_name: str | None = None
+    ) -> Artifact | None:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -428,7 +430,7 @@ class ArtifactEngine:
 
     def list_all_artifacts(
         self,
-        filters: Optional[dict] = None,
+        filters: dict | None = None,
         sort: str = "updated_at",
         page: int = 1,
         page_size: int = 20,
@@ -469,7 +471,7 @@ class ArtifactEngine:
         content: str,
         change_log: str = "",
         source: str = "manual",
-        expected_content_hash: Optional[str] = None,
+        expected_content_hash: str | None = None,
     ) -> tuple[ArtifactVersion, str]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
@@ -525,8 +527,8 @@ class ArtifactEngine:
     def create_share(
         self,
         artifact_id: str,
-        created_by: Optional[str] = None,
-        expires_at: Optional[str] = None,
+        created_by: str | None = None,
+        expires_at: str | None = None,
     ) -> ArtifactShare:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
@@ -540,10 +542,10 @@ class ArtifactEngine:
             )
             return existing
         import uuid
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         share = ArtifactShare(
             share_id=share_id,
             artifact_id=artifact_id,
@@ -561,7 +563,7 @@ class ArtifactEngine:
         logger.info("Created share %s for artifact %s", share_id, artifact_id)
         return share
 
-    def get_shared_artifact(self, share_id: str) -> Optional[dict]:
+    def get_shared_artifact(self, share_id: str) -> dict | None:
         share = self.storage.get_share(share_id)
         if share is None:
             return None
@@ -569,9 +571,9 @@ class ArtifactEngine:
             logger.info("Share %s is revoked", share_id)
             return None
         if share.expires_at:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             if now_iso > share.expires_at:
                 logger.info("Share %s expired", share_id)
                 return None
@@ -604,8 +606,8 @@ class ArtifactEngine:
     async def create_snapshot(
         self,
         artifact_id: str,
-        label: Optional[str] = None,
-        author: Optional[str] = None,
+        label: str | None = None,
+        author: str | None = None,
     ) -> ArtifactVersion:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
@@ -645,14 +647,14 @@ class ArtifactEngine:
     def create_folder(
         self,
         name: str,
-        parent_id: Optional[str] = None,
-        project_id: Optional[str] = None,
+        parent_id: str | None = None,
+        project_id: str | None = None,
     ) -> ArtifactFolder:
         import uuid
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         folder_id = f"fld_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         folder = ArtifactFolder(
             folder_id=folder_id,
             name=name,
@@ -664,7 +666,7 @@ class ArtifactEngine:
         logger.info("Created folder: %s name=%s", folder_id, name)
         return folder
 
-    def list_folders(self, project_id: Optional[str] = None) -> list[ArtifactFolder]:
+    def list_folders(self, project_id: str | None = None) -> list[ArtifactFolder]:
         return self.storage.list_folders(project_id)
 
     def rename_folder(self, folder_id: str, new_name: str) -> bool:
@@ -677,7 +679,7 @@ class ArtifactEngine:
         logger.info("Deleted folder %s ok=%s", folder_id, ok)
         return ok
 
-    def move_to_folder(self, artifact_id: str, folder_id: Optional[str] = None) -> bool:
+    def move_to_folder(self, artifact_id: str, folder_id: str | None = None) -> bool:
         ok = self.storage.move_to_folder(artifact_id, folder_id)
         logger.info("Moved artifact %s to folder %s ok=%s", artifact_id, folder_id, ok)
         return ok
@@ -685,7 +687,7 @@ class ArtifactEngine:
     # ── P4: tags ───────────────────────────────────────────────
 
     def add_tag(
-        self, artifact_id: str, tag_name: str, color: Optional[str] = None
+        self, artifact_id: str, tag_name: str, color: str | None = None
     ) -> ArtifactTag:
         import uuid
 
@@ -724,15 +726,15 @@ class ArtifactEngine:
     def emit_event(
         self,
         event_type: str,
-        artifact_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        payload: Optional[dict] = None,
+        artifact_id: str | None = None,
+        session_id: str | None = None,
+        payload: dict | None = None,
     ) -> ArtifactEvent:
         import uuid
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         event = ArtifactEvent(
             event_id=event_id,
             artifact_id=artifact_id,
@@ -749,9 +751,9 @@ class ArtifactEngine:
 
     def list_events(
         self,
-        artifact_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        since_ts: Optional[str] = None,
+        artifact_id: str | None = None,
+        session_id: str | None = None,
+        since_ts: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:

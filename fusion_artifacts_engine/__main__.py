@@ -1,12 +1,13 @@
-import sys
-import signal
-import logging
 import argparse
+import logging
+import signal
+import sys
 from pathlib import Path
+
 from fusion_artifacts_engine.config import load_config
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
-from fusion_artifacts_engine.utils import setup_logging, get_package_version
+from fusion_artifacts_engine.utils import get_package_version, setup_logging
 
 # User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
 # Importers/callers: CLI entry point, calls load_config() from config.py, passes config to ArtifactEngine and ArtifactRPCServer
@@ -62,6 +63,7 @@ def main():
 
     elif args.command == "status":
         import os
+
         import httpx
 
         config = load_config()
@@ -83,7 +85,7 @@ def main():
                 print(f"Running: version={data['result'].get('version', 'unknown')}")
             else:
                 print("Not running or error")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Not running: {e}")
 
     elif args.command == "version":

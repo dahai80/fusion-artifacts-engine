@@ -1,7 +1,9 @@
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
+
 import pytest
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
 
@@ -58,7 +60,7 @@ async def test_size_bytes():
 
 @pytest.mark.asyncio
 async def test_create_external_artifact(engine):
-    art, ver, ref = await engine.create_external_artifact(
+    art, _ver, _ref = await engine.create_external_artifact(
         source_module="fusion-mlx",
         workspace_id="ws-001",
         name="model_output.py",
@@ -74,7 +76,7 @@ async def test_create_external_artifact(engine):
 
 @pytest.mark.asyncio
 async def test_create_external_with_project_kb(engine):
-    art, ver, ref = await engine.create_external_artifact(
+    art, _ver, _ref = await engine.create_external_artifact(
         source_module="fusion-mlx",
         workspace_id="ws-002",
         name="kb.py",
@@ -182,7 +184,7 @@ async def test_export_code_not_found(engine):
 
 @pytest.mark.asyncio
 async def test_import_code_python(engine):
-    art, ver, ref = await engine.import_code("s1", "def foo(): pass", "python")
+    art, _ver, _ref = await engine.import_code("s1", "def foo(): pass", "python")
     assert art.type == "code"
     assert art.name.endswith(".py")
 
@@ -333,7 +335,7 @@ async def test_duplicate_not_found(engine):
 async def test_list_all_artifacts(engine):
     await engine.create_artifact("s1", "a.py", "code", "a")
     await engine.create_artifact("s2", "b.py", "code", "b")
-    artifacts, total = engine.list_all_artifacts()
+    _artifacts, total = engine.list_all_artifacts()
     assert total >= 2
 
 
@@ -342,7 +344,7 @@ async def test_list_all_artifacts(engine):
 
 @pytest.mark.asyncio
 async def test_list_recycle_empty(engine):
-    artifacts, total = engine.list_recycle()
+    _artifacts, total = engine.list_recycle()
     assert total == 0
 
 
@@ -582,7 +584,7 @@ async def test_emit_event(engine):
 async def test_list_events(engine):
     engine.emit_event("test.event", session_id="s1")
     engine.emit_event("test.event", session_id="s1")
-    events, total = engine.list_events(session_id="s1")
+    _events, total = engine.list_events(session_id="s1")
     assert total >= 2
 
 

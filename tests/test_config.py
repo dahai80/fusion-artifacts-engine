@@ -1,12 +1,14 @@
 import os
 import tempfile
 from pathlib import Path
+
 import pytest
 import yaml
+
 from fusion_artifacts_engine.config import (
     ArtifactEngineConfig,
-    load_config,
     _flatten_yaml_config,
+    load_config,
 )
 
 
@@ -20,7 +22,7 @@ def test_default_config():
 
 
 def test_extra_fields_forbidden():
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         ArtifactEngineConfig(storage_root="/tmp/test", unknown_field="bad")
 
 

@@ -1,8 +1,9 @@
 import logging
+
 from fusion_artifacts_engine.utils import (
-    setup_logging,
-    get_package_version,
     generate_artifact_id,
+    get_package_version,
+    setup_logging,
 )
 
 

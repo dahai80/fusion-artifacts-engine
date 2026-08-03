@@ -1,7 +1,9 @@
 import time
+
 import pytest
-from fusion_artifacts_engine.engine import ArtifactEngine
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
+from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.event_bus import EventBus
 
 
@@ -69,7 +71,7 @@ class TestExternalCreate:
 
     @pytest.mark.asyncio
     async def test_create_external_with_project_kb(self, engine):
-        artifact, version, ref_text = await engine.create_external_artifact(
+        artifact, _version, _ref_text = await engine.create_external_artifact(
             source_module="fusion-mlx",
             workspace_id="ws-001",
             name="archived",

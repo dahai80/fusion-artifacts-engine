@@ -1,6 +1,6 @@
 from fusion_artifacts_engine.ref_parser import (
-    parse_refs_from_message,
     generate_ref_text,
+    parse_refs_from_message,
 )
 
 

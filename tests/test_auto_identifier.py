@@ -1,7 +1,7 @@
 from fusion_artifacts_engine.auto_identifier import (
-    should_create_artifact,
     detect_artifact_type,
     extract_name_hint,
+    should_create_artifact,
 )
 
 

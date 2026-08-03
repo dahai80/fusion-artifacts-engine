@@ -1,18 +1,18 @@
-import os
-import json
-import hmac
-import queue
-import logging
 import asyncio
+import hmac
+import json
+import logging
+import os
+import queue
 import threading
-from urllib.parse import urlparse, parse_qs
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
-from typing import Optional
-from fusion_artifacts_engine.rpc.methods import RPCHandler
+from urllib.parse import parse_qs, urlparse
+
+from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.errors import RpcError
 from fusion_artifacts_engine.rpc.event_bus import event_bus
-from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
 
@@ -110,8 +110,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             logger.debug("RPC request: %s", request.get("method"))
             response = self._run_async(self._handle(request))
             self._send_response(200, response)
-        except Exception as e:
-            logger.error("RPC error: %s", e, exc_info=True)
+        except Exception:
+            logger.exception("RPC error")
             self._send_response(
                 200,
                 {
@@ -312,7 +312,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                         break
                     data = json.dumps(event)
                     self.wfile.write(
-                        f"event: artifact\ndata: {data}\n\n".encode("utf-8")
+                        f"event: artifact\ndata: {data}\n\n".encode()
                     )
                     self.wfile.flush()
                 except queue.Empty:
@@ -324,8 +324,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     continue
                 except (BrokenPipeError, ConnectionResetError):
                     break
-                except Exception as e:
-                    logger.error("SSE loop error: %s", e)
+                except Exception:
+                    logger.exception("SSE loop error")
                     break
         finally:
             event_bus.unsubscribe(sub)
@@ -363,8 +363,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "id": req_id,
                 "error": {"code": -32602, "message": str(e)},
             }
-        except Exception as e:
-            logger.error("Dispatch error for %s: %s", method, e, exc_info=True)
+        except Exception:
+            logger.exception("Dispatch error for %s", method)
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -392,8 +392,8 @@ class ArtifactRPCServer:
     def __init__(
         self,
         engine: ArtifactEngine,
-        host: Optional[str] = None,
-        port: Optional[int] = None,
+        host: str | None = None,
+        port: int | None = None,
     ):
         self.engine = engine
         self.host = host or getattr(engine.config, "server_host", "127.0.0.1")

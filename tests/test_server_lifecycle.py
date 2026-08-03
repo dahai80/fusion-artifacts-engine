@@ -1,8 +1,10 @@
-import time
-import tempfile
 import shutil
+import tempfile
+import time
 from pathlib import Path
+
 import httpx
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
@@ -44,8 +46,8 @@ def test_server_sse_connect():
         ) as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.headers.get("content-type", "")
-    except Exception:
-        pass
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        pass  # SSE endpoint not reachable, skip
 
     server.stop()
     engine.close()

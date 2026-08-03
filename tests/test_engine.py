@@ -1,7 +1,9 @@
-import tempfile
 import shutil
+import tempfile
 from pathlib import Path
+
 import pytest
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
 
@@ -61,8 +63,8 @@ async def test_delete_artifact_soft(engine):
 
 @pytest.mark.asyncio
 async def test_create_version(engine):
-    art, v1, _ = await engine.create_artifact("s1", "main.py", "code", "v1 code")
-    v2, ref2 = await engine.create_version(art.id, "v2 code", "updated")
+    art, _v1, _ = await engine.create_artifact("s1", "main.py", "code", "v1 code")
+    v2, _ref2 = await engine.create_version(art.id, "v2 code", "updated")
     assert v2.version_num == 2
     content = engine.get_version_content(art.id, 1)
     assert content is not None

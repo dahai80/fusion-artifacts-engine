@@ -1,10 +1,12 @@
+import asyncio
 import json
 import time
 import urllib.request
-import asyncio
+
 import pytest
-from fusion_artifacts_engine.engine import ArtifactEngine
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
+from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 
 
@@ -59,7 +61,7 @@ def test_rpc_unknown_method_returns_32601(tmp_path):
             {"jsonrpc": "2.0", "method": "nonexistent.method", "id": 1}
         ).encode()
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:%d/" % port,
+            f"http://127.0.0.1:{port}/",
             data=req,
             timeout=5,
         )
@@ -92,7 +94,7 @@ def test_rpc_invalid_json_returns_32700(tmp_path):
     try:
         req = b"{invalid json"
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:%d/" % port,
+            f"http://127.0.0.1:{port}/",
             data=req,
             timeout=5,
         )
@@ -125,7 +127,7 @@ def test_rpc_invalid_request_returns_32600(tmp_path):
     try:
         req = json.dumps({"method": "ping"}).encode()
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:%d/" % port,
+            f"http://127.0.0.1:{port}/",
             data=req,
             timeout=5,
         )

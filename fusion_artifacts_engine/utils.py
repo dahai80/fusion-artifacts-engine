@@ -24,5 +24,5 @@ def get_package_version() -> str:
         from importlib.metadata import version as pkg_version
 
         return pkg_version("fusion-artifacts-engine")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "0.1.0"

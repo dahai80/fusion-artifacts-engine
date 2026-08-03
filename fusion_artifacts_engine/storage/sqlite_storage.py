@@ -1,18 +1,19 @@
-import sqlite3
 import json
-import time
-import shutil
 import logging
+import shutil
+import sqlite3
 import threading
+import time
+from datetime import UTC
 from pathlib import Path
-from typing import Optional
+
 from fusion_artifacts_engine.models import (
     Artifact,
-    ArtifactVersion,
-    ArtifactShare,
-    ArtifactFolder,
-    ArtifactTag,
     ArtifactEvent,
+    ArtifactFolder,
+    ArtifactShare,
+    ArtifactTag,
+    ArtifactVersion,
 )
 from fusion_artifacts_engine.storage.base import StorageDriver
 
@@ -451,8 +452,8 @@ class SQLiteStorage(StorageDriver):
         )
 
     def get_artifact(
-        self, artifact_id: str, project_id: Optional[str] = None
-    ) -> Optional[Artifact]:
+        self, artifact_id: str, project_id: str | None = None
+    ) -> Artifact | None:
         if project_id is not None:
             cur = self._conn.execute(
                 "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
@@ -471,8 +472,8 @@ class SQLiteStorage(StorageDriver):
         self,
         session_id: str,
         include_deleted: bool = False,
-        project_id: Optional[str] = None,
-        metadata_filter: Optional[dict] = None,
+        project_id: str | None = None,
+        metadata_filter: dict | None = None,
     ) -> list[Artifact]:
         conditions = ["session_id = ?"]
         params: list = [session_id]
@@ -496,7 +497,7 @@ class SQLiteStorage(StorageDriver):
 
     def list_all_artifacts(
         self,
-        filters: Optional[dict] = None,
+        filters: dict | None = None,
         sort: str = "updated_at",
         page: int = 1,
         page_size: int = 20,
@@ -589,7 +590,7 @@ class SQLiteStorage(StorageDriver):
         self,
         artifact_id: str,
         soft_delete: bool = True,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
     ) -> bool:
         if project_id is not None:
             art = self.get_artifact(artifact_id, project_id=project_id)
@@ -601,9 +602,9 @@ class SQLiteStorage(StorageDriver):
                 )
                 return False
         if soft_delete:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(UTC).isoformat()
             with self._write_lock:
                 cur = self._conn.execute(
                     "UPDATE artifacts SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?",
@@ -649,7 +650,7 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def pin_artifact(
-        self, artifact_id: str, chat_id: Optional[str], pinned: bool
+        self, artifact_id: str, chat_id: str | None, pinned: bool
     ) -> bool:
         with self._write_lock:
             cur = self._conn.execute(
@@ -664,8 +665,8 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def duplicate_artifact(
-        self, artifact_id: str, new_id: str, new_name: Optional[str] = None
-    ) -> Optional[Artifact]:
+        self, artifact_id: str, new_id: str, new_name: str | None = None
+    ) -> Artifact | None:
         art = self.get_artifact(artifact_id)
         if art is None:
             return None
@@ -711,7 +712,7 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         logger.debug("Updated content_hash for %s", artifact_id)
 
-    def set_active_session(self, artifact_id: str, session_id: Optional[str]) -> None:
+    def set_active_session(self, artifact_id: str, session_id: str | None) -> None:
         with self._write_lock:
             self._conn.execute(
                 "UPDATE artifacts SET active_in_session = ?, updated_at = ? WHERE id = ?",
@@ -751,10 +752,10 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def purge_expired(self, retention_days: int = 7) -> int:
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta
 
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=retention_days)
+            datetime.now(UTC) - timedelta(days=retention_days)
         ).isoformat()
         with self._write_lock:
             cur = self._conn.execute(
@@ -849,7 +850,7 @@ class SQLiteStorage(StorageDriver):
 
     def get_version(
         self, artifact_id: str, version_num: int
-    ) -> Optional[ArtifactVersion]:
+    ) -> ArtifactVersion | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_versions WHERE artifact_id = ? AND version_num = ?",
             (artifact_id, version_num),
@@ -922,7 +923,7 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         logger.info("Saved share: %s artifact=%s", share.share_id, share.artifact_id)
 
-    def get_share(self, share_id: str) -> Optional[ArtifactShare]:
+    def get_share(self, share_id: str) -> ArtifactShare | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_shares WHERE share_id = ?", (share_id,)
         )
@@ -931,7 +932,7 @@ class SQLiteStorage(StorageDriver):
             return None
         return _share_from_row(row)
 
-    def get_share_by_artifact(self, artifact_id: str) -> Optional[ArtifactShare]:
+    def get_share_by_artifact(self, artifact_id: str) -> ArtifactShare | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_shares WHERE artifact_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
             (artifact_id,),
@@ -953,9 +954,9 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def increment_share_access(self, share_id: str) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         with self._write_lock:
             self._conn.execute(
                 "UPDATE artifact_shares SET access_count = access_count + 1, last_access_at = ? WHERE share_id = ?",
@@ -982,7 +983,7 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         logger.info("Saved folder: %s name=%s", folder.folder_id, folder.name)
 
-    def get_folder(self, folder_id: str) -> Optional[ArtifactFolder]:
+    def get_folder(self, folder_id: str) -> ArtifactFolder | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_folders WHERE folder_id = ?", (folder_id,)
         )
@@ -991,7 +992,7 @@ class SQLiteStorage(StorageDriver):
             return None
         return _folder_from_row(row)
 
-    def list_folders(self, project_id: Optional[str] = None) -> list[ArtifactFolder]:
+    def list_folders(self, project_id: str | None = None) -> list[ArtifactFolder]:
         if project_id:
             cur = self._conn.execute(
                 "SELECT * FROM artifact_folders WHERE project_id = ? ORDER BY name",
@@ -1027,7 +1028,7 @@ class SQLiteStorage(StorageDriver):
         logger.info("Deleted folder %s ok=%s", folder_id, ok)
         return ok
 
-    def move_to_folder(self, artifact_id: str, folder_id: Optional[str]) -> bool:
+    def move_to_folder(self, artifact_id: str, folder_id: str | None) -> bool:
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE artifacts SET folder_id = ?, updated_at = ? WHERE id = ?",
@@ -1051,7 +1052,7 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         logger.info("Saved tag: %s name=%s", tag.tag_id, tag.name)
 
-    def get_tag(self, tag_id: str) -> Optional[ArtifactTag]:
+    def get_tag(self, tag_id: str) -> ArtifactTag | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_tags WHERE tag_id = ?", (tag_id,)
         )
@@ -1060,7 +1061,7 @@ class SQLiteStorage(StorageDriver):
             return None
         return _tag_from_row(row)
 
-    def get_tag_by_name(self, name: str) -> Optional[ArtifactTag]:
+    def get_tag_by_name(self, name: str) -> ArtifactTag | None:
         cur = self._conn.execute("SELECT * FROM artifact_tags WHERE name = ?", (name,))
         row = cur.fetchone()
         if row is None:
@@ -1132,9 +1133,9 @@ class SQLiteStorage(StorageDriver):
 
     def list_events(
         self,
-        artifact_id: Optional[str] = None,
-        session_id: Optional[str] = None,
-        since_ts: Optional[str] = None,
+        artifact_id: str | None = None,
+        session_id: str | None = None,
+        since_ts: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:
@@ -1385,8 +1386,8 @@ class SQLiteStorage(StorageDriver):
     def list_by_source(
         self,
         source_module: str,
-        workspace_id: Optional[str] = None,
-        workflow_run_id: Optional[str] = None,
+        workspace_id: str | None = None,
+        workflow_run_id: str | None = None,
     ) -> list[Artifact]:
         conditions = ["is_deleted = 0", "source_module = ?"]
         params: list = [source_module]
@@ -1420,5 +1421,5 @@ class SQLiteStorage(StorageDriver):
                 )
                 self._conn.commit()
                 logger.info("Migrated artifact_versions: token_count -> size_bytes")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("Migration size_bytes failed: %s", e)

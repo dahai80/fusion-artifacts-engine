@@ -1,17 +1,19 @@
-import time
-import tempfile
 import shutil
+import tempfile
+import time
 from pathlib import Path
+
 import pytest
-from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
+
 from fusion_artifacts_engine.models import (
     Artifact,
-    ArtifactVersion,
-    ArtifactShare,
-    ArtifactFolder,
-    ArtifactTag,
     ArtifactEvent,
+    ArtifactFolder,
+    ArtifactShare,
+    ArtifactTag,
+    ArtifactVersion,
 )
+from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 
 
 @pytest.fixture
@@ -112,19 +114,19 @@ def test_list_all_with_filters(storage):
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
 
-    arts, total = storage.list_all_artifacts(filters={"kind": "app"})
+    _arts, total = storage.list_all_artifacts(filters={"kind": "app"})
     assert total >= 1
 
-    arts2, total2 = storage.list_all_artifacts(filters={"type": "code"})
+    _arts2, total2 = storage.list_all_artifacts(filters={"type": "code"})
     assert total2 >= 1
 
-    arts3, total3 = storage.list_all_artifacts(filters={"is_starred": True})
+    _arts3, total3 = storage.list_all_artifacts(filters={"is_starred": True})
     assert total3 >= 1
 
-    arts4, total4 = storage.list_all_artifacts(filters={"is_pinned": True})
+    _arts4, total4 = storage.list_all_artifacts(filters={"is_pinned": True})
     assert total4 >= 1
 
-    arts5, total5 = storage.list_all_artifacts(filters={"project_id": "p1"})
+    _arts5, total5 = storage.list_all_artifacts(filters={"project_id": "p1"})
     assert total5 >= 1
 
 
@@ -132,7 +134,7 @@ def test_list_all_name_search(storage):
     art = _make_artifact(name="unique_name.py")
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
-    arts, total = storage.list_all_artifacts(filters={"name_search": "unique"})
+    _arts, total = storage.list_all_artifacts(filters={"name_search": "unique"})
     assert total >= 1
 
 
@@ -142,7 +144,7 @@ def test_list_all_sort_options(storage):
     storage.save_artifact_and_version(art, ver)
 
     for sort_key in ["updated_at", "created_at", "name", "starred"]:
-        arts, total = storage.list_all_artifacts(sort=sort_key)
+        _arts, total = storage.list_all_artifacts(sort=sort_key)
         assert total >= 1
 
 
@@ -266,7 +268,7 @@ def test_list_recycle(storage):
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     storage.delete_artifact("art1", soft_delete=True)
-    arts, total = storage.list_recycle()
+    _arts, total = storage.list_recycle()
     assert total >= 1
 
 
@@ -488,18 +490,18 @@ def test_event_crud(storage):
         created_at="2026-01-01T00:00:00",
     )
     storage.save_event(event)
-    events, total = storage.list_events(session_id="s1")
+    _events, total = storage.list_events(session_id="s1")
     assert total >= 1
 
-    events2, total2 = storage.list_events(artifact_id=None)
+    _events2, total2 = storage.list_events(artifact_id=None)
     assert total2 >= 1
 
-    events3, total3 = storage.list_events(since_ts="2025-01-01")
+    _events3, total3 = storage.list_events(since_ts="2025-01-01")
     assert total3 >= 1
 
 
 def test_list_events_no_filters(storage):
-    events, total = storage.list_events()
+    _events, total = storage.list_events()
     assert total >= 0
 
 
@@ -571,10 +573,10 @@ def test_list_all_owner_filter(storage):
     art = _make_artifact(owner_user_id="u1", ownership_type="owned")
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
-    arts, total = storage.list_all_artifacts(filters={"owner_user_id": "u1"})
+    _arts, total = storage.list_all_artifacts(filters={"owner_user_id": "u1"})
     assert total >= 1
 
-    arts2, total2 = storage.list_all_artifacts(filters={"ownership_type": "owned"})
+    _arts2, total2 = storage.list_all_artifacts(filters={"ownership_type": "owned"})
     assert total2 >= 1
 
 
@@ -583,7 +585,7 @@ def test_list_all_since_until(storage):
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     now = time.time()
-    arts, total = storage.list_all_artifacts(
+    _arts, total = storage.list_all_artifacts(
         filters={"since": now - 100, "until": now + 100}
     )
     assert total >= 1
@@ -601,7 +603,7 @@ def test_list_all_folder_filter(storage):
     art = _make_artifact(folder_id="f1")
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
-    arts, total = storage.list_all_artifacts(filters={"folder_id": "f1"})
+    _arts, total = storage.list_all_artifacts(filters={"folder_id": "f1"})
     assert total >= 1
 
 
@@ -612,7 +614,7 @@ def test_list_all_tag_filter(storage):
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     storage.add_artifact_tag("art1", "t1")
-    arts, total = storage.list_all_artifacts(filters={"tag_id": "t1"})
+    _arts, total = storage.list_all_artifacts(filters={"tag_id": "t1"})
     assert total >= 1
 
 
@@ -620,7 +622,7 @@ def test_list_all_kb_filter(storage):
     art = _make_artifact(in_project_kb=True)
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
-    arts, total = storage.list_all_artifacts(filters={"in_project_kb": True})
+    _arts, total = storage.list_all_artifacts(filters={"in_project_kb": True})
     assert total >= 1
 
 

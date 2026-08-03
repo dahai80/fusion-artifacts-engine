@@ -1,6 +1,7 @@
 import logging
-from typing import Any
 from pathlib import Path
+from typing import Any
+
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.errors import RpcError
 from fusion_artifacts_engine.rpc.event_bus import event_bus
@@ -230,7 +231,7 @@ class RPCHandler:
         kind = artifact_data.get("kind")
         if kind is not None and kind not in valid_kinds:
             raise ValueError(f"Invalid kind, must be one of {valid_kinds}")
-        artifact, version, ref_text = await self.engine.create_artifact(
+        artifact, _version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=artifact_data.get("name", "imported"),
             artifact_type=artifact_type,

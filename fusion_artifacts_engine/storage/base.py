@@ -1,6 +1,6 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+
 from fusion_artifacts_engine.models import Artifact, ArtifactVersion
 
 logger = logging.getLogger(__name__)
@@ -12,16 +12,16 @@ class StorageDriver(ABC):
 
     @abstractmethod
     def get_artifact(
-        self, artifact_id: str, project_id: Optional[str] = None
-    ) -> Optional[Artifact]: ...
+        self, artifact_id: str, project_id: str | None = None
+    ) -> Artifact | None: ...
 
     @abstractmethod
     def list_artifacts(
         self,
         session_id: str,
         include_deleted: bool = False,
-        project_id: Optional[str] = None,
-        metadata_filter: Optional[dict] = None,
+        project_id: str | None = None,
+        metadata_filter: dict | None = None,
     ) -> list[Artifact]: ...
 
     @abstractmethod
@@ -29,7 +29,7 @@ class StorageDriver(ABC):
         self,
         artifact_id: str,
         soft_delete: bool = True,
-        project_id: Optional[str] = None,
+        project_id: str | None = None,
     ) -> bool: ...
 
     @abstractmethod
@@ -38,7 +38,7 @@ class StorageDriver(ABC):
     @abstractmethod
     def get_version(
         self, artifact_id: str, version_num: int
-    ) -> Optional[ArtifactVersion]: ...
+    ) -> ArtifactVersion | None: ...
 
     @abstractmethod
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]: ...

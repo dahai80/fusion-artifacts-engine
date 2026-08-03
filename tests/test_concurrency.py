@@ -1,11 +1,13 @@
+import asyncio
 import json
 import threading
 import time
 import urllib.request
-import asyncio
+
 import pytest
-from fusion_artifacts_engine.engine import ArtifactEngine
+
 from fusion_artifacts_engine.config import ArtifactEngineConfig
+from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 
 
@@ -27,16 +29,16 @@ def test_concurrent_create_artifacts(engine):
 
     def create_art(i):
         try:
-            art, ver, ref = asyncio.run(
+            art, _ver, _ref = asyncio.run(
                 engine.create_artifact(
                     session_id="conc_test",
-                    name="artifact_%d" % i,
+                    name=f"artifact_{i}",
                     artifact_type="code",
-                    content="print('hello %d')" % i,
+                    content=f"print('hello {i}')",
                 )
             )
             results.append(art.id)
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             errors.append(e)
 
     threads = [threading.Thread(target=create_art, args=(i,)) for i in range(10)]
@@ -45,14 +47,14 @@ def test_concurrent_create_artifacts(engine):
     for t in threads:
         t.join(timeout=10)
 
-    assert len(errors) == 0, "Errors: %s" % errors
+    assert len(errors) == 0, f"Errors: {errors}"
     assert len(results) == 10
     assert len(set(results)) == 10, "Duplicate artifact IDs detected"
 
 
 def test_concurrent_write_lock_serializes(engine):
     errors = []
-    art, ver, ref = asyncio.run(
+    art, _ver, _ref = asyncio.run(
         engine.create_artifact(
             session_id="lock_test",
             name="locked_artifact",
@@ -72,14 +74,14 @@ def test_concurrent_write_lock_serializes(engine):
                        (artifact_id, version_num, content, content_path, size_bytes,
                         change_log, source, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (art.id, ver_num, "v%d" % i, None, len(("v%d" % i).encode()), "concurrent v%d" % i, "manual", now),
+                    (art.id, ver_num, f"v{i}", None, len(f"v{i}".encode()), f"concurrent v{i}", "manual", now),
                 )
                 storage._conn.execute(
                     "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE id = ?",
                     (ver_num, now, art.id),
                 )
                 storage._conn.commit()
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             errors.append(e)
 
     threads = [threading.Thread(target=write_op, args=(i,)) for i in range(3)]
@@ -88,7 +90,7 @@ def test_concurrent_write_lock_serializes(engine):
     for t in threads:
         t.join(timeout=10)
 
-    assert len(errors) == 0, "Errors: %s" % errors
+    assert len(errors) == 0, f"Errors: {errors}"
     versions = engine.list_versions(art.id)
     assert len(versions) == 4
 
@@ -115,7 +117,7 @@ def test_rpc_server_ping(tmp_path):
     try:
         req = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
         resp = urllib.request.urlopen(
-            "http://127.0.0.1:%d/" % port,
+            f"http://127.0.0.1:{port}/",
             data=req,
             timeout=5,
         )
@@ -152,13 +154,13 @@ def test_rpc_concurrent_requests(tmp_path):
         try:
             req = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": i}).encode()
             resp = urllib.request.urlopen(
-                "http://127.0.0.1:%d/" % port,
+                f"http://127.0.0.1:{port}/",
                 data=req,
                 timeout=5,
             )
             data = json.loads(resp.read())
             results.append(data.get("result", {}).get("pong", False))
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             errors.append(e)
 
     threads = [threading.Thread(target=ping, args=(i,)) for i in range(5)]
@@ -168,7 +170,7 @@ def test_rpc_concurrent_requests(tmp_path):
         t.join(timeout=10)
 
     try:
-        assert len(errors) == 0, "Errors: %s" % errors
+        assert len(errors) == 0, f"Errors: {errors}"
         assert all(results)
     finally:
         server.stop()
