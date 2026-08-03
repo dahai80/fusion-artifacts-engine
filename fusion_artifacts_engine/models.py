@@ -60,6 +60,8 @@ class ArtifactVersion(BaseModel):
     content: str = ""
     content_path: str | None = None
     size_bytes: int = 0
+    token_count: int = 0
+    section_index: str | None = None
     change_log: str = ""
     source: str = "manual"
     created_at: float = Field(default_factory=time.time)

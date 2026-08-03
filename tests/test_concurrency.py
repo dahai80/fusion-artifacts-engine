@@ -74,7 +74,16 @@ def test_concurrent_write_lock_serializes(engine):
                        (artifact_id, version_num, content, content_path, size_bytes,
                         change_log, source, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (art.id, ver_num, f"v{i}", None, len(f"v{i}".encode()), f"concurrent v{i}", "manual", now),
+                    (
+                        art.id,
+                        ver_num,
+                        f"v{i}",
+                        None,
+                        len(f"v{i}".encode()),
+                        f"concurrent v{i}",
+                        "manual",
+                        now,
+                    ),
                 )
                 storage._conn.execute(
                     "UPDATE artifacts SET current_version = ?, updated_at = ? WHERE id = ?",

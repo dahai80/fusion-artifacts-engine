@@ -311,9 +311,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     if event is None:
                         break
                     data = json.dumps(event)
-                    self.wfile.write(
-                        f"event: artifact\ndata: {data}\n\n".encode()
-                    )
+                    self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode())
                     self.wfile.flush()
                 except queue.Empty:
                     try:

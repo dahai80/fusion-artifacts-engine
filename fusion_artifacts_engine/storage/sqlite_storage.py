@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
     content TEXT DEFAULT '',
     content_path TEXT,
     size_bytes INTEGER NOT NULL DEFAULT 0,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    section_index TEXT DEFAULT NULL,
     change_log TEXT DEFAULT '',
     source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation')),
     created_at REAL NOT NULL,
@@ -158,6 +160,8 @@ def _version_from_row(row: sqlite3.Row) -> ArtifactVersion:
         content=row["content"] or "",
         content_path=row["content_path"],
         size_bytes=row["size_bytes"],
+        token_count=row["token_count"] if "token_count" in keys else 0,
+        section_index=row["section_index"] if "section_index" in keys else None,
         change_log=row["change_log"] or "",
         source=row["source"] if "source" in keys else "manual",
         created_at=row["created_at"],
@@ -245,6 +249,8 @@ class SQLiteStorage(StorageDriver):
         self._migrate_snapshot_columns()
         self._migrate_source_module_columns()
         self._migrate_size_bytes_column()
+        self._migrate_token_count_column()
+        self._migrate_section_index_column()
         logger.info(
             "SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir
         )
@@ -425,15 +431,18 @@ class SQLiteStorage(StorageDriver):
             self._conn.execute(
                 """INSERT INTO artifact_versions
                    (artifact_id, version_num, content, content_path, size_bytes,
+                    token_count, section_index,
                     change_log, source, created_at, snapshot_type, snapshot_label,
                     author, parent_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     version.artifact_id,
                     version.version_num,
                     content,
                     content_path,
                     version.size_bytes,
+                    version.token_count,
+                    version.section_index,
                     version.change_log,
                     version.source,
                     version.created_at,
@@ -445,10 +454,11 @@ class SQLiteStorage(StorageDriver):
             )
             self._conn.commit()
         logger.info(
-            "Saved artifact+version: %s v%d size=%d",
+            "Saved artifact+version: %s v%d size=%d tokens=%d",
             artifact.id,
             version.version_num,
             version.size_bytes,
+            version.token_count,
         )
 
     def get_artifact(
@@ -649,9 +659,7 @@ class SQLiteStorage(StorageDriver):
         logger.info("Star artifact %s starred=%s ok=%s", artifact_id, starred, ok)
         return ok
 
-    def pin_artifact(
-        self, artifact_id: str, chat_id: str | None, pinned: bool
-    ) -> bool:
+    def pin_artifact(self, artifact_id: str, chat_id: str | None, pinned: bool) -> bool:
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE artifacts SET is_pinned = ?, pinned_chat_id = ?, updated_at = ? WHERE id = ?",
@@ -754,9 +762,7 @@ class SQLiteStorage(StorageDriver):
     def purge_expired(self, retention_days: int = 7) -> int:
         from datetime import datetime, timedelta
 
-        cutoff = (
-            datetime.now(UTC) - timedelta(days=retention_days)
-        ).isoformat()
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
         with self._write_lock:
             cur = self._conn.execute(
                 "SELECT id FROM artifacts WHERE is_deleted = 1 AND deleted_at IS NOT NULL AND deleted_at < ?",
@@ -803,15 +809,18 @@ class SQLiteStorage(StorageDriver):
                     self._conn.execute(
                         """INSERT INTO artifact_versions
                            (artifact_id, version_num, content, content_path, size_bytes,
+                            token_count, section_index,
                             change_log, source, created_at, snapshot_type, snapshot_label,
                             author, parent_version)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             version.artifact_id,
                             version.version_num,
                             content,
                             content_path,
                             version.size_bytes,
+                            version.token_count,
+                            version.section_index,
                             version.change_log,
                             version.source,
                             version.created_at,
@@ -823,10 +832,11 @@ class SQLiteStorage(StorageDriver):
                     )
                     self._conn.commit()
                     logger.info(
-                        "Saved version: %s v%d size=%d",
+                        "Saved version: %s v%d size=%d tokens=%d",
                         version.artifact_id,
                         version.version_num,
                         version.size_bytes,
+                        version.token_count,
                     )
                     return
                 except sqlite3.IntegrityError:
@@ -848,9 +858,7 @@ class SQLiteStorage(StorageDriver):
             row = cur.fetchone()
             return row[0]
 
-    def get_version(
-        self, artifact_id: str, version_num: int
-    ) -> ArtifactVersion | None:
+    def get_version(self, artifact_id: str, version_num: int) -> ArtifactVersion | None:
         cur = self._conn.execute(
             "SELECT * FROM artifact_versions WHERE artifact_id = ? AND version_num = ?",
             (artifact_id, version_num),
@@ -1406,6 +1414,30 @@ class SQLiteStorage(StorageDriver):
     def close(self) -> None:
         self._conn.close()
         logger.info("SQLiteStorage closed")
+
+    def _migrate_token_count_column(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifact_versions)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "token_count" not in columns:
+            self._conn.executescript(
+                "ALTER TABLE artifact_versions ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0;"
+            )
+            self._conn.commit()
+            logger.info(
+                "Migrated: added 'token_count' column to artifact_versions table"
+            )
+
+    def _migrate_section_index_column(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(artifact_versions)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "section_index" not in columns:
+            self._conn.executescript(
+                "ALTER TABLE artifact_versions ADD COLUMN section_index TEXT DEFAULT NULL;"
+            )
+            self._conn.commit()
+            logger.info(
+                "Migrated: added 'section_index' column to artifact_versions table"
+            )
 
     def _migrate_size_bytes_column(self) -> None:
         try:

@@ -73,6 +73,8 @@ class RPCHandler:
             # external module
             "artifact.create_external": self._create_external,
             "artifact.list_by_source": self._list_by_source,
+            # AE-1: patch_artifact
+            "artifact.patch": self._patch,
             "ping": self._ping,
         }
 
@@ -126,7 +128,7 @@ class RPCHandler:
             raise ValueError("Version not found")
         return {
             "content": result.content,
-            "token_count": result.size_bytes,
+            "token_count": result.token_count,
             "version": result.version_num,
         }
 
@@ -493,3 +495,20 @@ class RPCHandler:
             workflow_run_id=params.get("workflow_run_id"),
         )
         return {"artifacts": [a.model_dump() for a in artifacts]}
+
+    # ── AE-1: patch_artifact ────────────────────────────────────
+
+    async def _patch(self, params: dict) -> dict:
+        valid_ops = ("replace_section", "append", "prepend", "delete_section")
+        operation = params.get("operation", "")
+        if operation not in valid_ops:
+            raise ValueError(f"Invalid operation, must be one of {valid_ops}")
+        version, patch_info = await self.engine.patch_artifact(
+            artifact_id=params["artifact_id"],
+            operation=operation,
+            anchor=params.get("anchor", ""),
+            content=params.get("content", ""),
+            expected_version=params.get("expected_version"),
+        )
+        event_bus.publish("artifact.patched", {"artifact_id": params["artifact_id"]})
+        return {"version": version.model_dump(), "patch_info": patch_info}

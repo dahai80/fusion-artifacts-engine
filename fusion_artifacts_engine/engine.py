@@ -1,5 +1,7 @@
 import hashlib
+import json
 import logging
+import re
 import time
 from datetime import UTC
 from typing import ClassVar
@@ -16,7 +18,9 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
+from fusion_artifacts_engine.section_index import extract_sections
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
+from fusion_artifacts_engine.token_counter import count_tokens
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
@@ -95,17 +99,27 @@ class ArtifactEngine:
             updated_at=now,
         )
         size = _size_bytes(content)
+        sections = extract_sections(content, artifact_type)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=1,
             content=content,
             size_bytes=size,
+            token_count=count_tokens(content),
+            section_index=json.dumps(sections) if sections else None,
             change_log=change_log,
             created_at=now,
         )
         self.storage.save_artifact_and_version(artifact, version)
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
-        logger.info("Created artifact: %s name=%s size=%d", artifact_id, name, size)
+        logger.info(
+            "Created artifact: %s name=%s size=%d tokens=%d sections=%d",
+            artifact_id,
+            name,
+            size,
+            version.token_count,
+            len(sections),
+        )
         return artifact, version, ref_text
 
     async def create_external_artifact(
@@ -145,11 +159,14 @@ class ArtifactEngine:
             workflow_run_id=workflow_run_id,
         )
         size = _size_bytes(content)
+        sections = extract_sections(content, artifact_type)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=1,
             content=content,
             size_bytes=size,
+            token_count=count_tokens(content),
+            section_index=json.dumps(sections) if sections else None,
             change_log="Created by external module",
             created_at=now,
         )
@@ -212,10 +229,19 @@ class ArtifactEngine:
             return None
         ver = version if version is not None else artifact.current_version
         try:
-            return self.storage.get_version(artifact_id, ver)
+            result = self.storage.get_version(artifact_id, ver)
         except FileNotFoundError as e:
             logger.error("Content file missing for %s v%s: %s", artifact_id, ver, e)
             return None
+        if result is not None and result.section_index:
+            try:
+                result.section_index = json.loads(result.section_index)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "Invalid section_index JSON for %s v%s", artifact_id, ver
+                )
+                result.section_index = None
+        return result
 
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
         return self.storage.list_versions(artifact_id)
@@ -488,11 +514,14 @@ class ArtifactEngine:
         new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
         size = _size_bytes(content)
+        sections = extract_sections(content, artifact.type)
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=new_version,
             content=content,
             size_bytes=size,
+            token_count=count_tokens(content),
+            section_index=json.dumps(sections) if sections else None,
             change_log=change_log,
             source=source,
             created_at=now,
@@ -514,10 +543,12 @@ class ArtifactEngine:
             artifact.summary,
         )
         logger.info(
-            "Created version: %s v%s size=%d hash=%s",
+            "Created version: %s v%s size=%d tokens=%d sections=%d hash=%s",
             artifact_id,
             new_version,
             size,
+            version.token_count,
+            len(sections),
             content_hash,
         )
         return version, ref_text
@@ -777,6 +808,152 @@ class ArtifactEngine:
             ok,
         )
         return ok
+
+    # ── AE-1: patch_artifact ───────────────────────────────────
+
+    async def patch_artifact(
+        self,
+        artifact_id: str,
+        operation: str,
+        anchor: str = "",
+        content: str = "",
+        expected_version: int | None = None,
+    ) -> tuple[ArtifactVersion, dict]:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        if (
+            expected_version is not None
+            and artifact.current_version != expected_version
+        ):
+            raise ValueError(
+                f"Optimistic lock failed: expected version {expected_version}, "
+                f"got {artifact.current_version}"
+            )
+        current = self.storage.get_version(artifact_id, artifact.current_version)
+        if current is None:
+            raise ValueError(f"No current version for artifact: {artifact_id}")
+        old_content = current.content
+        old_tokens = count_tokens(old_content)
+
+        if operation == "replace_section":
+            if not anchor:
+                raise ValueError("anchor is required for replace_section")
+            new_content, replaced_content = self._replace_section(
+                old_content, anchor, content, artifact.type
+            )
+        elif operation == "append":
+            new_content = old_content + content
+            replaced_content = ""
+        elif operation == "prepend":
+            new_content = content + old_content
+            replaced_content = ""
+        elif operation == "delete_section":
+            if not anchor:
+                raise ValueError("anchor is required for delete_section")
+            new_content, replaced_content = self._delete_section(
+                old_content, anchor, artifact.type
+            )
+        else:
+            raise ValueError(f"Unknown operation: {operation}")
+
+        version, _ref_text = await self.create_version(
+            artifact_id, new_content, f"patch:{operation} anchor={anchor}"
+        )
+        replaced_tokens = count_tokens(replaced_content)
+        new_tokens = count_tokens(new_content)
+        tokens_added = new_tokens - old_tokens + replaced_tokens
+        tokens_removed = replaced_tokens
+        tokens_net = tokens_added - tokens_removed
+        patch_info = {
+            "artifact_id": artifact_id,
+            "new_version": version.version_num,
+            "tokens_added": tokens_added,
+            "tokens_removed": tokens_removed,
+            "tokens_net": tokens_net,
+        }
+        logger.info(
+            "Patched artifact %s op=%s anchor=%s new_v=%d net_tokens=%d",
+            artifact_id,
+            operation,
+            anchor,
+            version.version_num,
+            tokens_net,
+        )
+        return version, patch_info
+
+    @staticmethod
+    def _find_section_bounds(
+        content: str, anchor: str, artifact_type: str
+    ) -> list[tuple[int, int, int]]:
+        lines = content.split("\n")
+        matches = []
+        for i, line in enumerate(lines):
+            matched = False
+            if artifact_type == "markdown":
+                m = re.match(r"^(#{1,6})\s+(.+)$", line)
+                if m and m.group(2).strip() == anchor:
+                    matched = True
+                    level = len(m.group(1))
+            elif artifact_type == "code":
+                m = re.match(r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", line)
+                if m and m.group(1) == anchor:
+                    matched = True
+                    level = 1
+            if matched:
+                end = len(lines)
+                if artifact_type == "markdown":
+                    for j in range(i + 1, len(lines)):
+                        m2 = re.match(r"^(#{1,6})\s+", lines[j])
+                        if m2 and len(m2.group(1)) <= level:
+                            end = j
+                            break
+                elif artifact_type == "code":
+                    for j in range(i + 1, len(lines)):
+                        m2 = re.match(
+                            r"^(?:async\s+)?(?:def|class|func)\s+\w+", lines[j]
+                        )
+                        if m2:
+                            end = j
+                            break
+                matches.append((i, end, level))
+        return matches
+
+    def _replace_section(
+        self, content: str, anchor: str, new_content: str, artifact_type: str
+    ) -> tuple[str, str]:
+        matches = self._find_section_bounds(content, anchor, artifact_type)
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple matches for anchor '{anchor}': "
+                f"found at lines {[m[0] + 1 for m in matches]}"
+            )
+        if not matches:
+            raise ValueError(f"Anchor '{anchor}' not found in content")
+        lines = content.split("\n")
+        start, end, _ = matches[0]
+        replaced_lines = lines[start:end]
+        replaced_content = "\n".join(replaced_lines)
+        new_lines = lines[:start] + new_content.split("\n") + lines[end:]
+        return "\n".join(new_lines), replaced_content
+
+    def _delete_section(
+        self, content: str, anchor: str, artifact_type: str
+    ) -> tuple[str, str]:
+        matches = self._find_section_bounds(content, anchor, artifact_type)
+        if len(matches) > 1:
+            raise ValueError(
+                f"Multiple matches for anchor '{anchor}': "
+                f"found at lines {[m[0] + 1 for m in matches]}"
+            )
+        if not matches:
+            raise ValueError(f"Anchor '{anchor}' not found in content")
+        lines = content.split("\n")
+        start, end, _ = matches[0]
+        replaced_lines = lines[start:end]
+        replaced_content = "\n".join(replaced_lines)
+        new_lines = lines[:start] + lines[end:]
+        return "\n".join(new_lines), replaced_content
 
     def close(self) -> None:
         self.storage.close()

@@ -62,6 +62,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | List session artifacts |
 | `artifact.delete` | artifact_id, soft_delete?, project_id? | Soft/hard delete artifact |
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | Create new version (optimistic lock) |
+| `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | Patch artifact (replace_section/append/prepend/delete_section) |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
@@ -295,18 +296,22 @@ from fusion_artifacts_engine import ArtifactEngine, ArtifactEngineConfig
 
 engine = ArtifactEngine()
 
+
 async def main():
     # Create with kind
     art, ver, ref = await engine.create_artifact(
-        "sess_1", "app.py", "code", "print('hello')\n" * 50,
-        summary="Main application", kind="tool"
+        "sess_1",
+        "app.py",
+        "code",
+        "print('hello')\n" * 50,
+        summary="Main application",
+        kind="tool",
     )
     print(f"Created: {art.id} kind={art.kind}")
 
     # Update with source tracking
     v2, ref2 = await engine.create_version(
-        art.id, "print('world')\n" * 60,
-        change_log="", source="ai_generation"
+        art.id, "print('world')\n" * 60, change_log="", source="ai_generation"
     )
 
     # Export as code
@@ -331,6 +336,7 @@ async def main():
     await engine.add_tag(art.id, "important")
 
     engine.close()
+
 
 asyncio.run(main())
 ```
@@ -362,7 +368,9 @@ asyncio.run(main())
 
 **ArtifactVersion** — versioned content with snapshot support:
 - Snapshot: `snapshot_type` (auto/named), `snapshot_label`, `author`, `parent_version`
-- Size: `size_bytes` (byte length of content, replaces former `token_count`)
+- Size: `size_bytes` (byte length of content)
+- Tokens: `token_count` (tiktoken cl100k_base token count)
+- Index: `section_index` (JSON array of {anchor, level} for section navigation)
 
 **ArtifactShare** — share links with access control:
 - `share_id` (shr_*), `max_accesses`, `access_count`, `expires_at`, `is_revoked`
@@ -438,7 +446,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 278+ tests.
+Current coverage: **92%** across 295+ tests.
 
 ## License
 

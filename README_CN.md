@@ -62,6 +62,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | 列出会话产物 |
 | `artifact.delete` | artifact_id, soft_delete?, project_id? | 软/硬删除产物 |
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | 创建新版本（乐观锁） |
+| `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | 补丁更新（replace_section/append/prepend/delete_section） |
 | `artifact.version_list` | artifact_id | 列出所有版本 |
 | `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |
 | `artifact.export` | artifact_id, include_versions? | 导出产物数据 |
@@ -295,18 +296,22 @@ from fusion_artifacts_engine import ArtifactEngine, ArtifactEngineConfig
 
 engine = ArtifactEngine()
 
+
 async def main():
     # 创建并指定分类
     art, ver, ref = await engine.create_artifact(
-        "sess_1", "app.py", "code", "print('hello')\n" * 50,
-        summary="主应用", kind="tool"
+        "sess_1",
+        "app.py",
+        "code",
+        "print('hello')\n" * 50,
+        summary="主应用",
+        kind="tool",
     )
     print(f"已创建: {art.id} kind={art.kind}")
 
     # 更新并追踪来源
     v2, ref2 = await engine.create_version(
-        art.id, "print('world')\n" * 60,
-        change_log="", source="ai_generation"
+        art.id, "print('world')\n" * 60, change_log="", source="ai_generation"
     )
 
     # 导出为代码
@@ -331,6 +336,7 @@ async def main():
     await engine.add_tag(art.id, "重要")
 
     engine.close()
+
 
 asyncio.run(main())
 ```
@@ -363,6 +369,8 @@ asyncio.run(main())
 **ArtifactVersion** — 版本化内容，支持快照：
 - 快照：`snapshot_type`（auto/named）、`snapshot_label`、`author`、`parent_version`
 - 大小：`size_bytes`（内容字节长度）
+- 令牌：`token_count`（tiktoken cl100k_base 令牌计数）
+- 索引：`section_index`（JSON 数组，含 {anchor, level} 用于章节导航）
 
 **ArtifactShare** — 分享链接，包含访问控制：
 - `share_id`（shr_*）、`max_accesses`、`access_count`、`expires_at`、`is_revoked`
@@ -438,7 +446,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，278+ 测试用例。
+当前覆盖率：**92%**，295+ 测试用例。
 
 ## 许可证
 
