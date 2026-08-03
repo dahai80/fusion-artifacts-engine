@@ -4,6 +4,7 @@ pyproject.toml
 fusion_artifacts_engine/__init__.py
 fusion_artifacts_engine/__main__.py
 fusion_artifacts_engine/auto_identifier.py
+fusion_artifacts_engine/compactor.py
 fusion_artifacts_engine/config.py
 fusion_artifacts_engine/default_config.yaml
 fusion_artifacts_engine/engine.py
@@ -28,6 +29,7 @@ fusion_artifacts_engine/storage/base.py
 fusion_artifacts_engine/storage/sqlite_storage.py
 tests/test_auto_identifier.py
 tests/test_auto_identifier_extra.py
+tests/test_compact.py
 tests/test_concurrency.py
 tests/test_config.py
 tests/test_engine.py

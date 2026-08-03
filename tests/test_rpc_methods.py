@@ -475,3 +475,82 @@ def test_create_external_invalid_type(rpc_server):
         },
     )
     assert "error" in r
+
+
+def test_context_budget_with_session(rpc_server):
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_budget1",
+            "name": "budget_doc.md",
+            "type": "markdown",
+            "content": "# Budget Test\nSome content here",
+        },
+    )
+    r = rpc("context.budget", {"session_id": "s_budget1"})
+    result = r["result"]
+    assert result["total_artifact_tokens"] > 0
+    assert result["artifact_count"] >= 1
+    assert "artifacts" in result
+    assert result["artifacts"][0]["artifact_id"] is not None
+    assert result["artifacts"][0]["name"] is not None
+    assert result["artifacts"][0]["tokens"] >= 0
+    assert result["context_window"] == 200000
+    assert result["utilization_percent"] >= 0
+    assert result["warning"] is False
+    assert result["recommendation"] is None
+
+
+def test_context_budget_with_context_window(rpc_server):
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_budget2",
+            "name": "budget_doc2.md",
+            "type": "markdown",
+            "content": "word " * 500,
+        },
+    )
+    r = rpc(
+        "context.budget",
+        {"session_id": "s_budget2", "context_window": 131072},
+    )
+    result = r["result"]
+    assert result["context_window"] == 131072
+    assert result["utilization_percent"] >= 0
+    assert result["warning"] is False
+
+
+def test_context_budget_no_session(rpc_server):
+    r = rpc("context.budget", {})
+    result = r["result"]
+    assert "total_artifact_tokens" in result
+    assert "artifact_count" in result
+    assert "artifacts" in result
+    assert result["context_window"] == 200000
+    assert result["utilization_percent"] >= 0
+
+
+def test_context_budget_warning_high_utilization(rpc_server):
+    big_content = "word " * 8000
+    rpc(
+        "artifact.create",
+        {
+            "session_id": "s_budget3",
+            "name": "huge_doc.md",
+            "type": "markdown",
+            "content": big_content,
+        },
+    )
+    r = rpc(
+        "context.budget",
+        {"session_id": "s_budget3", "context_window": 1000},
+    )
+    result = r["result"]
+    assert result["context_window"] == 1000
+    assert result["utilization_percent"] > 70
+    assert result["warning"] is True
+    assert (
+        result["recommendation"]
+        == "Consider using preview_only mode for artifact injection."
+    )

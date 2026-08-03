@@ -4,6 +4,12 @@ import re
 logger = logging.getLogger(__name__)
 
 
+def normalize_anchor(anchor: str) -> str:
+    normalized = anchor.strip().lstrip("#").strip()
+    logger.debug("normalize_anchor: '%s' -> '%s'", anchor, normalized)
+    return normalized
+
+
 def extract_sections(content: str, artifact_type: str) -> list[dict]:
     sections = []
     if artifact_type == "markdown":

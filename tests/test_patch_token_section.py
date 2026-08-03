@@ -243,3 +243,132 @@ async def test_patch_anchor_with_hash_prefix(engine_with_tmp):
     assert info["new_version"] == 2
     assert "Replaced" in version.content
     assert "Content A" not in version.content
+
+
+async def test_patch_anchor_double_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n## Chapter 2\nContent here\n## Chapter 3\nMore content"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    version, info = await engine.patch_artifact(
+        artifact_id=artifact.id,
+        operation="replace_section",
+        anchor="## Chapter 2",
+        content="## Chapter 2\nNew content\n",
+    )
+    assert info["new_version"] == 2
+    assert "New content" in version.content
+    assert "Content here" not in version.content
+
+
+async def test_patch_anchor_triple_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n### Sub Section\nSub content\n## Other\nOther"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    version, info = await engine.patch_artifact(
+        artifact_id=artifact.id,
+        operation="replace_section",
+        anchor="### Sub Section",
+        content="### Sub Section\nReplaced sub\n",
+    )
+    assert info["new_version"] == 2
+    assert "Replaced sub" in version.content
+    assert "Sub content" not in version.content
+
+
+async def test_patch_anchor_with_whitespace(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n## Section A\nContent A"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    version, info = await engine.patch_artifact(
+        artifact_id=artifact.id,
+        operation="replace_section",
+        anchor="  # Section A  ",
+        content="## Section A\nReplaced\n",
+    )
+    assert info["new_version"] == 2
+    assert "Replaced" in version.content
+
+
+async def test_patch_delete_with_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n## Section A\nContent A\n## Section B\nContent B"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    version, info = await engine.patch_artifact(
+        artifact_id=artifact.id,
+        operation="delete_section",
+        anchor="# Section A",
+    )
+    assert info["new_version"] == 2
+    assert "Section A" not in version.content
+    assert "Content A" not in version.content
+    assert "Section B" in version.content
+
+
+async def test_load_section_with_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n## Chapter 2\nContent here\n## Chapter 3\nMore"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    result = engine.load_artifact(
+        artifact_id=artifact.id,
+        preview_only=False,
+        section="## Chapter 2",
+    )
+    assert result["section"]["anchor"] == "Chapter 2"
+    assert result["section"]["tokens"] > 0
+    assert "Content here" in result["content"]
+
+
+async def test_load_section_double_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n### Details\nDetail content\n## Other\nOther"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    result = engine.load_artifact(
+        artifact_id=artifact.id,
+        preview_only=False,
+        section="### Details",
+    )
+    assert result["section"]["anchor"] == "Details"
+    assert result["section"]["tokens"] > 0
+    assert "Detail content" in result["content"]
+
+
+def test_normalize_anchor_basic():
+    from fusion_artifacts_engine.section_index import normalize_anchor
+
+    assert normalize_anchor("Chapter 2") == "Chapter 2"
+    assert normalize_anchor("# Chapter 2") == "Chapter 2"
+    assert normalize_anchor("## Chapter 2") == "Chapter 2"
+    assert normalize_anchor("### Chapter 2") == "Chapter 2"
+    assert normalize_anchor("  # Chapter 2  ") == "Chapter 2"
+    assert normalize_anchor("####Heading") == "Heading"
+    assert normalize_anchor("") == ""

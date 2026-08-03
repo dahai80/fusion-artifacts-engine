@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-artifacts-engine"
-version = "0.3.1"
+version = "0.3.2"
 description = "Artifact management middleware for Fusion architecture"
 requires-python = ">=3.11"
 dependencies = [

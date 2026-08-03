@@ -79,6 +79,8 @@ class RPCHandler:
             "artifact.load": self._load,
             # AE-6: context_budget
             "context.budget": self._budget,
+            # AE-7: auto_compact
+            "artifact.auto_compact": self._auto_compact,
             "ping": self._ping,
         }
 
@@ -526,7 +528,18 @@ class RPCHandler:
         return result
 
     async def _budget(self, params: dict) -> dict:
+        context_window = params.get("context_window")
+        if context_window is not None:
+            context_window = int(context_window)
         result = self.engine.context_budget(
-            session_id=params["session_id"],
+            session_id=params.get("session_id"),
+            context_window=context_window,
+        )
+        return result
+
+    async def _auto_compact(self, params: dict) -> dict:
+        result = await self.engine.auto_compact(
+            artifact_id=params["artifact_id"],
+            token_budget=params["token_budget"],
         )
         return result

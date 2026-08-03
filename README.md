@@ -63,8 +63,9 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.delete` | artifact_id, soft_delete?, project_id? | Soft/hard delete artifact |
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | Create new version (optimistic lock) |
 | `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | Patch artifact (replace_section/append/prepend/delete_section) |
-| `artifact.load` | artifact_id, preview_only?, section? | Load artifact (preview/section/full) |
-| `context.budget` | session_id | Session token budget summary |
+| `artifact.load` | artifact_id, preview_only?, section? | Load artifact (preview/section/full, per-section token counts) |
+| `context.budget` | session_id, context_window? | Session token budget summary |
+| `artifact.auto_compact` | artifact_id, token_budget | Auto-compress artifact to fit token budget |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
@@ -448,7 +449,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 304+ tests.
+Current coverage: **92%** across 330+ tests.
 
 ## License
 

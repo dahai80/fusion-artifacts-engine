@@ -63,8 +63,9 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.delete` | artifact_id, soft_delete?, project_id? | 软/硬删除产物 |
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | 创建新版本（乐观锁） |
 | `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | 补丁更新（replace_section/append/prepend/delete_section） |
-| `artifact.load` | artifact_id, preview_only?, section? | 加载产物（预览/章节/全文） |
-| `context.budget` | session_id | 会话令牌预算汇总 |
+| `artifact.load` | artifact_id, preview_only?, section? | 加载产物（预览/章节/全文，含章节token数） |
+| `context.budget` | session_id, context_window? | 会话令牌预算汇总 |
+| `artifact.auto_compact` | artifact_id, token_budget | 自动压缩产物至令牌预算内 |
 | `artifact.version_list` | artifact_id | 列出所有版本 |
 | `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |
 | `artifact.export` | artifact_id, include_versions? | 导出产物数据 |
@@ -448,7 +449,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，304+ 测试用例。
+当前覆盖率：**92%**，330+ 测试用例。
 
 ## 许可证
 

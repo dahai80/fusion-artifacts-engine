@@ -18,7 +18,7 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
-from fusion_artifacts_engine.section_index import extract_sections
+from fusion_artifacts_engine.section_index import extract_sections, normalize_anchor
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import count_tokens
 from fusion_artifacts_engine.utils import generate_artifact_id
@@ -886,7 +886,7 @@ class ArtifactEngine:
     def _find_section_bounds(
         content: str, anchor: str, artifact_type: str
     ) -> list[tuple[int, int, int]]:
-        anchor = anchor.lstrip("#").strip()
+        anchor = normalize_anchor(anchor)
         lines = content.split("\n")
         matches = []
         for i, line in enumerate(lines):
@@ -958,6 +958,40 @@ class ArtifactEngine:
 
     # ── AE-2: load_artifact ────────────────────────────────────
 
+    def _build_sections_with_tokens(
+        self, content: str, artifact_type: str
+    ) -> list[dict]:
+        lines = content.split("\n")
+        sections = []
+        i = 0
+        while i < len(lines):
+            matched = False
+            anchor = ""
+            if artifact_type == "markdown":
+                m = re.match(r"^(#{1,6})\s+(.+)$", lines[i])
+                if m:
+                    anchor = m.group(2).strip()
+                    matched = True
+            elif artifact_type == "code":
+                m = re.match(r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", lines[i])
+                if m:
+                    anchor = m.group(1)
+                    matched = True
+            if matched:
+                bounds = self._find_section_bounds(content, anchor, artifact_type)
+                for start, end, _ in bounds:
+                    if start == i:
+                        section_text = "\n".join(lines[start:end])
+                        sections.append(
+                            {
+                                "anchor": anchor,
+                                "tokens": count_tokens(section_text),
+                            }
+                        )
+                        break
+            i += 1
+        return sections
+
     def load_artifact(
         self,
         artifact_id: str,
@@ -971,18 +1005,20 @@ class ArtifactEngine:
         if version is None:
             raise ValueError(f"No version found for artifact: {artifact_id}")
 
+        sections = self._build_sections_with_tokens(version.content, artifact.type)
+
         result: dict = {
             "artifact_id": artifact_id,
-            "name": artifact.name,
+            "title": artifact.name,
             "type": artifact.type,
             "version": version.version_num,
-            "token_count": version.token_count,
-            "section_index": version.section_index,
+            "total_tokens": version.token_count,
+            "sections": sections,
             "summary": artifact.summary or "",
         }
 
         if section:
-            section = section.lstrip("#").strip()
+            section = normalize_anchor(section)
             matches = self._find_section_bounds(version.content, section, artifact.type)
             if not matches:
                 raise ValueError(f"Section '{section}' not found in content")
@@ -993,49 +1029,156 @@ class ArtifactEngine:
                 )
             lines = version.content.split("\n")
             start, end, _ = matches[0]
-            result["content"] = "\n".join(lines[start:end])
-            result["section"] = section
+            sec_content = "\n".join(lines[start:end])
+            sec_tokens = count_tokens(sec_content)
+            matched_anchor = section
+            for s in sections:
+                if s["anchor"].strip() == section:
+                    matched_anchor = s["anchor"]
+                    break
+            result["section"] = {"anchor": matched_anchor, "tokens": sec_tokens}
+            result["content"] = sec_content
         elif preview_only:
             result["content"] = None
         else:
             result["content"] = version.content
 
         logger.info(
-            "Loaded artifact %s preview=%s section=%s",
+            "Loaded artifact %s preview=%s section=%s sections=%d",
             artifact_id,
             preview_only,
             section,
+            len(sections),
         )
         return result
 
     # ── AE-6: context_budget ───────────────────────────────────
 
-    def context_budget(self, session_id: str) -> dict:
-        artifacts = self.storage.list_artifacts(session_id)
-        budget = self.config.context_budget_default
-        artifact_tokens = []
+    def context_budget(
+        self,
+        session_id: str | None = None,
+        context_window: int | None = None,
+    ) -> dict:
+        if session_id:
+            artifacts = self.storage.list_artifacts(session_id)
+        else:
+            artifacts, _total = self.storage.list_all_artifacts(
+                page_size=100000,
+            )
+        artifact_list = []
         total_tokens = 0
         for art in artifacts:
             ver = self.get_version_content(art.id)
             tc = ver.token_count if ver else 0
             total_tokens += tc
-            artifact_tokens.append({"id": art.id, "name": art.name, "token_count": tc})
-        available = max(0, budget - total_tokens)
-        utilization_pct = round(total_tokens / budget * 100, 1) if budget > 0 else 0.0
+            artifact_list.append(
+                {
+                    "artifact_id": art.id,
+                    "name": art.name,
+                    "tokens": tc,
+                }
+            )
+        effective_window = (
+            context_window
+            if context_window is not None
+            else self.config.context_budget_default
+        )
+        utilization_pct = (
+            round(total_tokens / effective_window * 100, 1)
+            if effective_window > 0
+            else 0.0
+        )
+        warning = utilization_pct > 70
+        recommendation = None
+        if warning:
+            recommendation = "Consider using preview_only mode for artifact injection."
         logger.info(
-            "Context budget session=%s used=%d/%d (%.1f%%)",
+            "Context budget session=%s total_tokens=%d window=%d utilization=%.1f%% warning=%s",
             session_id,
             total_tokens,
-            budget,
+            effective_window,
             utilization_pct,
+            warning,
         )
         return {
-            "session_id": session_id,
-            "total_budget": budget,
-            "used_tokens": total_tokens,
-            "available_tokens": available,
-            "utilization_pct": utilization_pct,
-            "artifacts": artifact_tokens,
+            "total_artifact_tokens": total_tokens,
+            "artifact_count": len(artifact_list),
+            "artifacts": artifact_list,
+            "context_window": effective_window,
+            "utilization_percent": utilization_pct,
+            "warning": warning,
+            "recommendation": recommendation,
+        }
+
+    # ── AE-7: auto_compact ─────────────────────────────────────
+
+    async def auto_compact(self, artifact_id: str, token_budget: int) -> dict:
+        from fusion_artifacts_engine.compactor import compact_content
+
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        version = self.get_version_content(artifact_id)
+        if version is None:
+            raise ValueError(f"No version found for artifact: {artifact_id}")
+
+        original_tokens = version.token_count
+        if original_tokens <= token_budget:
+            logger.info(
+                "Artifact %s already within budget: %d <= %d",
+                artifact_id,
+                original_tokens,
+                token_budget,
+            )
+            return {
+                "version": version.model_dump(),
+                "original_tokens": original_tokens,
+                "compacted_tokens": original_tokens,
+                "savings_pct": 0.0,
+                "compacted": False,
+            }
+
+        compacted_content = compact_content(
+            version.content, artifact.type, token_budget
+        )
+        compacted_tokens = count_tokens(compacted_content)
+
+        if compacted_tokens < original_tokens:
+            version, _ = await self.create_version(
+                artifact_id,
+                compacted_content,
+                change_log=f"auto_compact: {original_tokens} -> {compacted_tokens} tokens (budget={token_budget})",
+                source="ai_generation",
+            )
+            savings = round(
+                (original_tokens - compacted_tokens) / original_tokens * 100, 1
+            )
+            logger.info(
+                "Auto-compacted %s: %d -> %d tokens (%.1f%% savings)",
+                artifact_id,
+                original_tokens,
+                compacted_tokens,
+                savings,
+            )
+            return {
+                "version": version.model_dump(),
+                "original_tokens": original_tokens,
+                "compacted_tokens": compacted_tokens,
+                "savings_pct": savings,
+                "compacted": True,
+            }
+
+        logger.warning(
+            "Auto-compact could not reduce %s below budget %d",
+            artifact_id,
+            token_budget,
+        )
+        return {
+            "version": version.model_dump(),
+            "original_tokens": original_tokens,
+            "compacted_tokens": compacted_tokens,
+            "savings_pct": 0.0,
+            "compacted": False,
         }
 
     def close(self) -> None:
