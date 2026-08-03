@@ -886,6 +886,7 @@ class ArtifactEngine:
     def _find_section_bounds(
         content: str, anchor: str, artifact_type: str
     ) -> list[tuple[int, int, int]]:
+        anchor = anchor.lstrip("#").strip()
         lines = content.split("\n")
         matches = []
         for i, line in enumerate(lines):
@@ -954,6 +955,88 @@ class ArtifactEngine:
         replaced_content = "\n".join(replaced_lines)
         new_lines = lines[:start] + lines[end:]
         return "\n".join(new_lines), replaced_content
+
+    # ── AE-2: load_artifact ────────────────────────────────────
+
+    def load_artifact(
+        self,
+        artifact_id: str,
+        preview_only: bool = True,
+        section: str | None = None,
+    ) -> dict:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        version = self.get_version_content(artifact_id)
+        if version is None:
+            raise ValueError(f"No version found for artifact: {artifact_id}")
+
+        result: dict = {
+            "artifact_id": artifact_id,
+            "name": artifact.name,
+            "type": artifact.type,
+            "version": version.version_num,
+            "token_count": version.token_count,
+            "section_index": version.section_index,
+            "summary": artifact.summary or "",
+        }
+
+        if section:
+            section = section.lstrip("#").strip()
+            matches = self._find_section_bounds(version.content, section, artifact.type)
+            if not matches:
+                raise ValueError(f"Section '{section}' not found in content")
+            if len(matches) > 1:
+                raise ValueError(
+                    f"Multiple matches for section '{section}': "
+                    f"found at lines {[m[0] + 1 for m in matches]}"
+                )
+            lines = version.content.split("\n")
+            start, end, _ = matches[0]
+            result["content"] = "\n".join(lines[start:end])
+            result["section"] = section
+        elif preview_only:
+            result["content"] = None
+        else:
+            result["content"] = version.content
+
+        logger.info(
+            "Loaded artifact %s preview=%s section=%s",
+            artifact_id,
+            preview_only,
+            section,
+        )
+        return result
+
+    # ── AE-6: context_budget ───────────────────────────────────
+
+    def context_budget(self, session_id: str) -> dict:
+        artifacts = self.storage.list_artifacts(session_id)
+        budget = self.config.context_budget_default
+        artifact_tokens = []
+        total_tokens = 0
+        for art in artifacts:
+            ver = self.get_version_content(art.id)
+            tc = ver.token_count if ver else 0
+            total_tokens += tc
+            artifact_tokens.append({"id": art.id, "name": art.name, "token_count": tc})
+        available = max(0, budget - total_tokens)
+        utilization_pct = round(total_tokens / budget * 100, 1) if budget > 0 else 0.0
+        logger.info(
+            "Context budget session=%s used=%d/%d (%.1f%%)",
+            session_id,
+            total_tokens,
+            budget,
+            utilization_pct,
+        )
+        return {
+            "session_id": session_id,
+            "total_budget": budget,
+            "used_tokens": total_tokens,
+            "available_tokens": available,
+            "utilization_pct": utilization_pct,
+            "artifacts": artifact_tokens,
+        }
 
     def close(self) -> None:
         self.storage.close()

@@ -33,6 +33,7 @@ tests/test_config.py
 tests/test_engine.py
 tests/test_engine_lifecycle.py
 tests/test_issues_18_19_20.py
+tests/test_load_budget.py
 tests/test_main.py
 tests/test_metadata.py
 tests/test_patch_token_section.py

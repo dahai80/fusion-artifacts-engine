@@ -223,3 +223,23 @@ async def test_patch_optimistic_lock(engine_with_tmp):
             content="more",
             expected_version=999,
         )
+
+
+async def test_patch_anchor_with_hash_prefix(engine_with_tmp):
+    engine = engine_with_tmp
+    content = "# Title\n## Section A\nContent A\n## Section B\nContent B"
+    artifact, _, _ = await engine.create_artifact(
+        session_id="test-session",
+        name="doc.md",
+        artifact_type="markdown",
+        content=content,
+    )
+    version, info = await engine.patch_artifact(
+        artifact_id=artifact.id,
+        operation="replace_section",
+        anchor="# Section A",
+        content="## Section A\nReplaced\n",
+    )
+    assert info["new_version"] == 2
+    assert "Replaced" in version.content
+    assert "Content A" not in version.content

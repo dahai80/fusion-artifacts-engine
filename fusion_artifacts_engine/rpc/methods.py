@@ -75,6 +75,10 @@ class RPCHandler:
             "artifact.list_by_source": self._list_by_source,
             # AE-1: patch_artifact
             "artifact.patch": self._patch,
+            # AE-2: load_artifact
+            "artifact.load": self._load,
+            # AE-6: context_budget
+            "context.budget": self._budget,
             "ping": self._ping,
         }
 
@@ -512,3 +516,17 @@ class RPCHandler:
         )
         event_bus.publish("artifact.patched", {"artifact_id": params["artifact_id"]})
         return {"version": version.model_dump(), "patch_info": patch_info}
+
+    async def _load(self, params: dict) -> dict:
+        result = self.engine.load_artifact(
+            artifact_id=params["artifact_id"],
+            preview_only=params.get("preview_only", True),
+            section=params.get("section"),
+        )
+        return result
+
+    async def _budget(self, params: dict) -> dict:
+        result = self.engine.context_budget(
+            session_id=params["session_id"],
+        )
+        return result

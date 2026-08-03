@@ -127,6 +127,7 @@ class ArtifactEngineConfig(BaseModel):
     recycle_retention_days: int = Field(default=7)
     allow_no_auth: bool = Field(default=True)
     sse_heartbeat_interval: int = Field(default=30)
+    context_budget_default: int = Field(default=200000)
 
     @property
     def db_path(self) -> Path:

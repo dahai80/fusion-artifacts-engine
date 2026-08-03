@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: fusion-artifacts-engine
-Version: 0.3.0
+Version: 0.3.1
 Summary: Artifact management middleware for Fusion architecture
 Requires-Python: >=3.11
 License-File: LICENSE
