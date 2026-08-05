@@ -67,6 +67,11 @@ curl -X POST http://127.0.0.1:11451 \
 | `context.budget` | session_id, context_window? | Session token budget summary |
 | `artifact.auto_compact` | artifact_id, token_budget | Auto-compress artifact to fit token budget |
 | `artifact.version_diff` | artifact_id, from_version, to_version | Unified diff between two versions |
+| `artifact.render` | content, session_id, lang_hint, project_id? | Auto-detect type, create renderable artifact |
+| `artifact.check_safety` | messages, output_budget | Token budget safety check |
+| `artifact.inject` | messages, output_budget | Token accounting for message injection |
+| `artifact.interact` | artifact_id, action, payload, session_id? | Record artifact interaction event |
+| `artifact.sync` | artifact_id, file_path, direction | Sync artifact content ↔ file |
 | `artifact.version_list` | artifact_id | List all versions |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
@@ -450,7 +455,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 338+ tests.
+Current coverage: **92%** across 359+ tests.
 
 ## License
 

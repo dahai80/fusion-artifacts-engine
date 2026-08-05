@@ -83,6 +83,12 @@ class RPCHandler:
             "artifact.auto_compact": self._auto_compact,
             # #36: version_diff
             "artifact.version_diff": self._version_diff,
+            # #37: render / check_safety / inject / interact / sync
+            "artifact.render": self._render,
+            "artifact.check_safety": self._check_safety,
+            "artifact.inject": self._inject,
+            "artifact.interact": self._interact,
+            "artifact.sync": self._sync,
             "ping": self._ping,
         }
 
@@ -551,5 +557,56 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             from_version=params["from_version"],
             to_version=params["to_version"],
+        )
+        return result
+
+    # ── #37: render / check_safety / inject / interact / sync ───
+
+    async def _render(self, params: dict) -> dict:
+        result = await self.engine.render_artifact(
+            content=params.get("content", ""),
+            session_id=params.get("session_id", ""),
+            lang_hint=params.get("lang_hint", ""),
+            project_id=params.get("project_id"),
+        )
+        if result.get("created"):
+            event_bus.publish(
+                "artifact.rendered",
+                {"artifact_id": result["artifact"]["id"]},
+            )
+        return result
+
+    async def _check_safety(self, params: dict) -> dict:
+        result = self.engine.check_safety(
+            messages=params.get("messages", []),
+            output_budget=params.get("output_budget"),
+        )
+        return result
+
+    async def _inject(self, params: dict) -> dict:
+        result = self.engine.inject(
+            messages=params.get("messages", []),
+            output_budget=params.get("output_budget"),
+        )
+        return result
+
+    async def _interact(self, params: dict) -> dict:
+        result = self.engine.interact_artifact(
+            artifact_id=params["artifact_id"],
+            action=params.get("action", "state_change"),
+            payload=params.get("payload"),
+            session_id=params.get("session_id"),
+        )
+        event_bus.publish(
+            "artifact.interacted",
+            {"artifact_id": params["artifact_id"], "action": result["action"]},
+        )
+        return result
+
+    async def _sync(self, params: dict) -> dict:
+        result = await self.engine.sync_artifact_file(
+            artifact_id=params["artifact_id"],
+            file_path=params["file_path"],
+            direction=params["direction"],
         )
         return result

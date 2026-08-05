@@ -67,6 +67,11 @@ curl -X POST http://127.0.0.1:11451 \
 | `context.budget` | session_id, context_window? | 会话令牌预算汇总 |
 | `artifact.auto_compact` | artifact_id, token_budget | 自动压缩产物至令牌预算内 |
 | `artifact.version_diff` | artifact_id, from_version, to_version | 两版本间统一差异对比 |
+| `artifact.render` | content, session_id, lang_hint, project_id? | 自动检测类型，创建可渲染产物 |
+| `artifact.check_safety` | messages, output_budget | 令牌预算安全检查 |
+| `artifact.inject` | messages, output_budget | 消息注入令牌核算 |
+| `artifact.interact` | artifact_id, action, payload, session_id? | 记录产物交互事件 |
+| `artifact.sync` | artifact_id, file_path, direction | 产物内容与文件双向同步 |
 | `artifact.version_list` | artifact_id | 列出所有版本 |
 | `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |
 | `artifact.export` | artifact_id, include_versions? | 导出产物数据 |
@@ -450,7 +455,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，338+ 测试用例。
+当前覆盖率：**92%**，359+ 测试用例。
 
 ## 许可证
 

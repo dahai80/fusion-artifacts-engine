@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from datetime import UTC
+from pathlib import Path
 from typing import ClassVar
 
 from fusion_artifacts_engine.auto_identifier import should_create_artifact
@@ -1225,6 +1226,183 @@ class ArtifactEngine:
             "diff": diff_text,
             "lines_added": lines_added,
             "lines_removed": lines_removed,
+        }
+
+    # ── #37: render / check_safety / inject / interact / sync ───
+
+    async def render_artifact(
+        self,
+        content: str,
+        session_id: str,
+        lang_hint: str = "",
+        project_id: str | None = None,
+    ) -> dict:
+        from fusion_artifacts_engine.auto_identifier import (
+            detect_artifact_type,
+            detect_renderable_type,
+            extract_name_hint,
+            should_create_artifact,
+        )
+
+        if not content:
+            logger.info("render_artifact: empty content, skipping")
+            return {"created": False, "reason": "empty_content"}
+        if not should_create_artifact(content, content_type="text"):
+            logger.info("render_artifact: content below threshold, skipping")
+            return {"created": False, "reason": "below_threshold"}
+        try:
+            name = extract_name_hint(content, lang_hint)
+            artifact_type = detect_artifact_type(name, content)
+            render_type = detect_renderable_type(content, name) or artifact_type
+            renderable_types = {"html", "react", "markdown", "svg", "mermaid"}
+            is_renderable = render_type in renderable_types
+            artifact, _version, ref_text = await self.create_artifact(
+                session_id=session_id,
+                name=name,
+                artifact_type=artifact_type,
+                content=content,
+                summary=_truncate_summary(content),
+                change_log="Created via artifact.render",
+                project_id=project_id,
+            )
+            logger.info(
+                "render_artifact: created %s type=%s render_type=%s renderable=%s",
+                artifact.id,
+                artifact_type,
+                render_type,
+                is_renderable,
+            )
+            return {
+                "created": True,
+                "artifact": artifact.model_dump(),
+                "render_type": render_type if is_renderable else None,
+                "content": content,
+                "ref_text": ref_text,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.error("render_artifact failed: %s", e, exc_info=True)
+            return {"created": False, "reason": str(e)}
+
+    def check_safety(
+        self, messages: list[dict], output_budget: int | None = None
+    ) -> dict:
+        current_tokens = 0
+        for msg in messages:
+            content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+            current_tokens += count_tokens(content)
+        effective_budget = (
+            output_budget
+            if output_budget and output_budget > 0
+            else self.config.context_budget_default
+        )
+        remaining = effective_budget - current_tokens
+        safe = remaining >= 0
+        logger.info(
+            "check_safety: current=%d budget=%d remaining=%d safe=%s",
+            current_tokens,
+            effective_budget,
+            remaining,
+            safe,
+        )
+        return {
+            "safe": safe,
+            "current_tokens": current_tokens,
+            "remaining_tokens": remaining,
+        }
+
+    def inject(
+        self, messages: list[dict], output_budget: int | None = None
+    ) -> dict:
+        total_tokens = 0
+        for msg in messages:
+            content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+            total_tokens += count_tokens(content)
+        effective_budget = (
+            output_budget
+            if output_budget and output_budget > 0
+            else self.config.context_budget_default
+        )
+        safe = total_tokens <= effective_budget
+        logger.info(
+            "inject: messages=%d total_tokens=%d budget=%d safe=%s",
+            len(messages),
+            total_tokens,
+            effective_budget,
+            safe,
+        )
+        return {
+            "messages": messages,
+            "total_tokens": total_tokens,
+            "safe": safe,
+        }
+
+    def interact_artifact(
+        self,
+        artifact_id: str,
+        action: str,
+        payload: dict | None = None,
+        session_id: str | None = None,
+    ) -> dict:
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        event = self.emit_event(
+            "artifact.interaction",
+            artifact_id=artifact_id,
+            session_id=session_id,
+            payload={"action": action, "payload": payload or {}},
+        )
+        logger.info(
+            "interact_artifact: %s action=%s event=%s", artifact_id, action, event.event_id
+        )
+        return {
+            "ok": True,
+            "artifact_id": artifact_id,
+            "action": action,
+            "event_id": event.event_id,
+        }
+
+    async def sync_artifact_file(
+        self, artifact_id: str, file_path: str, direction: str
+    ) -> dict:
+        if direction not in ("artifact_to_code", "code_to_artifact"):
+            raise ValueError(
+                "direction must be 'artifact_to_code' or 'code_to_artifact'"
+            )
+        artifact = self.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        path = Path(file_path)
+        if direction == "artifact_to_code":
+            version = self.get_version_content(artifact_id)
+            if version is None:
+                raise ValueError(f"No version found for artifact: {artifact_id}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(version.content, encoding="utf-8")
+            logger.info(
+                "sync_artifact_file: artifact %s -> %s (%d bytes)",
+                artifact_id,
+                file_path,
+                len(version.content),
+            )
+        else:
+            if not path.exists():
+                raise ValueError(f"File not found: {file_path}")
+            new_content = path.read_text(encoding="utf-8")
+            await self.create_version(
+                artifact_id, new_content, f"sync from {file_path}"
+            )
+            logger.info(
+                "sync_artifact_file: %s -> artifact %s (%d bytes)",
+                file_path,
+                artifact_id,
+                len(new_content),
+            )
+        return {
+            "ok": True,
+            "direction": direction,
+            "artifact_id": artifact_id,
+            "file_path": file_path,
         }
 
     def close(self) -> None:
