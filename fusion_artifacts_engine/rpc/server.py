@@ -131,13 +131,27 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self._send_rest_response(404, {"error": "Not found"})
 
     def _handle_rest_v1_get(self) -> None:
-        if not self._is_authed():
-            self._send_auth_denied(jsonrpc=False)
-            return
         engine = self.server._rpc_handler.engine
         parsed = urlparse(self.path)
         path_parts = [p for p in parsed.path.split("/") if p]
         query = parse_qs(parsed.query)
+
+        # Public share endpoint — no auth required (#38, #26-B)
+        if len(path_parts) == 4 and path_parts[2] == "share":
+            share_id = path_parts[3]
+            result = engine.get_public_share(share_id)
+            status = result.get("status")
+            if status == "ok":
+                self._send_rest_response(200, result)
+            elif status == "gone":
+                self._send_rest_response(410, {"error": "Gone", "reason": result.get("reason")})
+            else:
+                self._send_rest_response(404, {"error": "Share not found"})
+            return
+
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=False)
+            return
 
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
             if len(path_parts) == 4:

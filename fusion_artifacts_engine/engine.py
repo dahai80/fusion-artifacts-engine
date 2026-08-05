@@ -634,6 +634,44 @@ class ArtifactEngine:
         logger.info("Revoked share %s ok=%s", share_id, ok)
         return ok
 
+    def get_public_share(self, share_id: str) -> dict:
+        share = self.storage.get_share(share_id)
+        if share is None:
+            logger.info("Public share %s not found", share_id)
+            return {"status": "not_found"}
+        if share.revoked:
+            logger.info("Public share %s revoked", share_id)
+            return {"status": "gone", "reason": "revoked"}
+        if share.expires_at:
+            from datetime import datetime
+
+            now_iso = datetime.now(UTC).isoformat()
+            if now_iso > share.expires_at:
+                logger.info("Public share %s expired", share_id)
+                return {"status": "gone", "reason": "expired"}
+        self.storage.increment_share_access(share_id)
+        artifact = self.storage.get_artifact(share.artifact_id)
+        if artifact is None:
+            logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
+            return {"status": "not_found"}
+        version = self.get_version_content(share.artifact_id)
+        content_type_map = {
+            "html": "text/html",
+            "react": "text/html",
+            "markdown": "text/markdown",
+            "code": "text/plain",
+            "data": "application/json",
+        }
+        ct = content_type_map.get(artifact.type, "text/plain")
+        logger.info("Public share %s served artifact %s", share_id, share.artifact_id)
+        return {
+            "status": "ok",
+            "share": share.model_dump(),
+            "artifact": artifact.model_dump(),
+            "content": version.content if version else "",
+            "content_type": ct,
+        }
+
     # ── P2: snapshots ──────────────────────────────────────────
 
     async def create_snapshot(

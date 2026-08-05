@@ -254,6 +254,7 @@ GET /api/v1/folders            # 列出文件夹
 GET /api/v1/tags               # 列出标签
 GET /api/v1/events             # 列出事件
 GET /api/v1/recycle            # 列出回收站
+GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；已撤销/过期返回 410 Gone）
 ```
 
 `GET /api/v1/artifacts` 查询参数：
@@ -455,7 +456,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，359+ 测试用例。
+当前覆盖率：**92%**，365+ 测试用例。
 
 ## 许可证
 

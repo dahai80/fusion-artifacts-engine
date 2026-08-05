@@ -254,6 +254,7 @@ GET /api/v1/folders            # List folders
 GET /api/v1/tags               # List tags
 GET /api/v1/events             # List events
 GET /api/v1/recycle            # List recycle bin
+GET /api/v1/share/{share_id}   # Public share access (no auth; 410 Gone if revoked/expired)
 ```
 
 Query parameters for `GET /api/v1/artifacts`:
@@ -455,7 +456,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 359+ tests.
+Current coverage: **92%** across 365+ tests.
 
 ## License
 
