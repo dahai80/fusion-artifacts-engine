@@ -456,7 +456,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 365+ tests.
+Current coverage: **92%** across 367+ tests.
 
 ## License
 

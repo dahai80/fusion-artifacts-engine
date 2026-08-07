@@ -447,6 +447,15 @@ class RPCHandler:
             session_id=params.get("session_id"),
             payload=params.get("payload"),
         )
+        event_bus.publish(
+            event.event_type,
+            {
+                "event_id": event.event_id,
+                "artifact_id": event.artifact_id,
+                "session_id": event.session_id,
+                "payload": event.payload,
+            },
+        )
         return {"event": event.model_dump()}
 
     async def _list_events(self, params: dict) -> dict:

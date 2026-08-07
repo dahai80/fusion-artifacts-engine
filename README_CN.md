@@ -456,7 +456,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-当前覆盖率：**92%**，365+ 测试用例。
+当前覆盖率：**92%**，367+ 测试用例。
 
 ## 许可证
 

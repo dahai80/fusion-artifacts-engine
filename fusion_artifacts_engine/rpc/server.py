@@ -303,6 +303,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=False)
             return
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        kind_filter = query.get("kind", [None])[0]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -311,19 +314,22 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         watcher_id = f"sse_{id(self)}"
-        sub = queue.Queue()
-        event_bus.subscribe(sub)
+        sub = event_bus.subscribe()
 
         engine = self.server._rpc_handler.engine
         heartbeat_interval = engine.config.sse_heartbeat_interval
 
-        logger.info("SSE connected: watcher=%s", watcher_id)
+        logger.info(
+            "SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter
+        )
         try:
             while True:
                 try:
                     event = sub.get(timeout=heartbeat_interval)
                     if event is None:
                         break
+                    if kind_filter and event.get("kind") != kind_filter:
+                        continue
                     data = json.dumps(event)
                     self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode())
                     self.wfile.flush()
