@@ -1,13 +1,13 @@
 import pytest
 
 from fusion_artifacts_engine.compactor import (
-    compact_content,
-    _remove_comments,
     _collapse_blank_lines,
+    _remove_comments,
     _remove_decorators,
+    compact_content,
 )
-from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.config import ArtifactEngineConfig
+from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.token_counter import count_tokens
 
 

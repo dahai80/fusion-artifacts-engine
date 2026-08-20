@@ -18,17 +18,23 @@ logger = logging.getLogger(__name__)
 
 _MAX_BODY_SIZE = 10 * 1024 * 1024
 
+# 导入时快照，向后兼容测试/旧用法；_is_authed 优先读 env 以支持运行时旋转 (P1-10)。
 _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
-_CSP_HEADER = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-    "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data: blob:; "
-    "font-src 'self' data:; "
-    "connect-src 'self'; "
-    "frame-ancestors 'none';"
-)
+_API_CSP = "default-src 'none'; frame-ancestors 'none'"
+
+
+def _parse_json_query(query: dict, key: str) -> dict | None:
+    # REST GET 无 body，metadata_filter/filters 通过 JSON 编码的查询参数传递。
+    raw = query.get(key, [None])[0]
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Invalid JSON query param %s: %s", key, e)
+        return None
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -37,7 +43,8 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
     def _is_authed(self) -> bool:
-        if not _API_KEY:
+        api_key_env = os.environ.get("FUSION_ARTIFACTS_API_KEY", "") or _API_KEY
+        if not api_key_env:
             allow_no_auth = getattr(
                 self.server._rpc_handler.engine.config,
                 "allow_no_auth",
@@ -50,7 +57,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
             return False
         api_key = self.headers.get("X-API-Key", "")
-        return hmac.compare_digest(api_key, _API_KEY)
+        return hmac.compare_digest(api_key, api_key_env)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
         if jsonrpc:
@@ -194,9 +201,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 query.get("include_deleted", ["false"])[0].lower() == "true"
             )
             project_id = query.get("project_id", [None])[0]
+            metadata_filter = _parse_json_query(query, "metadata_filter")
+            filters = _parse_json_query(query, "filters")
             if session_id:
                 artifacts = engine.list_artifacts(
-                    session_id, include_deleted, project_id
+                    session_id,
+                    include_deleted,
+                    project_id,
+                    metadata_filter=metadata_filter,
                 )
                 self._send_rest_response(
                     200,
@@ -210,6 +222,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 page_size = int(query.get("page_size", ["20"])[0])
                 sort = query.get("sort", ["updated_at"])[0]
                 artifacts, total = engine.list_all_artifacts(
+                    filters=filters,
                     page=page,
                     page_size=page_size,
                     sort=sort,
@@ -229,7 +242,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=False)
             return
-        engine = self.server._rpc_handler.engine
+        rpc_handler = self.server._rpc_handler
         parsed = urlparse(self.path)
         path_parts = [p for p in parsed.path.split("/") if p]
 
@@ -244,55 +257,46 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(400, {"error": f"Invalid JSON: {e}"})
             return
 
+        # REST create/update/delete 复用 RPC handler.dispatch，继承 SSE 发布与参数校验，
+        # 保持 REST 与 RPC 能力对等 (P1-3 / P1-4)。
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
             if len(path_parts) == 4 and path_parts[3] == "create":
-                result = self._run_async(
-                    engine.create_artifact(
-                        session_id=data.get("session_id", ""),
-                        name=data.get("name", ""),
-                        artifact_type=data.get("type", "code"),
-                        content=data.get("content", ""),
-                        summary=data.get("summary", ""),
-                        kind=data.get("kind"),
-                        project_id=data.get("project_id"),
-                        metadata=data.get("metadata"),
+                try:
+                    result = self._run_async(
+                        rpc_handler.dispatch("artifact.create", data)
                     )
-                )
-                artifact, version, ref_text = result
-                self._send_rest_response(
-                    201,
-                    {
-                        "artifact": artifact.model_dump(),
-                        "version": version.model_dump(),
-                        "ref_text": ref_text,
-                    },
-                )
+                except ValueError as e:
+                    self._send_rest_response(400, {"error": str(e)})
+                    return
+                self._send_rest_response(201, result)
                 return
             artifact_id = path_parts[3]
             if len(path_parts) == 4:
                 action = data.get("action", "")
                 if action == "delete":
-                    ok = engine.delete_artifact(
-                        artifact_id, soft_delete=data.get("soft_delete", True)
-                    )
-                    self._send_rest_response(200, {"ok": ok})
-                else:
-                    result = self._run_async(
-                        engine.create_version(
-                            artifact_id,
-                            data.get("content", ""),
-                            change_log=data.get("change_log", ""),
-                            expected_content_hash=data.get("expected_content_hash"),
+                    try:
+                        result = self._run_async(
+                            rpc_handler.dispatch(
+                                "artifact.delete",
+                                {"artifact_id": artifact_id, **data},
+                            )
                         )
-                    )
-                    version, ref_text = result
-                    self._send_rest_response(
-                        200,
-                        {
-                            "version": version.model_dump(),
-                            "ref_text": ref_text,
-                        },
-                    )
+                    except ValueError as e:
+                        self._send_rest_response(404, {"error": str(e)})
+                        return
+                    self._send_rest_response(200, result)
+                else:
+                    try:
+                        result = self._run_async(
+                            rpc_handler.dispatch(
+                                "artifact.update",
+                                {"artifact_id": artifact_id, **data},
+                            )
+                        )
+                    except ValueError as e:
+                        self._send_rest_response(404, {"error": str(e)})
+                        return
+                    self._send_rest_response(200, result)
                 return
             self._send_rest_response(404, {"error": "Not found"})
             return
@@ -353,6 +357,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         body = json.dumps(data).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Security-Policy", _API_CSP)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -393,6 +398,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         body = json.dumps(data).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Security-Policy", _API_CSP)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

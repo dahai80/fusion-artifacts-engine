@@ -7,11 +7,11 @@ logger = logging.getLogger(__name__)
 
 _RENDERABLE_SVG_RE = re.compile(r"^\s*<svg[\s>]", re.IGNORECASE)
 _RENDERABLE_MERMAID_RE = re.compile(
-    r"^\s*(graph\s+[A-Z]{2}|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|flowchart)",
+    r"^\s*(graph\s+[A-Za-z]+|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|flowchart)",
     re.IGNORECASE | re.MULTILINE,
 )
 _RENDERABLE_REACT_RE = re.compile(
-    r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function|jsx|tsx)",
+    r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function\s+\w+|from\s+['\"]react['\"])",
     re.IGNORECASE,
 )
 _RENDERABLE_HTML_RE = re.compile(r"^\s*(<!DOCTYPE\s+html|<html[\s>])", re.IGNORECASE)
