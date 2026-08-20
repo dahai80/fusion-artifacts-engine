@@ -99,8 +99,11 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
     server_host = merged.pop("server_host", None)
     server_port = merged.pop("server_port", None)
 
-    # Remove stale keys from user config that no longer exist in model
-    for stale in ("mlx_url", "safe_context_threshold", "output_reserve_tokens"):
+    # 丢弃用户配置中模型已不存在的 stale key，避免 extra="forbid" 抛错 (P2-18)。
+    valid_fields = set(ArtifactEngineConfig.model_fields.keys())
+    stale_keys = [k for k in merged if k not in valid_fields]
+    for stale in stale_keys:
+        logger.warning("Stripping stale config key: %s", stale)
         merged.pop(stale, None)
 
     config = ArtifactEngineConfig(**merged)

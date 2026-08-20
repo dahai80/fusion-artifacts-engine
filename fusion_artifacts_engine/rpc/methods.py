@@ -21,6 +21,18 @@ class RPCHandler:
             raise RpcError(-32601, f"Method not found: {method}")
         return await handler(params)
 
+    def _publish(self, event_type: str, aid: str | None, **extra) -> None:
+        # SSE ?kind= 过滤按 artifact kind (app/code/...) 而非事件名。
+        # 每个 artifact 事件都必须携带 kind，否则订阅者按 kind 过滤时静默丢弃。
+        kind = None
+        if aid:
+            artifact = self.engine.storage.get_artifact(aid)
+            if artifact is not None:
+                kind = artifact.kind
+        payload = {"event_type": event_type, "kind": kind}
+        payload.update(extra)
+        event_bus.publish(event_type, payload)
+
     def _build_methods(self) -> dict:
         return {
             "artifact.create": self._create,
@@ -111,9 +123,7 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        event_bus.publish(
-            "artifact.created", {"artifact_id": artifact.id, "kind": artifact.kind}
-        )
+        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
         return {
             "artifact": artifact.model_dump(),
             "version": version.model_dump(),
@@ -161,7 +171,7 @@ class RPCHandler:
             params.get("soft_delete", True),
             project_id=params.get("project_id"),
         )
-        event_bus.publish("artifact.deleted", {"artifact_id": params["artifact_id"]})
+        self._publish("artifact.deleted", params["artifact_id"], artifact_id=params["artifact_id"])
         return {"ok": ok}
 
     async def _update(self, params: dict) -> dict:
@@ -176,7 +186,7 @@ class RPCHandler:
             source=source,
             expected_content_hash=params.get("expected_content_hash"),
         )
-        event_bus.publish("artifact.updated", {"artifact_id": params["artifact_id"]})
+        self._publish("artifact.updated", params["artifact_id"], artifact_id=params["artifact_id"])
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
@@ -186,6 +196,12 @@ class RPCHandler:
     async def _version_rollback(self, params: dict) -> dict:
         version, ref_text = await self.engine.rollback_version(
             params["artifact_id"], params["target_version"]
+        )
+        self._publish(
+            "artifact.rolled_back",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            target_version=params["target_version"],
         )
         return {"version": version.model_dump(), "ref_text": ref_text}
 
@@ -257,6 +273,7 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=artifact_data.get("metadata"),
         )
+        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
     async def _export_code(self, params: dict) -> dict:
@@ -272,6 +289,7 @@ class RPCHandler:
             name=params.get("name", ""),
             metadata=params.get("metadata"),
         )
+        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
         return {
             "artifact": artifact.model_dump(),
             "version": version.model_dump(),
@@ -306,11 +324,23 @@ class RPCHandler:
 
     async def _rename(self, params: dict) -> dict:
         ok = self.engine.rename_artifact(params["artifact_id"], params["new_name"])
+        self._publish(
+            "artifact.renamed",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            new_name=params["new_name"],
+        )
         return {"ok": ok}
 
     async def _star(self, params: dict) -> dict:
         ok = self.engine.star_artifact(
             params["artifact_id"], params.get("starred", True)
+        )
+        self._publish(
+            "artifact.starred",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            starred=params.get("starred", True),
         )
         return {"ok": ok}
 
@@ -318,6 +348,12 @@ class RPCHandler:
         ok = self.engine.pin_artifact(
             params["artifact_id"],
             chat_id=params.get("chat_id"),
+            pinned=params.get("pinned", True),
+        )
+        self._publish(
+            "artifact.pinned",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
             pinned=params.get("pinned", True),
         )
         return {"ok": ok}
@@ -328,6 +364,7 @@ class RPCHandler:
         )
         if dup is None:
             raise ValueError("Failed to duplicate artifact")
+        self._publish("artifact.created", dup.id, artifact_id=dup.id)
         return {"artifact": dup.model_dump()}
 
     async def _list_all(self, params: dict) -> dict:
@@ -350,10 +387,16 @@ class RPCHandler:
 
     async def _restore(self, params: dict) -> dict:
         ok = self.engine.restore_artifact(params["artifact_id"])
+        self._publish(
+            "artifact.restored",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+        )
         return {"ok": ok}
 
     async def _purge_expired(self, params: dict) -> dict:
         count = self.engine.purge_expired()
+        self._publish("artifacts.purged", None, purged=count)
         return {"purged": count}
 
     # ── P2: snapshots ──────────────────────────────────────────
@@ -363,6 +406,12 @@ class RPCHandler:
             params["artifact_id"],
             label=params.get("label"),
             author=params.get("author"),
+        )
+        self._publish(
+            "artifact.snapshot_created",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            snapshot_id=snapshot.version_num,
         )
         return {"version": snapshot.model_dump()}
 
@@ -378,6 +427,12 @@ class RPCHandler:
             created_by=params.get("created_by"),
             expires_at=params.get("expires_at"),
         )
+        self._publish(
+            "artifact.shared",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            share_id=share.share_id,
+        )
         return {"share": share.model_dump()}
 
     async def _get_shared(self, params: dict) -> dict:
@@ -388,6 +443,11 @@ class RPCHandler:
 
     async def _revoke_share(self, params: dict) -> dict:
         ok = self.engine.revoke_share(params["share_id"])
+        self._publish(
+            "artifact.share_revoked",
+            None,
+            share_id=params["share_id"],
+        )
         return {"ok": ok}
 
     # ── P2: folders ────────────────────────────────────────────
@@ -398,6 +458,7 @@ class RPCHandler:
             parent_id=params.get("parent_id"),
             project_id=params.get("project_id"),
         )
+        self._publish("folder.created", None, folder_id=folder.folder_id)
         return {"folder": folder.model_dump()}
 
     async def _list_folders(self, params: dict) -> dict:
@@ -406,14 +467,22 @@ class RPCHandler:
 
     async def _rename_folder(self, params: dict) -> dict:
         ok = self.engine.rename_folder(params["folder_id"], params["new_name"])
+        self._publish("folder.renamed", None, folder_id=params["folder_id"])
         return {"ok": ok}
 
     async def _delete_folder(self, params: dict) -> dict:
         ok = self.engine.delete_folder(params["folder_id"])
+        self._publish("folder.deleted", None, folder_id=params["folder_id"])
         return {"ok": ok}
 
     async def _move_to_folder(self, params: dict) -> dict:
         ok = self.engine.move_to_folder(params["artifact_id"], params.get("folder_id"))
+        self._publish(
+            "artifact.moved",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            folder_id=params.get("folder_id"),
+        )
         return {"ok": ok}
 
     # ── P4: tags ───────────────────────────────────────────────
@@ -424,10 +493,22 @@ class RPCHandler:
             params["tag_name"],
             color=params.get("color"),
         )
+        self._publish(
+            "artifact.tagged",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            tag_name=params["tag_name"],
+        )
         return {"tag": tag.model_dump()}
 
     async def _remove_tag(self, params: dict) -> dict:
         ok = self.engine.remove_tag(params["artifact_id"], params["tag_name"])
+        self._publish(
+            "artifact.untagged",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            tag_name=params["tag_name"],
+        )
         return {"ok": ok}
 
     async def _list_tags(self, params: dict) -> dict:
@@ -447,14 +528,13 @@ class RPCHandler:
             session_id=params.get("session_id"),
             payload=params.get("payload"),
         )
-        event_bus.publish(
+        self._publish(
             event.event_type,
-            {
-                "event_id": event.event_id,
-                "artifact_id": event.artifact_id,
-                "session_id": event.session_id,
-                "payload": event.payload,
-            },
+            event.artifact_id,
+            event_id=event.event_id,
+            artifact_id=event.artifact_id,
+            session_id=event.session_id,
+            payload=event.payload,
         )
         return {"event": event.model_dump()}
 
@@ -472,6 +552,12 @@ class RPCHandler:
 
     async def _move_to_project_kb(self, params: dict) -> dict:
         ok = self.engine.move_to_project_kb(params["artifact_id"], params["project_id"])
+        self._publish(
+            "artifact.moved_to_kb",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            project_id=params["project_id"],
+        )
         return {"ok": ok}
 
     # ── external module ─────────────────────────────────────────
@@ -497,13 +583,11 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        event_bus.publish(
+        self._publish(
             "artifact.created",
-            {
-                "artifact_id": artifact.id,
-                "source_module": artifact.source_module,
-                "kind": artifact.kind,
-            },
+            artifact.id,
+            artifact_id=artifact.id,
+            source_module=artifact.source_module,
         )
         return {
             "artifact": artifact.model_dump(),
@@ -533,7 +617,7 @@ class RPCHandler:
             content=params.get("content", ""),
             expected_version=params.get("expected_version"),
         )
-        event_bus.publish("artifact.patched", {"artifact_id": params["artifact_id"]})
+        self._publish("artifact.patched", params["artifact_id"], artifact_id=params["artifact_id"])
         return {"version": version.model_dump(), "patch_info": patch_info}
 
     async def _load(self, params: dict) -> dict:
@@ -559,6 +643,11 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             token_budget=params["token_budget"],
         )
+        self._publish(
+            "artifact.compacted",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+        )
         return result
 
     async def _version_diff(self, params: dict) -> dict:
@@ -579,9 +668,15 @@ class RPCHandler:
             project_id=params.get("project_id"),
         )
         if result.get("created"):
-            event_bus.publish(
+            self._publish(
+                "artifact.created",
+                result["artifact"]["id"],
+                artifact_id=result["artifact"]["id"],
+            )
+            self._publish(
                 "artifact.rendered",
-                {"artifact_id": result["artifact"]["id"]},
+                result["artifact"]["id"],
+                artifact_id=result["artifact"]["id"],
             )
         return result
 
@@ -606,9 +701,11 @@ class RPCHandler:
             payload=params.get("payload"),
             session_id=params.get("session_id"),
         )
-        event_bus.publish(
+        self._publish(
             "artifact.interacted",
-            {"artifact_id": params["artifact_id"], "action": result["action"]},
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            action=result["action"],
         )
         return result
 
@@ -617,5 +714,12 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             file_path=params["file_path"],
             direction=params["direction"],
+        )
+        self._publish(
+            "artifact.synced",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            direction=params["direction"],
+            file_path=params["file_path"],
         )
         return result

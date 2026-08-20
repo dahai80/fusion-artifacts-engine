@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import time
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import ClassVar
 
@@ -30,15 +30,30 @@ logger = logging.getLogger(__name__)
 _SUMMARY_MAX_LEN = 200
 
 
+def _is_expired(expires_at: str | None) -> bool:
+    if not expires_at:
+        return False
+    try:
+        exp = datetime.fromisoformat(expires_at)
+    except ValueError:
+        logger.warning("Unparseable expires_at %r, treat as not expired", expires_at)
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    return datetime.now(UTC) > exp
+
+
 def _truncate_summary(content: str) -> str:
     return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
 
 
 def _auto_changelog(old_content: str, new_content: str) -> str:
+    # 基于真实行级 diff 统计增删，非仅行数算术 (P2-11)。
     old_lines = old_content.splitlines()
     new_lines = new_content.splitlines()
-    added = max(len(new_lines) - len(old_lines), 0)
-    removed = max(len(old_lines) - len(new_lines), 0)
+    diff_lines = list(difflib.unified_diff(old_lines, new_lines, lineterm=""))
+    added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
     parts = []
     if added:
         parts.append(f"+{added} lines")
@@ -49,11 +64,94 @@ def _auto_changelog(old_content: str, new_content: str) -> str:
             parts.append("content modified")
         else:
             parts.append("no change")
+    elif added == removed and old_content != new_content:
+        # 同行数内容替换：diff 报 +n/-n，补充 content modified 标记替换语义 (P2-11)。
+        parts.append("content modified")
     return ", ".join(parts)
 
 
 def _size_bytes(content: str) -> int:
     return len(content.encode("utf-8"))
+
+
+def _html_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+_SHARE_DOC_CSP = (
+    "default-src 'none'; "
+    "script-src 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; "
+    "img-src data:; "
+    "font-src data:; "
+    "connect-src 'none';"
+)
+
+
+def _render_share_html(artifact: Artifact, content: str) -> str:
+    atype = artifact.type
+    title = _html_escape(artifact.name or "Shared Artifact")
+    if atype in ("html", "react"):
+        iframe_doc = _html_escape(content)
+        return (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
+            f"<style>html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
+            f"</head><body>"
+            f"<iframe sandbox='allow-scripts' srcdoc=\"{iframe_doc}\"></iframe>"
+            f"</body></html>"
+        )
+    if atype == "markdown":
+        import markdown
+
+        rendered = markdown.markdown(content, extensions=["fenced_code", "tables"])
+        return (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
+            f"<style>body{{font-family:system-ui,sans-serif;max-width:900px;"
+            f"margin:2rem auto;padding:0 1rem;line-height:1.6}}"
+            f"pre{{background:#f4f4f4;padding:1rem;overflow:auto;border-radius:4px}}"
+            f"code{{background:#f4f4f4;padding:2px 6px;border-radius:3px}}</style>"
+            f"</head><body>{rendered}</body></html>"
+        )
+    if atype == "data":
+        import json as _json
+
+        pretty = _html_escape(
+            _json.dumps(_json.loads(content), indent=2, ensure_ascii=False)
+            if content.strip()
+            else content
+        )
+        return (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            f"<style>body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
+            f"</head><body>{pretty}</body></html>"
+        )
+    if atype == "svg":
+        return (
+            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            f"<style>body{{margin:0;display:flex;justify-content:center;"
+            f"align-items:center;min-height:100vh}}</style>"
+            f"</head><body>{content}</body></html>"
+        )
+    escaped = _html_escape(content)
+    return (
+        f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title>"
+        f"<style>body{{font-family:monospace;white-space:pre-wrap;"
+        f"padding:1rem;overflow:auto}}</style>"
+        f"</head><body>{escaped}</body></html>"
+    )
 
 
 class ArtifactEngine:
@@ -235,14 +333,8 @@ class ArtifactEngine:
         except FileNotFoundError as e:
             logger.error("Content file missing for %s v%s: %s", artifact_id, ver, e)
             return None
-        if result is not None and result.section_index:
-            try:
-                result.section_index = json.loads(result.section_index)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning(
-                    "Invalid section_index JSON for %s v%s", artifact_id, ver
-                )
-                result.section_index = None
+        # section_index 保持原始 JSON 字符串（与 list_versions 一致），不在原地改类型，
+        # 避免 str/dict 漂移；调用方需 dict 时自行 json.loads (P2-8)。
         return result
 
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
@@ -265,13 +357,18 @@ class ArtifactEngine:
         if target is None:
             raise ValueError(f"Version not found: {artifact_id} v{target_version}")
         version, ref_text = await self.create_version(
-            artifact_id, target.content, f"Rollback to v{target_version}"
+            artifact_id,
+            target.content,
+            f"Rollback to v{target_version}",
+            snapshot_type="rollback",
+            parent_version=target_version,
         )
         logger.info(
-            "Rolled back %s to v%s, new v%s",
+            "Rolled back %s to v%s, new v%s (rollback-tagged, parent=%s)",
             artifact_id,
             target_version,
             version.version_num,
+            target_version,
         )
         return version, ref_text
 
@@ -500,13 +597,15 @@ class ArtifactEngine:
         change_log: str = "",
         source: str = "manual",
         expected_content_hash: str | None = None,
+        snapshot_type: str = "auto",
+        parent_version: int | None = None,
     ) -> tuple[ArtifactVersion, str]:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         if expected_content_hash is not None:
             current_hash = artifact.content_hash
-            if current_hash is not None and current_hash != expected_content_hash:
+            if current_hash != expected_content_hash:
                 raise ValueError(
                     f"Optimistic lock failed: expected hash {expected_content_hash}, got {current_hash}"
                 )
@@ -527,6 +626,8 @@ class ArtifactEngine:
             change_log=change_log,
             source=source,
             created_at=now,
+            snapshot_type=snapshot_type,
+            parent_version=parent_version,
         )
         self.storage.save_version(version)
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
@@ -587,12 +688,7 @@ class ArtifactEngine:
             expires_at=expires_at,
         )
         self.storage.save_share(share)
-        with self.storage._write_lock:
-            self.storage._conn.execute(
-                "UPDATE artifacts SET share_id = ?, updated_at = ? WHERE id = ?",
-                (share_id, time.time(), artifact_id),
-            )
-            self.storage._conn.commit()
+        self.storage.set_artifact_share_id(artifact_id, share_id)
         logger.info("Created share %s for artifact %s", share_id, artifact_id)
         return share
 
@@ -603,13 +699,9 @@ class ArtifactEngine:
         if share.revoked:
             logger.info("Share %s is revoked", share_id)
             return None
-        if share.expires_at:
-            from datetime import datetime
-
-            now_iso = datetime.now(UTC).isoformat()
-            if now_iso > share.expires_at:
-                logger.info("Share %s expired", share_id)
-                return None
+        if _is_expired(share.expires_at):
+            logger.info("Share %s expired", share_id)
+            return None
         self.storage.increment_share_access(share_id)
         artifact = self.storage.get_artifact(share.artifact_id)
         if artifact is None:
@@ -642,34 +734,28 @@ class ArtifactEngine:
         if share.revoked:
             logger.info("Public share %s revoked", share_id)
             return {"status": "gone", "reason": "revoked"}
-        if share.expires_at:
-            from datetime import datetime
-
-            now_iso = datetime.now(UTC).isoformat()
-            if now_iso > share.expires_at:
-                logger.info("Public share %s expired", share_id)
-                return {"status": "gone", "reason": "expired"}
+        if _is_expired(share.expires_at):
+            logger.info("Public share %s expired", share_id)
+            return {"status": "gone", "reason": "expired"}
         self.storage.increment_share_access(share_id)
         artifact = self.storage.get_artifact(share.artifact_id)
         if artifact is None:
             logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
             return {"status": "not_found"}
         version = self.get_version_content(share.artifact_id)
-        content_type_map = {
-            "html": "text/html",
-            "react": "text/html",
-            "markdown": "text/markdown",
-            "code": "text/plain",
-            "data": "application/json",
-        }
-        ct = content_type_map.get(artifact.type, "text/plain")
-        logger.info("Public share %s served artifact %s", share_id, share.artifact_id)
+        raw_content = version.content if version else ""
+        rendered_html = _render_share_html(artifact, raw_content)
+        logger.info(
+            "Public share %s served artifact %s (rendered, source isolated)",
+            share_id,
+            share.artifact_id,
+        )
         return {
             "status": "ok",
             "share": share.model_dump(),
             "artifact": artifact.model_dump(),
-            "content": version.content if version else "",
-            "content_type": ct,
+            "rendered_html": rendered_html,
+            "content_type": "text/html",
         }
 
     # ── P2: snapshots ──────────────────────────────────────────
@@ -688,11 +774,16 @@ class ArtifactEngine:
             raise ValueError(f"No current version for artifact: {artifact_id}")
         new_ver_num = self.storage.next_version_num(artifact_id)
         now = time.time()
+        snapshot_content = current.content
+        snapshot_size = _size_bytes(snapshot_content)
+        snapshot_sections = extract_sections(snapshot_content, artifact.type)
         snapshot = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=new_ver_num,
-            content=current.content,
-            size_bytes=current.size_bytes,
+            content=snapshot_content,
+            size_bytes=snapshot_size,
+            token_count=count_tokens(snapshot_content),
+            section_index=json.dumps(snapshot_sections) if snapshot_sections else None,
             change_log=f"Snapshot: {label}" if label else "Snapshot",
             source="manual",
             created_at=now,
@@ -1176,6 +1267,7 @@ class ArtifactEngine:
                 "compacted_tokens": original_tokens,
                 "savings_pct": 0.0,
                 "compacted": False,
+                "reason": "already_within_budget",
             }
 
         compacted_content = compact_content(
@@ -1219,6 +1311,7 @@ class ArtifactEngine:
             "compacted_tokens": compacted_tokens,
             "savings_pct": 0.0,
             "compacted": False,
+            "reason": "could_not_reduce",
         }
 
     # ── #36: version_diff ───────────────────────────────────────
@@ -1275,6 +1368,10 @@ class ArtifactEngine:
         lang_hint: str = "",
         project_id: str | None = None,
     ) -> dict:
+        # 边界说明：本方法不执行浏览器渲染，只做 (1) 阈值判定 (2) 类型检测
+        # (3) 存储为 artifact (4) 返回 render_type 提示 + 原始 content。
+        # 浏览器渲染由调用方 (fusion-studio) 负责；服务端渲染场景见
+        # _render_share_html (公开分享只读预览)。
         from fusion_artifacts_engine.auto_identifier import (
             detect_artifact_type,
             detect_renderable_type,
@@ -1317,8 +1414,8 @@ class ArtifactEngine:
                 "content": content,
                 "ref_text": ref_text,
             }
-        except Exception as e:  # noqa: BLE001
-            logger.error("render_artifact failed: %s", e, exc_info=True)
+        except Exception as e:
+            logger.exception("render_artifact failed")
             return {"created": False, "reason": str(e)}
 
     def check_safety(
@@ -1351,6 +1448,8 @@ class ArtifactEngine:
     def inject(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
+        # NOTE: inject 当前仅做 token 预算检查，不注入也不修改 messages。
+        # 调用方应据返回的 safe 标志自行决定是否压缩，勿依赖注入副作用。
         total_tokens = 0
         for msg in messages:
             content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
@@ -1372,6 +1471,8 @@ class ArtifactEngine:
             "messages": messages,
             "total_tokens": total_tokens,
             "safe": safe,
+            "injected": False,
+            "note": "no-op: budget check only, messages unchanged",
         }
 
     def interact_artifact(
@@ -1398,6 +1499,8 @@ class ArtifactEngine:
             "artifact_id": artifact_id,
             "action": action,
             "event_id": event.event_id,
+            "dispatched": False,
+            "note": "stub: records interaction event only, no action dispatch",
         }
 
     async def sync_artifact_file(

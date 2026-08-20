@@ -54,14 +54,16 @@ def _create_artifact_and_share(content="render me", atype="html"):
 
 
 def test_share_rest_ok(share_server):
-    _server, engine = share_server
+    _server, _engine = share_server
     art_id, share_id = _create_artifact_and_share(content="<html>hello</html>")
     resp = rest_get(f"/api/v1/share/{share_id}")
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
     assert data["artifact"]["id"] == art_id
-    assert data["content"] == "<html>hello</html>"
+    assert "rendered_html" in data
+    assert "content" not in data
+    assert "<iframe" in data["rendered_html"]
     assert data["content_type"] == "text/html"
 
 
@@ -72,7 +74,7 @@ def test_share_rest_not_found(share_server):
 
 
 def test_share_rest_revoked_gone(share_server):
-    _server, engine = share_server
+    _server, _engine = share_server
     _art_id, share_id = _create_artifact_and_share()
     rpc("artifact.revoke_share", {"share_id": share_id})
     resp = rest_get(f"/api/v1/share/{share_id}")
@@ -81,7 +83,7 @@ def test_share_rest_revoked_gone(share_server):
 
 
 def test_share_rest_expired_gone(share_server):
-    _server, engine = share_server
+    _server, _engine = share_server
     art_id = rpc(
         "artifact.create",
         {"session_id": "s_share_exp", "name": "exp.html", "type": "html", "content": "x"},
@@ -108,9 +110,12 @@ def test_share_rest_public_no_auth(share_server):
         engine.config.allow_no_auth = True
 
 
-def test_share_rest_markdown_content_type(share_server):
-    _server, engine = share_server
+def test_share_rest_markdown_rendered(share_server):
+    _server, _engine = share_server
     _art_id, share_id = _create_artifact_and_share(content="# Title", atype="markdown")
     resp = rest_get(f"/api/v1/share/{share_id}")
     assert resp.status_code == 200
-    assert resp.json()["content_type"] == "text/markdown"
+    data = resp.json()
+    assert data["content_type"] == "text/html"
+    assert "<h1>Title</h1>" in data["rendered_html"]
+    assert "content" not in data

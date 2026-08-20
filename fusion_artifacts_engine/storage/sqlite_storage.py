@@ -101,14 +101,6 @@ CREATE INDEX IF NOT EXISTS idx_events_artifact_time ON artifact_events(artifact_
 CREATE INDEX IF NOT EXISTS idx_events_session_time ON artifact_events(session_id, created_at);
 """
 
-_MIGRATION_SQL = """
-ALTER TABLE artifacts ADD COLUMN kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template'));
-ALTER TABLE artifact_versions ADD COLUMN source TEXT DEFAULT 'manual' CHECK(source IN ('manual','ai_generation'));
-ALTER TABLE artifacts ADD COLUMN project_id TEXT DEFAULT NULL;
-ALTER TABLE artifacts ADD COLUMN metadata TEXT DEFAULT NULL;
-"""
-
-
 def _artifact_from_row(row: sqlite3.Row) -> Artifact:
     keys = row.keys()
     meta_raw = row["metadata"] if "metadata" in keys else None
@@ -624,6 +616,16 @@ class SQLiteStorage(StorageDriver):
             ok = cur.rowcount > 0
         else:
             with self._write_lock:
+                # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
+                self._conn.execute(
+                    "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
+                )
+                self._conn.execute(
+                    "DELETE FROM artifact_events WHERE artifact_id = ?", (artifact_id,)
+                )
+                self._conn.execute(
+                    "DELETE FROM artifact_shares WHERE artifact_id = ?", (artifact_id,)
+                )
                 cur = self._conn.execute(
                     "DELETE FROM artifacts WHERE id = ?", (artifact_id,)
                 )
@@ -728,6 +730,15 @@ class SQLiteStorage(StorageDriver):
             )
             self._conn.commit()
 
+    def set_artifact_share_id(self, artifact_id: str, share_id: str) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "UPDATE artifacts SET share_id = ?, updated_at = ? WHERE id = ?",
+                (share_id, time.time(), artifact_id),
+            )
+            self._conn.commit()
+        logger.debug("Linked share %s to artifact %s", share_id, artifact_id)
+
     # ── recycle bin ────────────────────────────────────────────
 
     def list_recycle(
@@ -769,6 +780,7 @@ class SQLiteStorage(StorageDriver):
                 (cutoff,),
             )
             expired_ids = [row["id"] for row in cur.fetchall()]
+            purged_dirs = []
             count = 0
             for aid in expired_ids:
                 self._conn.execute(
@@ -783,9 +795,12 @@ class SQLiteStorage(StorageDriver):
                 self._conn.execute("DELETE FROM artifacts WHERE id = ?", (aid,))
                 content_dir = self.content_dir / aid
                 if content_dir.exists():
-                    shutil.rmtree(content_dir, ignore_errors=True)
+                    purged_dirs.append(content_dir)
                 count += 1
             self._conn.commit()
+            # 先 commit 再删盘：commit 失败则不留孤儿行指向缺失文件 (P2-6)
+            for content_dir in purged_dirs:
+                shutil.rmtree(content_dir, ignore_errors=True)
         logger.info(
             "Purged %d expired artifacts (retention=%d days)", count, retention_days
         )
@@ -870,8 +885,20 @@ class SQLiteStorage(StorageDriver):
         if not ver.content and ver.content_path:
             try:
                 ver.content = self._read_content_file(ver.content_path)
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                logger.error(
+                    "Corrupt version: content file missing for %s v%s at %s: %s",
+                    artifact_id,
+                    version_num,
+                    ver.content_path,
+                    e,
+                )
                 ver.content = ""
+                ver.change_log = (
+                    f"{ver.change_log} [CORRUPT: content file missing]"
+                    if ver.change_log
+                    else "[CORRUPT: content file missing]"
+                )
         return ver
 
     def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
@@ -885,8 +912,20 @@ class SQLiteStorage(StorageDriver):
             if not ver.content and ver.content_path:
                 try:
                     ver.content = self._read_content_file(ver.content_path)
-                except FileNotFoundError:
+                except FileNotFoundError as e:
+                    logger.error(
+                        "Corrupt version: content file missing for %s v%s at %s: %s",
+                        artifact_id,
+                        ver.version_num,
+                        ver.content_path,
+                        e,
+                    )
                     ver.content = ""
+                    ver.change_log = (
+                        f"{ver.change_log} [CORRUPT: content file missing]"
+                        if ver.change_log
+                        else "[CORRUPT: content file missing]"
+                    )
             results.append(ver)
         return results
 
@@ -901,8 +940,20 @@ class SQLiteStorage(StorageDriver):
             if not ver.content and ver.content_path:
                 try:
                     ver.content = self._read_content_file(ver.content_path)
-                except FileNotFoundError:
+                except FileNotFoundError as e:
+                    logger.error(
+                        "Corrupt version: content file missing for %s v%s at %s: %s",
+                        artifact_id,
+                        ver.version_num,
+                        ver.content_path,
+                        e,
+                    )
                     ver.content = ""
+                    ver.change_log = (
+                        f"{ver.change_log} [CORRUPT: content file missing]"
+                        if ver.change_log
+                        else "[CORRUPT: content file missing]"
+                    )
             results.append(ver)
         return results
 
@@ -1409,7 +1460,7 @@ class SQLiteStorage(StorageDriver):
         cur = self._conn.execute(
             f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params
         )
-        return [Artifact(**dict(row)) for row in cur.fetchall()]
+        return [_artifact_from_row(row) for row in cur.fetchall()]
 
     def close(self) -> None:
         self._conn.close()
