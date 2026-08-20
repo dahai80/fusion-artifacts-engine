@@ -21,6 +21,7 @@ test = [
 ]
 all = [
     "fusion-artifacts-engine[test]",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
