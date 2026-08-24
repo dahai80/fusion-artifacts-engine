@@ -83,17 +83,26 @@ def test_share_rest_revoked_gone(share_server):
 
 
 def test_share_rest_expired_gone(share_server):
-    _server, _engine = share_server
+    _server, engine = share_server
     art_id = rpc(
         "artifact.create",
         {"session_id": "s_share_exp", "name": "exp.html", "type": "html", "content": "x"},
     )["result"]["artifact"]["id"]
+    # L-6 后 create_share 拒绝过去日期；直接构造过期 share 测试读取路径 fail-closed
+    import uuid
+    from fusion_artifacts_engine.models import ArtifactShare
     past_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-    share_resp = rpc(
-        "artifact.create_share",
-        {"artifact_id": art_id, "created_by": "u1", "expires_at": past_iso},
+    share_id = f"shr_{uuid.uuid4().hex[:12]}"
+    engine.storage.save_share(
+        ArtifactShare(
+            share_id=share_id,
+            artifact_id=art_id,
+            created_by="u1",
+            created_at=datetime.now(UTC).isoformat(),
+            expires_at=past_iso,
+        )
     )
-    share_id = share_resp["result"]["share"]["share_id"]
+    engine.storage.set_artifact_share_id(art_id, share_id)
     resp = rest_get(f"/api/v1/share/{share_id}")
     assert resp.status_code == 410
     assert resp.json()["reason"] == "expired"

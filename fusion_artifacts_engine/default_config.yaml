@@ -8,6 +8,8 @@ storage:
   root: "~/.fusion/artifacts"
   db_name: "meta.db"
   small_content_limit: 10240
+  # C-1: artifact.sync 文件读写根目录，留空则禁用 sync；设为目录则限制 sync 路径在其下
+  sync_root: ""
 
 thresholds:
   auto_create_lines: 30
@@ -17,8 +19,11 @@ artifact:
   id_prefix: "art_"
 
 security:
-  allow_no_auth: true
+  # C-4: 默认 fail-closed。无 api_key 且 allow_no_auth=false 时启动自动生成随机 key
+  allow_no_auth: false
   recycle_retention_days: 7
+  # L-6: share expires_at 最大 TTL（天），0=不限；过去日期一律拒绝
+  share_max_ttl_days: 90
 
 sse:
   heartbeat_interval: 30

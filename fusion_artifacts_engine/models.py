@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 ArtifactType = Literal["code", "markdown", "html", "react", "data"]
 ArtifactKind = Literal["app", "code", "document", "game", "tool", "template"]
 OwnershipType = Literal["free", "project", "cowork"]
-SnapshotType = Literal["auto", "manual", "named"]
+SnapshotType = Literal["auto", "manual", "named", "rollback"]
 
 _TYPE_TO_KIND: dict[str, str] = {
     "html": "app",
@@ -20,7 +20,7 @@ _TYPE_TO_KIND: dict[str, str] = {
 }
 
 
-def infer_kind(artifact_type: str) -> str:
+def infer_kind(artifact_type: str) -> ArtifactKind:
     return _TYPE_TO_KIND.get(artifact_type, "tool")
 
 
@@ -38,7 +38,7 @@ class Artifact(BaseModel):
     updated_at: float = Field(default_factory=time.time)
     is_deleted: bool = False
     owner_user_id: str | None = None
-    ownership_type: str = "free"
+    ownership_type: OwnershipType = "free"
     is_starred: bool = False
     is_pinned: bool = False
     pinned_chat_id: str | None = None
@@ -65,7 +65,7 @@ class ArtifactVersion(BaseModel):
     change_log: str = ""
     source: str = "manual"
     created_at: float = Field(default_factory=time.time)
-    snapshot_type: str = "auto"
+    snapshot_type: SnapshotType = "auto"
     snapshot_label: str | None = None
     author: str | None = None
     parent_version: int | None = None
@@ -103,6 +103,8 @@ class ArtifactTag(BaseModel):
     tag_id: str
     name: str
     color: str | None = None
+    # L-7: tag 作用域——按 session_id 或 project_id 隔离，避免跨用户同名 tag 泄露
+    scope: str | None = None
 
 
 class ArtifactEvent(BaseModel):
@@ -111,4 +113,4 @@ class ArtifactEvent(BaseModel):
     session_id: str | None = None
     event_type: str
     payload: dict | None = None
-    created_at: str | None = None
+    created_at: float | str | None = None

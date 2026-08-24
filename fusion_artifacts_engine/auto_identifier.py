@@ -11,8 +11,12 @@ _RENDERABLE_MERMAID_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _RENDERABLE_REACT_RE = re.compile(
-    r"(import\s+.*from\s+['\"]react['\"]|export\s+default\s+function\s+\w+|from\s+['\"]react['\"])",
-    re.IGNORECASE,
+    # M-2: 要求更强正向信号——import from react / useState 等 hook / 大写 JSX 组件名
+    # JSX 组件首字母大写是 React 惯例，用显式 [A-Z] 不开 IGNORECASE，避免 <html> 误判
+    r"(import\s+[^;]*\bfrom\s+['\"]react['\"]|"
+    r"from\s+['\"]react['\"]|"
+    r"\b(?:useState|useEffect|useMemo|useCallback|useRef|useContext)\s*\(|"
+    r"<(?:[A-Z]\w*|React\.\w+)[\s/>])",
 )
 _RENDERABLE_HTML_RE = re.compile(r"^\s*(<!DOCTYPE\s+html|<html[\s>])", re.IGNORECASE)
 

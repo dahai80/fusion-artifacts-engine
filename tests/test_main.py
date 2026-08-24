@@ -3,6 +3,8 @@ import threading
 import time
 from unittest.mock import patch
 
+import pytest
+
 from fusion_artifacts_engine.__main__ import main
 
 
@@ -14,8 +16,11 @@ def test_version_command(capsys):
 
 
 def test_status_not_running(capsys):
+    # L-20: status 不健康须 exit 1；捕获 SystemExit 验证退出码
     with patch.object(sys, "argv", ["fusion-artifacts-engine", "status"]):
-        main()
+        with pytest.raises(SystemExit) as exc:
+            main()
+    assert exc.value.code == 1
     captured = capsys.readouterr()
     assert "Not running" in captured.out or "Running" in captured.out
 

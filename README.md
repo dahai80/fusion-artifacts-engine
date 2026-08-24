@@ -22,24 +22,41 @@ pip install -e ".[all]"
 # Start daemon
 fusion-artifacts-engine start --port 11451
 
-# Check status
+# Check status (exit 0 = healthy, 1 = not running)
 fusion-artifacts-engine status
 ```
+
+## Security (v0.3.8 audit hardening)
+
+v0.3.8 resolves all 59 findings from the 0824 security audit (14 CRITICAL / 23 LOGIC / 10 ARCH / 7 PERF / 5 MAINT), 367 tests green. Highlights:
+
+- **Auth fail-closed**: `allow_no_auth` defaults `false`; no configured key rejects requests (was fail-open).
+- **Path confinement**: `sync_root` bounds file sync; content paths validated `is_relative_to`; extension whitelist.
+- **XSS**: stdlib HTML sanitize + sandboxed share iframe + strict CSP.
+- **Atomic versioning**: `create_version_atomic` (BEGIN IMMEDIATE) closes the optimistic-lock race.
+- **EventBus**: per-engine instance (no cross-engine bleed), subscriber cap, drop/closed SSE signals.
+- **Tag scoping**: `scope` column isolates tags per session/project.
+- **Clean shutdown**: `start_async` + `threading.Event` — no signal deadlock.
+- **Pagination**: `version_list`/snapshots/by_source now paginated (cap 500).
+- **Linear section bounds**: O(n²) → O(n) for `load_artifact` section indexing.
+
+See `audit/fusion-artifacts-audit-0824.md` §9 for the per-finding fix map.
 
 ## Authentication
 
 The engine uses API key authentication via the `X-API-Key` header.
 
-- If `api_key` is configured, all requests must include `X-API-Key: <key>`
-- If `api_key` is **not** configured, requests are **allowed by default** (`allow_no_auth: true`)
-- Set `api_key` and `allow_no_auth: false` to enforce auth in production
+- If `api_key` is configured (env `FUSION_ARTIFACTS_API_KEY` or `security.api_key`), all requests must include `X-API-Key: <key>` (constant-time compare)
+- If `api_key` is **not** configured, requests are **rejected by default** (`allow_no_auth: false`, fail-closed)
+- Set `allow_no_auth: true` only for trusted single-user local use; production should set `api_key`
 
 ```yaml
 # default_config.yaml
 security:
   api_key: ""
-  allow_no_auth: true
+  allow_no_auth: false
   recycle_retention_days: 7
+  share_max_ttl_days: 90
 ```
 
 ## JSON-RPC API
@@ -72,7 +89,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.inject` | messages, output_budget | Token accounting check; returns `injected` + `note` (no-op: messages unchanged) |
 | `artifact.interact` | artifact_id, action, payload, session_id? | Record interaction event; returns `dispatched` + `note` (stub: no action dispatch) |
 | `artifact.sync` | artifact_id, file_path, direction | Sync artifact content ↔ file |
-| `artifact.version_list` | artifact_id | List all versions |
+| `artifact.version_list` | artifact_id, page?, page_size?, include_content? | List versions (paginated, default page_size=200, cap 500) |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
 | `artifact.export` | artifact_id, include_versions? | Export artifact data |
 | `artifact.export_session` | session_id, output_dir | Batch export session |

@@ -1,11 +1,44 @@
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_EXT_SAFE_RE = re.compile(r"[^A-Za-z0-9]")
+_META_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _log_rmtree_error(func, path, exc_info):  # noqa: ANN001
+    # M-4: rmtree 失败必须可见，勿静默吞
+    logger.error("rmtree failed on %s during %s: %s", path, func.__name__, exc_info[1])
+
+
+def _coerce_bool(name: str, value) -> int:
+    # M-5: 用户可控 filters 值强转——接受 bool/0/1/"true"/"false"，其余显式 ValueError
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "1"):
+        return 1
+    if isinstance(value, str) and value.lower() in ("false", "0"):
+        return 0
+    raise ValueError(f"Invalid boolean filter {name}={value!r}")
+
+
+def _coerce_float(name: str, value) -> float:
+    # M-5: since/until 必须可转 float，ISO 串等明确报错而非 500
+    try:
+        return float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid numeric filter {name}={value!r}") from e
 
 from fusion_artifacts_engine.models import (
     Artifact,
@@ -16,8 +49,6 @@ from fusion_artifacts_engine.models import (
     ArtifactVersion,
 )
 from fusion_artifacts_engine.storage.base import StorageDriver
-
-logger = logging.getLogger(__name__)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -63,7 +94,8 @@ CREATE TABLE IF NOT EXISTS artifact_shares (
     revoked INTEGER DEFAULT 0,
     access_count INTEGER DEFAULT 0,
     last_access_at TEXT,
-    UNIQUE(share_id)
+    UNIQUE(share_id),
+    FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_shares_artifact ON artifact_shares(artifact_id);
 
@@ -72,20 +104,25 @@ CREATE TABLE IF NOT EXISTS artifact_folders (
     name TEXT NOT NULL,
     parent_id TEXT,
     project_id TEXT,
-    created_at TEXT
+    created_at TEXT,
+    FOREIGN KEY (parent_id) REFERENCES artifact_folders(folder_id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_folders_project ON artifact_folders(project_id);
 
 CREATE TABLE IF NOT EXISTS artifact_tags (
     tag_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    color TEXT
+    name TEXT NOT NULL,
+    color TEXT,
+    scope TEXT,
+    UNIQUE(name, scope)
 );
 
 CREATE TABLE IF NOT EXISTS artifact_tag_map (
     artifact_id TEXT NOT NULL,
     tag_id TEXT NOT NULL,
-    PRIMARY KEY(artifact_id, tag_id)
+    PRIMARY KEY(artifact_id, tag_id),
+    FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES artifact_tags(tag_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_tagmap_tag ON artifact_tag_map(tag_id);
 
@@ -95,7 +132,7 @@ CREATE TABLE IF NOT EXISTS artifact_events (
     session_id TEXT,
     event_type TEXT NOT NULL,
     payload TEXT,
-    created_at TEXT
+    created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_events_artifact_time ON artifact_events(artifact_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_session_time ON artifact_events(session_id, created_at);
@@ -109,7 +146,10 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         try:
             metadata = json.loads(meta_raw)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("Invalid metadata JSON for artifact %s", row["id"])
+            # M-3: 损坏 JSON 必须大声告警，区分"无 metadata"与"损坏 metadata"
+            logger.error(
+                "Corrupt metadata JSON for artifact %s: %s", row["id"], meta_raw[:200]
+            )
             metadata = None
     return Artifact(
         id=row["id"],
@@ -192,6 +232,7 @@ def _tag_from_row(row: sqlite3.Row) -> ArtifactTag:
         tag_id=row["tag_id"],
         name=row["name"],
         color=row["color"],
+        scope=row["scope"] if "scope" in row.keys() else None,
     )
 
 
@@ -202,6 +243,12 @@ def _event_from_row(row: sqlite3.Row) -> ArtifactEvent:
         try:
             payload = json.loads(payload_raw)
         except (json.JSONDecodeError, TypeError):
+            # M-3: 损坏 payload JSON 记 ERROR
+            logger.error(
+                "Corrupt event payload JSON for event %s: %s",
+                row["event_id"],
+                payload_raw[:200],
+            )
             payload = None
     return ArtifactEvent(
         event_id=row["event_id"],
@@ -243,9 +290,22 @@ class SQLiteStorage(StorageDriver):
         self._migrate_size_bytes_column()
         self._migrate_token_count_column()
         self._migrate_section_index_column()
+        self._migrate_schema_meta()
+        self._migrate_event_timestamps()
+        self._migrate_tag_scope_column()
         logger.info(
             "SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir
         )
+
+    @contextmanager
+    def _read_conn(self):
+        # A-5: 读走独立连接，WAL 允许并发读；避开共享连接游标交叉
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
         d = self.content_dir / artifact_id
@@ -257,6 +317,12 @@ class SQLiteStorage(StorageDriver):
     ) -> str:
         d = self._artifact_content_dir(artifact_id)
         path = d / f"v{version_num}.{ext}"
+        # C-10/C-6 纵深防御：拒绝任何穿越出 content_dir 的路径
+        if not path.resolve().is_relative_to(d.resolve()):
+            logger.error(
+                "Refusing content write outside content_dir: %s (ext=%s)", path, ext
+            )
+            raise ValueError(f"Unsafe content path: {path}")
         path.write_text(content, encoding="utf-8")
         logger.debug("Wrote content file: %s", path)
         return str(path)
@@ -292,7 +358,6 @@ class SQLiteStorage(StorageDriver):
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
-                     is_deleted=excluded.is_deleted,
                      owner_user_id=excluded.owner_user_id,
                      ownership_type=excluded.ownership_type,
                      is_starred=excluded.is_starred,
@@ -301,7 +366,6 @@ class SQLiteStorage(StorageDriver):
                      share_id=excluded.share_id,
                      in_project_kb=excluded.in_project_kb,
                      folder_id=excluded.folder_id,
-                     deleted_at=excluded.deleted_at,
                      content_hash=excluded.content_hash,
                      active_in_session=excluded.active_in_session,
                      source_module=excluded.source_module,
@@ -368,7 +432,6 @@ class SQLiteStorage(StorageDriver):
                      current_version=excluded.current_version,
                      summary=excluded.summary,
                      updated_at=excluded.updated_at,
-                     is_deleted=excluded.is_deleted,
                      owner_user_id=excluded.owner_user_id,
                      ownership_type=excluded.ownership_type,
                      is_starred=excluded.is_starred,
@@ -377,7 +440,6 @@ class SQLiteStorage(StorageDriver):
                      share_id=excluded.share_id,
                      in_project_kb=excluded.in_project_kb,
                      folder_id=excluded.folder_id,
-                     deleted_at=excluded.deleted_at,
                      content_hash=excluded.content_hash,
                      active_in_session=excluded.active_in_session,
                      source_module=excluded.source_module,
@@ -456,19 +518,20 @@ class SQLiteStorage(StorageDriver):
     def get_artifact(
         self, artifact_id: str, project_id: str | None = None
     ) -> Artifact | None:
-        if project_id is not None:
-            cur = self._conn.execute(
-                "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
-                (artifact_id, project_id),
-            )
-        else:
-            cur = self._conn.execute(
-                "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
-            )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        return _artifact_from_row(row)
+        with self._read_conn() as conn:
+            if project_id is not None:
+                cur = conn.execute(
+                    "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
+                    (artifact_id, project_id),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
+                )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return _artifact_from_row(row)
 
     def list_artifacts(
         self,
@@ -486,16 +549,22 @@ class SQLiteStorage(StorageDriver):
             params.append(project_id)
         if metadata_filter:
             for key, value in metadata_filter.items():
+                # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
+                if not _META_KEY_RE.fullmatch(key):
+                    logger.warning("Reject metadata filter key (unsafe): %s", key)
+                    continue
                 json_path = f"$.{key}"
                 conditions.append("json_extract(metadata, ?) = ?")
-                params.extend(
-                    [json_path, str(value) if not isinstance(value, str) else value]
-                )
+                # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
+                bind_val = int(value) if isinstance(value, bool) else value
+                params.extend([json_path, bind_val])
         where = " AND ".join(conditions)
-        cur = self._conn.execute(
-            f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params
-        )
-        return [_artifact_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC",
+                params,
+            )
+            return [_artifact_from_row(r) for r in cur.fetchall()]
 
     def list_all_artifacts(
         self,
@@ -526,11 +595,11 @@ class SQLiteStorage(StorageDriver):
             is_starred = filters.get("is_starred")
             if is_starred is not None:
                 conditions.append("is_starred = ?")
-                params.append(int(is_starred))
+                params.append(_coerce_bool("is_starred", is_starred))
             is_pinned = filters.get("is_pinned")
             if is_pinned is not None:
                 conditions.append("is_pinned = ?")
-                params.append(int(is_pinned))
+                params.append(_coerce_bool("is_pinned", is_pinned))
             folder_id = filters.get("folder_id")
             if folder_id:
                 conditions.append("folder_id = ?")
@@ -544,7 +613,7 @@ class SQLiteStorage(StorageDriver):
             in_project_kb = filters.get("in_project_kb")
             if in_project_kb is not None:
                 conditions.append("in_project_kb = ?")
-                params.append(int(in_project_kb))
+                params.append(_coerce_bool("in_project_kb", in_project_kb))
             name_search = filters.get("name_search")
             if name_search:
                 conditions.append("name LIKE ?")
@@ -556,29 +625,30 @@ class SQLiteStorage(StorageDriver):
             since = filters.get("since")
             if since is not None:
                 conditions.append("created_at >= ?")
-                params.append(float(since))
+                params.append(_coerce_float("since", since))
             until = filters.get("until")
             if until is not None:
                 conditions.append("created_at <= ?")
-                params.append(float(until))
+                params.append(_coerce_float("until", until))
         where = " AND ".join(conditions)
-        count_cur = self._conn.execute(
-            f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
-        )
-        total = count_cur.fetchone()[0]
-        sort_map = {
-            "updated_at": "updated_at DESC",
-            "created_at": "created_at DESC",
-            "name": "name ASC",
-            "starred": "is_starred DESC, updated_at DESC",
-        }
-        order = sort_map.get(sort, "updated_at DESC")
-        offset = (page - 1) * page_size
-        cur = self._conn.execute(
-            f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
-            params + [page_size, offset],
-        )
-        artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            count_cur = conn.execute(
+                f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
+            )
+            total = count_cur.fetchone()[0]
+            sort_map = {
+                "updated_at": "updated_at DESC",
+                "created_at": "created_at DESC",
+                "name": "name ASC",
+                "starred": "is_starred DESC, updated_at DESC",
+            }
+            order = sort_map.get(sort, "updated_at DESC")
+            offset = (page - 1) * page_size
+            cur = conn.execute(
+                f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            )
+            artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
         logger.info(
             "list_all_artifacts: %d/%d page=%d sort=%s",
             len(artifacts),
@@ -587,6 +657,46 @@ class SQLiteStorage(StorageDriver):
             sort,
         )
         return artifacts, total
+
+    def sum_token_counts(
+        self,
+        session_id: str | None = None,
+        project_id: str | None = None,
+    ) -> tuple[int, list[dict]]:
+        # P-2: 一条 SQL JOIN artifacts→artifact_versions(current_version) 聚合 token，
+        # 替代逐 artifact get_version_content 的 N+1 往返与全量内容入内存。
+        conditions = ["a.is_deleted = 0"]
+        params: list = []
+        if session_id is not None:
+            conditions.append("a.session_id = ?")
+            params.append(session_id)
+        if project_id is not None:
+            conditions.append("a.project_id = ?")
+            params.append(project_id)
+        where = " AND ".join(conditions)
+        sql = (
+            "SELECT a.id, a.name, COALESCE(v.token_count, 0) AS tc "
+            "FROM artifacts a "
+            "LEFT JOIN artifact_versions v "
+            "ON v.artifact_id = a.id AND v.version_num = a.current_version "
+            f"WHERE {where}"
+        )
+        rows: list[dict] = []
+        total = 0
+        with self._read_conn() as conn:
+            cur = conn.execute(sql, params)
+            for r in cur.fetchall():
+                tc = int(r["tc"]) if r["tc"] is not None else 0
+                total += tc
+                rows.append({"artifact_id": r["id"], "name": r["name"], "tokens": tc})
+        logger.info(
+            "sum_token_counts: session=%s project=%s count=%d total=%d",
+            session_id,
+            project_id,
+            len(rows),
+            total,
+        )
+        return total, rows
 
     def delete_artifact(
         self,
@@ -634,7 +744,7 @@ class SQLiteStorage(StorageDriver):
             if ok:
                 content_dir = self.content_dir / artifact_id
                 if content_dir.exists():
-                    shutil.rmtree(content_dir, ignore_errors=True)
+                    shutil.rmtree(content_dir, onerror=_log_rmtree_error)
                     logger.debug("Cleaned up content dir: %s", content_dir)
         logger.info("Deleted artifact %s soft=%s ok=%s", artifact_id, soft_delete, ok)
         return ok
@@ -680,6 +790,10 @@ class SQLiteStorage(StorageDriver):
         art = self.get_artifact(artifact_id)
         if art is None:
             return None
+        # L-14: 拒绝覆盖碰巧同 ID 的已有 artifact
+        if self.get_artifact(new_id) is not None:
+            logger.error("Duplicate target id %s already exists", new_id)
+            raise ValueError(f"Artifact id already exists: {new_id}")
         now = time.time()
         dup = Artifact(
             id=new_id,
@@ -705,9 +819,14 @@ class SQLiteStorage(StorageDriver):
             version_num=1,
             content=ver.content,
             size_bytes=ver.size_bytes,
+            token_count=ver.token_count,
+            section_index=ver.section_index,
             change_log=f"Duplicated from {artifact_id}",
-            source="manual",
+            source=ver.source,
             created_at=now,
+            snapshot_type=ver.snapshot_type,
+            author=ver.author,
+            parent_version=ver.parent_version,
         )
         self.save_artifact_and_version(dup, new_ver)
         logger.info("Duplicated artifact %s -> %s", artifact_id, new_id)
@@ -747,16 +866,17 @@ class SQLiteStorage(StorageDriver):
         conditions = ["is_deleted = 1"]
         params: list = []
         where = " AND ".join(conditions)
-        count_cur = self._conn.execute(
-            f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
-        )
-        total = count_cur.fetchone()[0]
-        offset = (page - 1) * page_size
-        cur = self._conn.execute(
-            f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            params + [page_size, offset],
-        )
-        artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            count_cur = conn.execute(
+                f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
+            )
+            total = count_cur.fetchone()[0]
+            offset = (page - 1) * page_size
+            cur = conn.execute(
+                f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            )
+            artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
         return artifacts, total
 
     def restore_artifact(self, artifact_id: str) -> bool:
@@ -789,6 +909,10 @@ class SQLiteStorage(StorageDriver):
                 self._conn.execute(
                     "DELETE FROM artifact_events WHERE artifact_id = ?", (aid,)
                 )
+                # L-9: 漏删 artifact_shares 留孤儿行——补上
+                self._conn.execute(
+                    "DELETE FROM artifact_shares WHERE artifact_id = ?", (aid,)
+                )
                 self._conn.execute(
                     "DELETE FROM artifact_versions WHERE artifact_id = ?", (aid,)
                 )
@@ -809,17 +933,19 @@ class SQLiteStorage(StorageDriver):
     # ── versions ───────────────────────────────────────────────
 
     def save_version(self, version: ArtifactVersion) -> None:
-        content = version.content
-        content_path = None
-        if len(content.encode("utf-8")) > self.small_content_limit:
-            ext = self._guess_ext(version.artifact_id, version.content)
-            content_path = self._write_content_file(
-                version.artifact_id, version.version_num, content, ext
-            )
-            content = ""
+        # C-11/C-12: 文件写与 version_num 必须同步——文件写在写锁内，
+        # 重试改 version_num 时重算 content_path 并重写文件，避免覆盖历史版本与串号。
         with self._write_lock:
             max_retries = 3
             for attempt in range(max_retries):
+                content = version.content
+                content_path = None
+                if len(content.encode("utf-8")) > self.small_content_limit:
+                    ext = self._guess_ext(version.artifact_id, version.content)
+                    content_path = self._write_content_file(
+                        version.artifact_id, version.version_num, content, ext
+                    )
+                    content = ""
                 try:
                     self._conn.execute(
                         """INSERT INTO artifact_versions
@@ -873,87 +999,179 @@ class SQLiteStorage(StorageDriver):
             row = cur.fetchone()
             return row[0]
 
-    def get_version(self, artifact_id: str, version_num: int) -> ArtifactVersion | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_versions WHERE artifact_id = ? AND version_num = ?",
-            (artifact_id, version_num),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        ver = _version_from_row(row)
+    def create_version_atomic(
+        self,
+        artifact: Artifact,
+        version: ArtifactVersion,
+        content_hash: str,
+        summary: str | None,
+        expected_content_hash: str | None = None,
+    ) -> int:
+        # C-8: 乐观锁校验+写入收进单事务，BEGIN IMMEDIATE 序列化并发写，
+        # 事务内重读 current_version/content_hash 校验，分配 version_num，
+        # 写 version 行并更新 artifact.current_version/content_hash，原子提交。
+        # 返回实际分配的 version_num。
+        with self._write_lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT current_version, content_hash, summary FROM artifacts WHERE id = ?",
+                    (artifact.id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Artifact not found: {artifact.id}")
+                db_current_version = row["current_version"]
+                db_content_hash = row["content_hash"]
+                db_summary = row["summary"]
+                if expected_content_hash is not None and db_content_hash != expected_content_hash:
+                    raise ValueError(
+                        f"Optimistic lock failed: expected hash {expected_content_hash},"
+                        f" got {db_content_hash}"
+                    )
+                new_version_num = (
+                    self._conn.execute(
+                        "SELECT COALESCE(MAX(version_num), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
+                        (artifact.id,),
+                    ).fetchone()[0]
+                )
+                version.version_num = new_version_num
+                content = version.content
+                content_path = None
+                if len(content.encode("utf-8")) > self.small_content_limit:
+                    ext = self._guess_ext(version.artifact_id, version.content)
+                    content_path = self._write_content_file(
+                        version.artifact_id, new_version_num, content, ext
+                    )
+                    content = ""
+                self._conn.execute(
+                    """INSERT INTO artifact_versions
+                       (artifact_id, version_num, content, content_path, size_bytes,
+                        token_count, section_index, change_log, source, created_at,
+                        snapshot_type, snapshot_label, author, parent_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        version.artifact_id,
+                        new_version_num,
+                        content,
+                        content_path,
+                        version.size_bytes,
+                        version.token_count,
+                        version.section_index,
+                        version.change_log,
+                        version.source,
+                        version.created_at,
+                        version.snapshot_type,
+                        version.snapshot_label,
+                        version.author,
+                        version.parent_version,
+                    ),
+                )
+                final_summary = summary if summary else db_summary
+                self._conn.execute(
+                    """UPDATE artifacts SET current_version = ?, updated_at = ?,
+                       content_hash = ?, summary = ? WHERE id = ?""",
+                    (new_version_num, version.created_at, content_hash, final_summary, artifact.id),
+                )
+                self._conn.execute("COMMIT")
+                artifact.current_version = new_version_num
+                artifact.updated_at = version.created_at
+                artifact.content_hash = content_hash
+                if final_summary and not artifact.summary:
+                    artifact.summary = final_summary
+                logger.info(
+                    "Atomic version: %s v%d size=%d hash=%s",
+                    artifact.id, new_version_num, version.size_bytes, content_hash,
+                )
+                return new_version_num
+            except Exception:
+                try:
+                    self._conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+
+    def _hydrate_version_content(self, artifact_id: str, ver: ArtifactVersion) -> None:
         if not ver.content and ver.content_path:
             try:
                 ver.content = self._read_content_file(ver.content_path)
-            except FileNotFoundError as e:
+            except FileNotFoundError:
+                # L-16: 内容文件缺失是数据损坏，不伪造空版本——上抛让引擎/调用方决定
                 logger.error(
-                    "Corrupt version: content file missing for %s v%s at %s: %s",
+                    "Corrupt version: content file missing for %s v%s at %s",
                     artifact_id,
-                    version_num,
+                    ver.version_num,
                     ver.content_path,
-                    e,
                 )
-                ver.content = ""
-                ver.change_log = (
-                    f"{ver.change_log} [CORRUPT: content file missing]"
-                    if ver.change_log
-                    else "[CORRUPT: content file missing]"
-                )
+                raise
+
+    def get_version(self, artifact_id: str, version_num: int) -> ArtifactVersion | None:
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_versions WHERE artifact_id = ? AND version_num = ?",
+                (artifact_id, version_num),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        ver = _version_from_row(row)
+        self._hydrate_version_content(artifact_id, ver)
         return ver
 
-    def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_versions WHERE artifact_id = ? ORDER BY version_num DESC",
-            (artifact_id,),
-        )
+    def list_versions(
+        self,
+        artifact_id: str,
+        page: int = 1,
+        page_size: int = 200,
+        include_content: bool = True,
+    ) -> list[ArtifactVersion]:
+        # P-3: 分页 + 可选跳过内容文件读，避免无界扫描全量入内存
+        page_size = min(page_size, 500)
+        offset = (page - 1) * page_size
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_versions WHERE artifact_id = ? "
+                "ORDER BY version_num DESC LIMIT ? OFFSET ?",
+                (artifact_id, page_size, offset),
+            )
+            rows = cur.fetchall()
         results = []
-        for r in cur.fetchall():
+        for r in rows:
             ver = _version_from_row(r)
-            if not ver.content and ver.content_path:
+            if include_content:
                 try:
-                    ver.content = self._read_content_file(ver.content_path)
-                except FileNotFoundError as e:
-                    logger.error(
-                        "Corrupt version: content file missing for %s v%s at %s: %s",
-                        artifact_id,
-                        ver.version_num,
-                        ver.content_path,
-                        e,
-                    )
-                    ver.content = ""
-                    ver.change_log = (
-                        f"{ver.change_log} [CORRUPT: content file missing]"
-                        if ver.change_log
-                        else "[CORRUPT: content file missing]"
-                    )
+                    self._hydrate_version_content(artifact_id, ver)
+                except FileNotFoundError:
+                    continue
             results.append(ver)
+        if offset > 0 and not results:
+            logger.debug("list_versions page %d empty for %s", page, artifact_id)
         return results
 
-    def list_snapshots(self, artifact_id: str) -> list[ArtifactVersion]:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_versions WHERE artifact_id = ? AND snapshot_type IN ('named','manual') ORDER BY version_num DESC",
-            (artifact_id,),
-        )
+    def list_snapshots(
+        self,
+        artifact_id: str,
+        page: int = 1,
+        page_size: int = 200,
+        include_content: bool = True,
+    ) -> list[ArtifactVersion]:
+        page_size = min(page_size, 500)
+        offset = (page - 1) * page_size
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_versions WHERE artifact_id = ? "
+                "AND snapshot_type IN ('named','manual') "
+                "ORDER BY version_num DESC LIMIT ? OFFSET ?",
+                (artifact_id, page_size, offset),
+            )
+            rows = cur.fetchall()
         results = []
-        for r in cur.fetchall():
+        for r in rows:
             ver = _version_from_row(r)
-            if not ver.content and ver.content_path:
+            if include_content:
                 try:
-                    ver.content = self._read_content_file(ver.content_path)
-                except FileNotFoundError as e:
-                    logger.error(
-                        "Corrupt version: content file missing for %s v%s at %s: %s",
-                        artifact_id,
-                        ver.version_num,
-                        ver.content_path,
-                        e,
-                    )
-                    ver.content = ""
-                    ver.change_log = (
-                        f"{ver.change_log} [CORRUPT: content file missing]"
-                        if ver.change_log
-                        else "[CORRUPT: content file missing]"
-                    )
+                    self._hydrate_version_content(artifact_id, ver)
+                except FileNotFoundError:
+                    continue
             results.append(ver)
         return results
 
@@ -965,6 +1183,9 @@ class SQLiteStorage(StorageDriver):
                 """INSERT INTO artifact_shares (share_id, artifact_id, created_by, created_at, expires_at, revoked, access_count, last_access_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(share_id) DO UPDATE SET
+                     artifact_id=excluded.artifact_id,
+                     created_by=excluded.created_by,
+                     expires_at=excluded.expires_at,
                      revoked=excluded.revoked,
                      access_count=excluded.access_count,
                      last_access_at=excluded.last_access_at""",
@@ -983,20 +1204,22 @@ class SQLiteStorage(StorageDriver):
         logger.info("Saved share: %s artifact=%s", share.share_id, share.artifact_id)
 
     def get_share(self, share_id: str) -> ArtifactShare | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_shares WHERE share_id = ?", (share_id,)
-        )
-        row = cur.fetchone()
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_shares WHERE share_id = ?", (share_id,)
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         return _share_from_row(row)
 
     def get_share_by_artifact(self, artifact_id: str) -> ArtifactShare | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_shares WHERE artifact_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
-            (artifact_id,),
-        )
-        row = cur.fetchone()
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_shares WHERE artifact_id = ? AND revoked = 0 ORDER BY created_at DESC LIMIT 1",
+                (artifact_id,),
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         return _share_from_row(row)
@@ -1005,6 +1228,11 @@ class SQLiteStorage(StorageDriver):
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE artifact_shares SET revoked = 1 WHERE share_id = ?",
+                (share_id,),
+            )
+            # L-12: 同步置空 artifacts.share_id，避免唯一索引占位阻塞新分享
+            self._conn.execute(
+                "UPDATE artifacts SET share_id = NULL WHERE share_id = ?",
                 (share_id,),
             )
             self._conn.commit()
@@ -1043,23 +1271,26 @@ class SQLiteStorage(StorageDriver):
         logger.info("Saved folder: %s name=%s", folder.folder_id, folder.name)
 
     def get_folder(self, folder_id: str) -> ArtifactFolder | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_folders WHERE folder_id = ?", (folder_id,)
-        )
-        row = cur.fetchone()
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_folders WHERE folder_id = ?", (folder_id,)
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         return _folder_from_row(row)
 
     def list_folders(self, project_id: str | None = None) -> list[ArtifactFolder]:
-        if project_id:
-            cur = self._conn.execute(
-                "SELECT * FROM artifact_folders WHERE project_id = ? ORDER BY name",
-                (project_id,),
-            )
-        else:
-            cur = self._conn.execute("SELECT * FROM artifact_folders ORDER BY name")
-        return [_folder_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            if project_id:
+                cur = conn.execute(
+                    "SELECT * FROM artifact_folders WHERE project_id = ? ORDER BY name",
+                    (project_id,),
+                )
+            else:
+                cur = conn.execute("SELECT * FROM artifact_folders ORDER BY name")
+            rows = cur.fetchall()
+        return [_folder_from_row(r) for r in rows]
 
     def rename_folder(self, folder_id: str, new_name: str) -> bool:
         with self._write_lock:
@@ -1073,14 +1304,38 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def delete_folder(self, folder_id: str) -> bool:
+        # L-13: 收集后代 folder，避免子文件夹留悬挂 parent_id 指向已删 folder
         with self._write_lock:
             self._conn.execute(
                 "UPDATE artifacts SET folder_id = NULL WHERE folder_id = ?",
                 (folder_id,),
             )
+            descendant_ids = [folder_id]
+            pending = [folder_id]
+            while pending:
+                cur = self._conn.execute(
+                    "SELECT folder_id FROM artifact_folders WHERE parent_id IN ({})".format(
+                        ",".join("?" * len(pending))
+                    ),
+                    pending,
+                )
+                children = [row["folder_id"] for row in cur.fetchall()]
+                if not children:
+                    break
+                descendant_ids.extend(children)
+                pending = children
+            # nullify 直接/间接后代 artifact 的 folder_id
+            self._conn.execute(
+                "UPDATE artifacts SET folder_id = NULL WHERE folder_id IN ({})".format(
+                    ",".join("?" * len(descendant_ids))
+                ),
+                descendant_ids,
+            )
             cur = self._conn.execute(
-                "DELETE FROM artifact_folders WHERE folder_id = ?",
-                (folder_id,),
+                "DELETE FROM artifact_folders WHERE folder_id IN ({})".format(
+                    ",".join("?" * len(descendant_ids))
+                ),
+                descendant_ids,
             )
             self._conn.commit()
         ok = cur.rowcount > 0
@@ -1103,33 +1358,55 @@ class SQLiteStorage(StorageDriver):
     def save_tag(self, tag: ArtifactTag) -> None:
         with self._write_lock:
             self._conn.execute(
-                """INSERT INTO artifact_tags (tag_id, name, color)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(tag_id) DO UPDATE SET name=excluded.name, color=excluded.color""",
-                (tag.tag_id, tag.name, tag.color),
+                """INSERT INTO artifact_tags (tag_id, name, color, scope)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(tag_id) DO UPDATE SET name=excluded.name,
+                   color=excluded.color, scope=excluded.scope""",
+                (tag.tag_id, tag.name, tag.color, tag.scope),
             )
             self._conn.commit()
-        logger.info("Saved tag: %s name=%s", tag.tag_id, tag.name)
+        logger.info("Saved tag: %s name=%s scope=%s", tag.tag_id, tag.name, tag.scope)
 
     def get_tag(self, tag_id: str) -> ArtifactTag | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifact_tags WHERE tag_id = ?", (tag_id,)
-        )
-        row = cur.fetchone()
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                "SELECT * FROM artifact_tags WHERE tag_id = ?", (tag_id,)
+            )
+            row = cur.fetchone()
         if row is None:
             return None
         return _tag_from_row(row)
 
-    def get_tag_by_name(self, name: str) -> ArtifactTag | None:
-        cur = self._conn.execute("SELECT * FROM artifact_tags WHERE name = ?", (name,))
-        row = cur.fetchone()
+    def get_tag_by_name(self, name: str, scope: str | None = None) -> ArtifactTag | None:
+        # L-7: 按 scope 查询；scope=None 时回退全局（兼容无作用域调用）
+        with self._read_conn() as conn:
+            if scope is None:
+                cur = conn.execute(
+                    "SELECT * FROM artifact_tags WHERE name = ? AND scope IS NULL",
+                    (name,),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM artifact_tags WHERE name = ? AND scope = ?",
+                    (name, scope),
+                )
+            row = cur.fetchone()
         if row is None:
             return None
         return _tag_from_row(row)
 
-    def list_tags(self) -> list[ArtifactTag]:
-        cur = self._conn.execute("SELECT * FROM artifact_tags ORDER BY name")
-        return [_tag_from_row(r) for r in cur.fetchall()]
+    def list_tags(self, scope: str | None = None) -> list[ArtifactTag]:
+        # L-7: list_tags 按 scope 过滤；不传则返回全部（向后兼容）
+        with self._read_conn() as conn:
+            if scope is None:
+                cur = conn.execute("SELECT * FROM artifact_tags ORDER BY name")
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM artifact_tags WHERE scope = ? ORDER BY name",
+                    (scope,),
+                )
+            rows = cur.fetchall()
+        return [_tag_from_row(r) for r in rows]
 
     def add_artifact_tag(self, artifact_id: str, tag_id: str) -> bool:
         with self._write_lock:
@@ -1157,18 +1434,22 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def list_artifact_tags(self, artifact_id: str) -> list[ArtifactTag]:
-        cur = self._conn.execute(
-            """SELECT t.* FROM artifact_tags t
-               JOIN artifact_tag_map m ON t.tag_id = m.tag_id
-               WHERE m.artifact_id = ? ORDER BY t.name""",
-            (artifact_id,),
-        )
-        return [_tag_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                """SELECT t.* FROM artifact_tags t
+                   JOIN artifact_tag_map m ON t.tag_id = m.tag_id
+                   WHERE m.artifact_id = ? ORDER BY t.name""",
+                (artifact_id,),
+            )
+            rows = cur.fetchall()
+        return [_tag_from_row(r) for r in rows]
 
     # ── events ─────────────────────────────────────────────────
 
     def save_event(self, event: ArtifactEvent) -> None:
         payload_json = json.dumps(event.payload) if event.payload else None
+        # A-8: created_at 统一 REAL epoch；旧 model 传 ISO 串也转 epoch
+        created_at = self._coerce_since_ts(event.created_at) if event.created_at else time.time()
         with self._write_lock:
             self._conn.execute(
                 """INSERT INTO artifact_events (event_id, artifact_id, session_id, event_type, payload, created_at)
@@ -1179,7 +1460,7 @@ class SQLiteStorage(StorageDriver):
                     event.session_id,
                     event.event_type,
                     payload_json,
-                    event.created_at,
+                    created_at,
                 ),
             )
             self._conn.commit()
@@ -1189,6 +1470,19 @@ class SQLiteStorage(StorageDriver):
             event.event_type,
             event.artifact_id,
         )
+
+    def _coerce_since_ts(self, since_ts) -> float:
+        # A-8: since_ts 兼容 REAL epoch 与 ISO 串，统一转 REAL 与 REAL 列比较
+        try:
+            return float(since_ts)
+        except (TypeError, ValueError):
+            pass
+        from datetime import datetime
+
+        try:
+            return datetime.fromisoformat(str(since_ts)).timestamp()
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid since_ts={since_ts!r}") from e
 
     def list_events(
         self,
@@ -1208,18 +1502,20 @@ class SQLiteStorage(StorageDriver):
             params.append(session_id)
         if since_ts:
             conditions.append("created_at > ?")
-            params.append(since_ts)
+            params.append(self._coerce_since_ts(since_ts))
         where = " AND ".join(conditions) if conditions else "1=1"
-        count_cur = self._conn.execute(
-            f"SELECT COUNT(*) FROM artifact_events WHERE {where}", params
-        )
-        total = count_cur.fetchone()[0]
-        offset = (page - 1) * page_size
-        cur = self._conn.execute(
-            f"SELECT * FROM artifact_events WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            params + [page_size, offset],
-        )
-        events = [_event_from_row(r) for r in cur.fetchall()]
+        with self._read_conn() as conn:
+            count_cur = conn.execute(
+                f"SELECT COUNT(*) FROM artifact_events WHERE {where}", params
+            )
+            total = count_cur.fetchone()[0]
+            offset = (page - 1) * page_size
+            cur = conn.execute(
+                f"SELECT * FROM artifact_events WHERE {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            )
+            rows = cur.fetchall()
+        events = [_event_from_row(r) for r in rows]
         return events, total
 
     def move_to_project_kb(self, artifact_id: str, project_id: str) -> bool:
@@ -1241,11 +1537,13 @@ class SQLiteStorage(StorageDriver):
     # ── migrations ─────────────────────────────────────────────
 
     def _guess_ext(self, artifact_id: str, content: str) -> str:
+        # C-10: 扩展名取自用户输入 name，必须限定安全字符集，拒绝路径穿越片段
         art = self.get_artifact(artifact_id)
-        if art:
-            name = art.name.lower()
-            if "." in name:
-                return name.rsplit(".", 1)[-1]
+        if art and "." in art.name:
+            raw = art.name.rsplit(".", 1)[-1]
+            ext = _EXT_SAFE_RE.sub("", raw)[:8].lower()
+            if ext:
+                return ext
         return "txt"
 
     def _migrate_kind_column(self) -> None:
@@ -1447,7 +1745,11 @@ class SQLiteStorage(StorageDriver):
         source_module: str,
         workspace_id: str | None = None,
         workflow_run_id: str | None = None,
+        page: int = 1,
+        page_size: int = 200,
     ) -> list[Artifact]:
+        # P-3: 分页避免无界扫描
+        page_size = min(page_size, 500)
         conditions = ["is_deleted = 0", "source_module = ?"]
         params: list = [source_module]
         if workspace_id:
@@ -1457,10 +1759,14 @@ class SQLiteStorage(StorageDriver):
             conditions.append("workflow_run_id = ?")
             params.append(workflow_run_id)
         where = " AND ".join(conditions)
-        cur = self._conn.execute(
-            f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC", params
-        )
-        return [_artifact_from_row(row) for row in cur.fetchall()]
+        offset = (page - 1) * page_size
+        with self._read_conn() as conn:
+            cur = conn.execute(
+                f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset],
+            )
+            rows = cur.fetchall()
+        return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
         self._conn.close()
@@ -1506,3 +1812,119 @@ class SQLiteStorage(StorageDriver):
                 logger.info("Migrated artifact_versions: token_count -> size_bytes")
         except Exception as e:  # noqa: BLE001
             logger.warning("Migration size_bytes failed: %s", e)
+
+    _SCHEMA_VERSION = 1
+
+    def _migrate_schema_meta(self) -> None:
+        # A-6: schema_meta 记录 schema_version，支持迁移框架与版本检测
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value INTEGER)"
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+                (self._SCHEMA_VERSION,),
+            )
+            self._conn.commit()
+        else:
+            db_ver = row[0]
+            if db_ver > self._SCHEMA_VERSION:
+                # A-6: DB 版本高于代码——拒绝启动，避免未知 schema 静默损坏
+                raise RuntimeError(
+                    f"DB schema_version {db_ver} > code {self._SCHEMA_VERSION}; "
+                    "downgrade unsupported"
+                )
+
+    def _migrate_event_timestamps(self) -> None:
+        # A-8: artifact_events.created_at 统一 REAL epoch。旧 ISO 串转 epoch。
+        from datetime import datetime
+
+        rows = self._conn.execute(
+            "SELECT event_id, created_at FROM artifact_events WHERE created_at IS NOT NULL"
+        ).fetchall()
+        updates = []
+        for r in rows:
+            raw = r["created_at"]
+            if raw is None:
+                continue
+            try:
+                float(raw)
+                continue
+            except (TypeError, ValueError):
+                pass
+            try:
+                ts = datetime.fromisoformat(str(raw)).timestamp()
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Unparseable event created_at %s for %s, fallback to now",
+                    raw,
+                    r["event_id"],
+                )
+                ts = time.time()
+            updates.append((ts, r["event_id"]))
+        if updates:
+            with self._write_lock:
+                self._conn.executemany(
+                    "UPDATE artifact_events SET created_at = ? WHERE event_id = ?",
+                    updates,
+                )
+                self._conn.commit()
+            logger.info("Migrated %d event timestamps ISO -> REAL", len(updates))
+
+    def _migrate_tag_scope_column(self) -> None:
+        # L-7: artifact_tags 加 scope 列，name 唯一约束改为 (name, scope) 复合唯一
+        cols = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(artifact_tags)").fetchall()
+        }
+        if "scope" not in cols:
+            self._conn.execute("ALTER TABLE artifact_tags ADD COLUMN scope TEXT")
+            self._conn.commit()
+            logger.info("Added scope column to artifact_tags")
+        # 旧库 name 是 UNIQUE 单列约束，与新增 UNIQUE(name, scope) 冲突——重建索引。
+        # SQLite 无法直接 ALTER 约束，删除自动索引名（sqlite_autoindex_*）需重建表。
+        # 这里检测并重建：若存在单列 name 唯一索引则重建表为复合唯一。
+        idx_rows = self._conn.execute(
+            "PRAGMA index_list(artifact_tags)"
+        ).fetchall()
+        needs_rebuild = False
+        for ir in idx_rows:
+            # origin='u' = UNIQUE constraint autoindex；查其列
+            if ir["origin"] == "u":
+                info = self._conn.execute(
+                    f"PRAGMA index_info({ir['name']})"
+                ).fetchall()
+                cols_in = [c["name"] for c in info]
+                if cols_in == ["name"]:
+                    needs_rebuild = True
+                    break
+        if needs_rebuild:
+            self._conn.executescript(
+                """
+                BEGIN;
+                CREATE TABLE IF NOT EXISTS artifact_tags_new (
+                    tag_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    color TEXT,
+                    scope TEXT,
+                    UNIQUE(name, scope)
+                );
+                INSERT OR IGNORE INTO artifact_tags_new (tag_id, name, color, scope)
+                SELECT tag_id, name, color, scope FROM artifact_tags;
+                DROP TABLE artifact_tags;
+                ALTER TABLE artifact_tags_new RENAME TO artifact_tags;
+                CREATE INDEX IF NOT EXISTS idx_tags_scope ON artifact_tags(scope);
+                COMMIT;
+                """
+            )
+            self._conn.commit()
+            logger.info("Rebuilt artifact_tags with UNIQUE(name, scope)")
+        else:
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tags_scope ON artifact_tags(scope)"
+            )
+            self._conn.commit()

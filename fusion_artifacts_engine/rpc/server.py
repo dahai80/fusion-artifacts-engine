@@ -11,7 +11,6 @@ from urllib.parse import parse_qs, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.errors import RpcError
-from fusion_artifacts_engine.rpc.event_bus import event_bus
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
@@ -43,21 +42,22 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
     def _is_authed(self) -> bool:
-        api_key_env = os.environ.get("FUSION_ARTIFACTS_API_KEY", "") or _API_KEY
-        if not api_key_env:
-            allow_no_auth = getattr(
-                self.server._rpc_handler.engine.config,
-                "allow_no_auth",
-                True,
-            )
+        # C-4: api_key 优先 env（支持运行时旋转），其次 config.api_key；
+        # 无 key 时按 allow_no_auth 决定，默认 False（fail-closed）
+        engine = self.server._rpc_handler.engine
+        api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "") or _API_KEY or getattr(
+            engine.config, "api_key", None
+        ) or ""
+        if not api_key:
+            allow_no_auth = getattr(engine.config, "allow_no_auth", False)
             if allow_no_auth:
                 return True
             logger.warning(
                 "Auth rejected: no API_KEY configured and allow_no_auth=False"
             )
             return False
-        api_key = self.headers.get("X-API-Key", "")
-        return hmac.compare_digest(api_key, api_key_env)
+        provided = self.headers.get("X-API-Key", "")
+        return hmac.compare_digest(provided, api_key)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
         if jsonrpc:
@@ -318,9 +318,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         watcher_id = f"sse_{id(self)}"
-        sub = event_bus.subscribe()
-
         engine = self.server._rpc_handler.engine
+        # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
+        sub = engine.event_bus.subscribe()
         heartbeat_interval = engine.config.sse_heartbeat_interval
 
         logger.info(
@@ -331,6 +331,21 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 try:
                     event = sub.get(timeout=heartbeat_interval)
                     if event is None:
+                        break
+                    etype = event.get("event_type")
+                    # A-3/A-4: __dropped__ 队列满被驱逐，__closed__ 停机——关流促重连
+                    if etype in ("__dropped__", "__closed__"):
+                        logger.info(
+                            "SSE stream %s, closing watcher=%s", etype, watcher_id
+                        )
+                        try:
+                            data = json.dumps({"type": etype})
+                            self.wfile.write(
+                                f"event: {etype}\ndata: {data}\n\n".encode()
+                            )
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass
                         break
                     if kind_filter and event.get("kind") != kind_filter:
                         continue
@@ -350,7 +365,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     logger.exception("SSE loop error")
                     break
         finally:
-            event_bus.unsubscribe(sub)
+            engine.event_bus.unsubscribe(sub)
             logger.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _send_rest_response(self, code: int, data: dict) -> None:
