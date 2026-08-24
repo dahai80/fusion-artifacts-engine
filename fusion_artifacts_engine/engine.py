@@ -3,8 +3,9 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -20,6 +21,8 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
+from fusion_artifacts_engine.render import render_share_html
+from fusion_artifacts_engine.rpc.event_bus import EventBus
 from fusion_artifacts_engine.section_index import extract_sections, normalize_anchor
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
 from fusion_artifacts_engine.token_counter import count_tokens
@@ -31,16 +34,30 @@ _SUMMARY_MAX_LEN = 200
 
 
 def _is_expired(expires_at: str | None) -> bool:
+    # L-1: fail-closed——无过期时间才放行；解析失败一律视为已过期，拒绝访问
     if not expires_at:
         return False
     try:
         exp = datetime.fromisoformat(expires_at)
     except ValueError:
-        logger.warning("Unparseable expires_at %r, treat as not expired", expires_at)
-        return False
+        logger.warning("Unparseable expires_at %r, treat as expired (fail-closed)", expires_at)
+        return True
     if exp.tzinfo is None:
         exp = exp.replace(tzinfo=UTC)
     return datetime.now(UTC) > exp
+
+
+def _parse_expires_at(expires_at: str | None) -> datetime | None:
+    # L-6: 解析 expires_at 为 aware datetime；None 放行，不可解析抛 ValueError
+    if not expires_at:
+        return None
+    try:
+        exp = datetime.fromisoformat(expires_at)
+    except ValueError as e:
+        raise ValueError(f"Invalid expires_at format: {expires_at!r}") from e
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    return exp
 
 
 def _truncate_summary(content: str) -> str:
@@ -74,84 +91,8 @@ def _size_bytes(content: str) -> int:
     return len(content.encode("utf-8"))
 
 
-def _html_escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
-
-
-_SHARE_DOC_CSP = (
-    "default-src 'none'; "
-    "script-src 'unsafe-inline'; "
-    "style-src 'unsafe-inline'; "
-    "img-src data:; "
-    "font-src data:; "
-    "connect-src 'none';"
-)
-
-
-def _render_share_html(artifact: Artifact, content: str) -> str:
-    atype = artifact.type
-    title = _html_escape(artifact.name or "Shared Artifact")
-    if atype in ("html", "react"):
-        iframe_doc = _html_escape(content)
-        return (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
-            f"<style>html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
-            f"</head><body>"
-            f"<iframe sandbox='allow-scripts' srcdoc=\"{iframe_doc}\"></iframe>"
-            f"</body></html>"
-        )
-    if atype == "markdown":
-        import markdown
-
-        rendered = markdown.markdown(content, extensions=["fenced_code", "tables"])
-        return (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
-            f"<style>body{{font-family:system-ui,sans-serif;max-width:900px;"
-            f"margin:2rem auto;padding:0 1rem;line-height:1.6}}"
-            f"pre{{background:#f4f4f4;padding:1rem;overflow:auto;border-radius:4px}}"
-            f"code{{background:#f4f4f4;padding:2px 6px;border-radius:3px}}</style>"
-            f"</head><body>{rendered}</body></html>"
-        )
-    if atype == "data":
-        import json as _json
-
-        pretty = _html_escape(
-            _json.dumps(_json.loads(content), indent=2, ensure_ascii=False)
-            if content.strip()
-            else content
-        )
-        return (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<style>body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
-            f"</head><body>{pretty}</body></html>"
-        )
-    if atype == "svg":
-        return (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<style>body{{margin:0;display:flex;justify-content:center;"
-            f"align-items:center;min-height:100vh}}</style>"
-            f"</head><body>{content}</body></html>"
-        )
-    escaped = _html_escape(content)
-    return (
-        f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>{title}</title>"
-        f"<style>body{{font-family:monospace;white-space:pre-wrap;"
-        f"padding:1rem;overflow:auto}}</style>"
-        f"</head><body>{escaped}</body></html>"
-    )
+# H3/H7: _sanitize_html / _render_share_html / _SHARE_DOC_CSP / _html_escape 已抽到 render.py。
+# _sanitize_html 改用 lxml Cleaner（真实 HTML 解析树），正则仅作 lxml 缺失时降级。
 
 
 class ArtifactEngine:
@@ -161,11 +102,86 @@ class ArtifactEngine:
             db_path=self.config.db_path,
             content_dir=self.config.content_dir,
             small_content_limit=self.config.small_content_limit,
+            max_versions_per_artifact=self.config.max_versions_per_artifact,
         )
+        # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
+        # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
+        # 仅为 watch RPC 保留「谁注册过」的记录。未来要加推送应基于 EventBus 扩展，
+        # 勿在 _watchers 上补投递逻辑（会产生与 SSE 的重复推送）。
+        # ThreadingMixIn 多线程改写，加锁防 dict changed size during iteration 竞态。
         self._watchers: dict[str, list[str]] = {}
+        self._watchers_lock = threading.Lock()
+        # A-2: EventBus 注入 engine 实例，避免模块级单例跨 engine 串流
+        self.event_bus = EventBus()
+        # R2: share access_count 内存缓冲——公开 GET 只增内存计数，后台批量刷盘，
+        # 避免病毒式传播时每次公开访问都持 _write_lock 写 SQLite（写放大 DoS）。
+        # 刷新阈值/间隔兼顾准确性（max_accesses 校验含缓冲值）与写收敛。
+        self._share_access_buffer: dict[str, int] = {}
+        self._share_access_lock = threading.Lock()
+        self._share_flush_threshold = 50
+        self._share_flush_interval = 5.0
+        self._share_flush_stop = threading.Event()
+        self._share_flush_thread = threading.Thread(
+            target=self._share_flush_loop, name="share-access-flush", daemon=True
+        )
+        self._share_flush_thread.start()
         logger.info(
             "ArtifactEngine initialized: storage_root=%s", self.config.storage_root
         )
+
+    def _share_flush_loop(self) -> None:
+        # R2: 后台定期刷盘 share access 增量。daemon 线程，stop event 退出。
+        while not self._share_flush_stop.wait(self._share_flush_interval):
+            try:
+                self._flush_share_access()
+            except Exception as e:
+                logger.warning("share access flush failed: %s", e)
+
+    def _flush_share_access(self) -> None:
+        # R2: 原子取出缓冲增量，批量 UPDATE access_count += delta + last_access_at=now。
+        with self._share_access_lock:
+            if not self._share_access_buffer:
+                return
+            pending = self._share_access_buffer
+            self._share_access_buffer = {}
+        flushed = 0
+        for share_id, delta in pending.items():
+            try:
+                self.storage.increment_share_access(share_id, delta=delta)
+                flushed += 1
+            except Exception as e:
+                # 单条失败回填缓冲，下次再刷，不丢计数
+                logger.warning("flush share %s delta=%d failed: %s", share_id, delta, e)
+                with self._share_access_lock:
+                    self._share_access_buffer[share_id] = (
+                        self._share_access_buffer.get(share_id, 0) + delta
+                    )
+        if flushed:
+            logger.debug("share access flushed: %d share(s)", flushed)
+
+    def _buffer_share_access(self, share_id: str, share: ArtifactShare) -> None:
+        # R2: 内存增计数。max_accesses 校验用 access_count（已持久化）+ buffer（未刷）。
+        with self._share_access_lock:
+            self._share_access_buffer[share_id] = (
+                self._share_access_buffer.get(share_id, 0) + 1
+            )
+            buffered = self._share_access_buffer[share_id]
+        if buffered >= self._share_flush_threshold:
+            self._flush_share_access()
+
+    def _buffered_access_count(self, share_id: str, persisted: int) -> int:
+        # R2: 含缓冲的总访问数，供 E2 max_accesses 上限校验
+        with self._share_access_lock:
+            return persisted + self._share_access_buffer.get(share_id, 0)
+
+    def shutdown_share_buffer(self) -> None:
+        # R2: 关停刷盘线程前最终 flush，防计数丢失
+        self._share_flush_stop.set()
+        try:
+            self._flush_share_access()
+        except Exception as e:
+            logger.warning("final share access flush failed: %s", e)
+
 
     async def create_artifact(
         self,
@@ -294,8 +310,12 @@ class ArtifactEngine:
         source_module: str,
         workspace_id: str | None = None,
         workflow_run_id: str | None = None,
+        page: int = 1,
+        page_size: int = 200,
     ) -> list[Artifact]:
-        return self.storage.list_by_source(source_module, workspace_id, workflow_run_id)
+        return self.storage.list_by_source(
+            source_module, workspace_id, workflow_run_id, page=page, page_size=page_size
+        )
 
     def get_artifact(
         self, artifact_id: str, project_id: str | None = None
@@ -337,8 +357,16 @@ class ArtifactEngine:
         # 避免 str/dict 漂移；调用方需 dict 时自行 json.loads (P2-8)。
         return result
 
-    def list_versions(self, artifact_id: str) -> list[ArtifactVersion]:
-        return self.storage.list_versions(artifact_id)
+    def list_versions(
+        self,
+        artifact_id: str,
+        page: int = 1,
+        page_size: int = 200,
+        include_content: bool = True,
+    ) -> list[ArtifactVersion]:
+        return self.storage.list_versions(
+            artifact_id, page=page, page_size=page_size, include_content=include_content
+        )
 
     async def rollback_version(
         self,
@@ -450,24 +478,26 @@ class ArtifactEngine:
         )
 
     def register_watcher(self, artifact_id: str, watcher_id: str) -> None:
-        if artifact_id not in self._watchers:
-            self._watchers[artifact_id] = []
-        if watcher_id not in self._watchers[artifact_id]:
-            self._watchers[artifact_id].append(watcher_id)
-            logger.info(
-                "Watcher registered: %s for artifact %s", watcher_id, artifact_id
-            )
+        with self._watchers_lock:
+            if artifact_id not in self._watchers:
+                self._watchers[artifact_id] = []
+            if watcher_id not in self._watchers[artifact_id]:
+                self._watchers[artifact_id].append(watcher_id)
+                logger.info(
+                    "Watcher registered: %s for artifact %s", watcher_id, artifact_id
+                )
 
     def unregister_watcher(self, artifact_id: str, watcher_id: str) -> None:
-        if artifact_id in self._watchers:
-            self._watchers[artifact_id] = [
-                w for w in self._watchers[artifact_id] if w != watcher_id
-            ]
-            if not self._watchers[artifact_id]:
-                del self._watchers[artifact_id]
-            logger.info(
-                "Watcher unregistered: %s for artifact %s", watcher_id, artifact_id
-            )
+        with self._watchers_lock:
+            if artifact_id in self._watchers:
+                self._watchers[artifact_id] = [
+                    w for w in self._watchers[artifact_id] if w != watcher_id
+                ]
+                if not self._watchers[artifact_id]:
+                    del self._watchers[artifact_id]
+                logger.info(
+                    "Watcher unregistered: %s for artifact %s", watcher_id, artifact_id
+                )
 
     def get_watch_events(self, artifact_id: str, since_version: int = 0) -> list[dict]:
         versions = self.storage.list_versions(artifact_id)
@@ -603,22 +633,16 @@ class ArtifactEngine:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        if expected_content_hash is not None:
-            current_hash = artifact.content_hash
-            if current_hash != expected_content_hash:
-                raise ValueError(
-                    f"Optimistic lock failed: expected hash {expected_content_hash}, got {current_hash}"
-                )
         if not change_log:
             old = self.storage.get_version(artifact_id, artifact.current_version)
             change_log = _auto_changelog(old.content if old else "", content)
-        new_version = self.storage.next_version_num(artifact_id)
         now = time.time()
         size = _size_bytes(content)
         sections = extract_sections(content, artifact.type)
+        # C-8: version_num 由原子存储方法在事务内分配，这里用 0 占位
         version = ArtifactVersion(
             artifact_id=artifact_id,
-            version_num=new_version,
+            version_num=0,
             content=content,
             size_bytes=size,
             token_count=count_tokens(content),
@@ -629,14 +653,22 @@ class ArtifactEngine:
             snapshot_type=snapshot_type,
             parent_version=parent_version,
         )
-        self.storage.save_version(version)
-        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
-        artifact.current_version = new_version
-        artifact.updated_at = now
-        artifact.content_hash = content_hash
-        if not artifact.summary:
-            artifact.summary = _truncate_summary(content)
-        self.storage.save_artifact(artifact)
+        # L-8: rollback 的 content_hash 与历史版本内容相同会碰撞——乐观锁调用方
+        # 无法区分"已回滚到 vN"与"仍在 vN"。回滚版本 hash 计算前加标记前缀，
+        # 使其与原始版本 hash 不同，消除锁歧义。
+        hash_input = content
+        if snapshot_type == "rollback":
+            hash_input = f"rollback:{parent_version}:{content}"
+        content_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:16]
+        summary = _truncate_summary(content) if not artifact.summary else None
+        # C-8: 校验+分配+写入原子化，BEGIN IMMEDIATE 序列化并发写
+        new_version = self.storage.create_version_atomic(
+            artifact,
+            version,
+            content_hash,
+            summary,
+            expected_content_hash=expected_content_hash,
+        )
         ref_text = generate_ref_text(
             artifact_id,
             artifact.name,
@@ -663,10 +695,49 @@ class ArtifactEngine:
         artifact_id: str,
         created_by: str | None = None,
         expires_at: str | None = None,
+        max_accesses: int | None = None,
     ) -> ArtifactShare:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
+        # C-9: 仅拥有者可分享——artifact 有 owner_user_id 时校验 created_by 一致
+        if artifact.owner_user_id and created_by != artifact.owner_user_id:
+            logger.warning(
+                "Share denied: caller %s != owner %s for artifact %s",
+                created_by,
+                artifact.owner_user_id,
+                artifact_id,
+            )
+            raise PermissionError(
+                f"Only the owner can share artifact {artifact_id}"
+            )
+        # E2: 校验 max_accesses——必须为正整数，None=不限
+        if max_accesses is not None and max_accesses < 1:
+            logger.warning("create_share bad max_accesses %r", max_accesses)
+            raise ValueError(f"max_accesses must be >= 1 or null: {max_accesses}")
+        # L-6: 校验 expires_at 格式/范围——拒绝过去日期与超 max-TTL
+        if expires_at is not None:
+            try:
+                exp = _parse_expires_at(expires_at)
+            except ValueError:
+                logger.warning("create_share bad expires_at %r", expires_at)
+                raise
+            if exp is not None:
+                now_utc = datetime.now(UTC)
+                if exp <= now_utc:
+                    logger.warning("create_share past expires_at %r", expires_at)
+                    raise ValueError(f"expires_at must be in the future: {expires_at}")
+                max_ttl_days = self.config.share_max_ttl_days
+                if max_ttl_days > 0:
+                    max_exp = now_utc + timedelta(days=max_ttl_days)
+                    if exp > max_exp:
+                        logger.warning(
+                            "create_share expires_at %r exceeds max TTL %d days",
+                            expires_at, max_ttl_days,
+                        )
+                        raise ValueError(
+                            f"expires_at exceeds max TTL {max_ttl_days} days: {expires_at}"
+                        )
         existing = self.storage.get_share_by_artifact(artifact_id)
         if existing is not None:
             logger.info(
@@ -676,20 +747,23 @@ class ArtifactEngine:
             )
             return existing
         import uuid
-        from datetime import datetime
 
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(UTC).isoformat()
+        # E1: created_at 用 float epoch，与 Artifact/Version 一致
         share = ArtifactShare(
             share_id=share_id,
             artifact_id=artifact_id,
             created_by=created_by,
-            created_at=now_iso,
+            created_at=time.time(),
             expires_at=expires_at,
+            max_accesses=max_accesses,
         )
         self.storage.save_share(share)
         self.storage.set_artifact_share_id(artifact_id, share_id)
-        logger.info("Created share %s for artifact %s", share_id, artifact_id)
+        logger.info(
+            "Created share %s for artifact %s max_accesses=%s",
+            share_id, artifact_id, max_accesses,
+        )
         return share
 
     def get_shared_artifact(self, share_id: str) -> dict | None:
@@ -702,10 +776,19 @@ class ArtifactEngine:
         if _is_expired(share.expires_at):
             logger.info("Share %s expired", share_id)
             return None
-        self.storage.increment_share_access(share_id)
+        # E2: 超过 max_accesses 上限则拒绝（在 increment 前，含缓冲值）
+        effective_count = self._buffered_access_count(share_id, share.access_count)
+        if share.max_accesses is not None and effective_count >= share.max_accesses:
+            logger.info(
+                "Share %s exhausted: %d >= %d", share_id,
+                effective_count, share.max_accesses,
+            )
+            return None
         artifact = self.storage.get_artifact(share.artifact_id)
         if artifact is None:
             return None
+        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
+        self.storage.increment_share_access(share_id)
         version = self.get_version_content(share.artifact_id)
         content_type_map = {
             "html": "text/html",
@@ -737,23 +820,52 @@ class ArtifactEngine:
         if _is_expired(share.expires_at):
             logger.info("Public share %s expired", share_id)
             return {"status": "gone", "reason": "expired"}
-        self.storage.increment_share_access(share_id)
+        # E2: 超过 max_accesses 上限则返回 410 Gone（在 increment 前，含缓冲值）
+        effective_count = self._buffered_access_count(share_id, share.access_count)
+        if share.max_accesses is not None and effective_count >= share.max_accesses:
+            logger.info(
+                "Public share %s exhausted: %d >= %d", share_id,
+                effective_count, share.max_accesses,
+            )
+            return {"status": "gone", "reason": "exhausted"}
         artifact = self.storage.get_artifact(share.artifact_id)
         if artifact is None:
             logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
             return {"status": "not_found"}
+        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
+        # R2: 公开端点走内存缓冲（不持写锁），后台批量刷盘
+        self._buffer_share_access(share_id, share)
         version = self.get_version_content(share.artifact_id)
         raw_content = version.content if version else ""
-        rendered_html = _render_share_html(artifact, raw_content)
+        rendered_html = render_share_html(artifact, raw_content)
         logger.info(
             "Public share %s served artifact %s (rendered, source isolated)",
             share_id,
             share.artifact_id,
         )
+        # C-5: 公共未认证端点只回展示字段，不泄露 session_id/project_id/
+        # owner_user_id/metadata/content_hash/folder_id/created_by 等内部 PII
+        public_share = {
+            "share_id": share.share_id,
+            "expires_at": share.expires_at,
+            "revoked": share.revoked,
+            "max_accesses": share.max_accesses,
+            "access_count": effective_count + 1,
+        }
+        public_artifact = {
+            "id": artifact.id,
+            "name": artifact.name,
+            "type": artifact.type,
+            "kind": artifact.kind,
+            "summary": artifact.summary,
+            "current_version": artifact.current_version,
+            "created_at": artifact.created_at,
+            "updated_at": artifact.updated_at,
+        }
         return {
             "status": "ok",
-            "share": share.model_dump(),
-            "artifact": artifact.model_dump(),
+            "share": public_share,
+            "artifact": public_artifact,
             "rendered_html": rendered_html,
             "content_type": "text/html",
         }
@@ -801,8 +913,16 @@ class ArtifactEngine:
         )
         return snapshot
 
-    def list_snapshots(self, artifact_id: str) -> list[ArtifactVersion]:
-        return self.storage.list_snapshots(artifact_id)
+    def list_snapshots(
+        self,
+        artifact_id: str,
+        page: int = 1,
+        page_size: int = 200,
+        include_content: bool = True,
+    ) -> list[ArtifactVersion]:
+        return self.storage.list_snapshots(
+            artifact_id, page=page, page_size=page_size, include_content=include_content
+        )
 
     # ── P2: folders ────────────────────────────────────────────
 
@@ -813,16 +933,15 @@ class ArtifactEngine:
         project_id: str | None = None,
     ) -> ArtifactFolder:
         import uuid
-        from datetime import datetime
 
         folder_id = f"fld_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(UTC).isoformat()
+        # E1: created_at 用 float epoch，与 Artifact/Version 一致
         folder = ArtifactFolder(
             folder_id=folder_id,
             name=name,
             parent_id=parent_id,
             project_id=project_id,
-            created_at=now_iso,
+            created_at=time.time(),
         )
         self.storage.save_folder(folder)
         logger.info("Created folder: %s name=%s", folder_id, name)
@@ -848,6 +967,15 @@ class ArtifactEngine:
 
     # ── P4: tags ───────────────────────────────────────────────
 
+    @staticmethod
+    def _tag_scope(artifact: "Artifact") -> str | None:
+        # L-7: tag 作用域优先 session_id，其次 project_id；都无则 None（全局）
+        if artifact.session_id:
+            return artifact.session_id
+        if artifact.project_id:
+            return artifact.project_id
+        return None
+
     def add_tag(
         self, artifact_id: str, tag_name: str, color: str | None = None
     ) -> ArtifactTag:
@@ -856,29 +984,32 @@ class ArtifactEngine:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        existing = self.storage.get_tag_by_name(tag_name)
+        scope = self._tag_scope(artifact)
+        existing = self.storage.get_tag_by_name(tag_name, scope)
         if existing:
             tag = existing
         else:
             tag_id = f"tag_{uuid.uuid4().hex[:12]}"
-            tag = ArtifactTag(tag_id=tag_id, name=tag_name, color=color)
+            tag = ArtifactTag(tag_id=tag_id, name=tag_name, color=color, scope=scope)
             self.storage.save_tag(tag)
-            logger.info("Created tag: %s name=%s", tag_id, tag_name)
+            logger.info("Created tag: %s name=%s scope=%s", tag_id, tag_name, scope)
         self.storage.add_artifact_tag(artifact_id, tag.tag_id)
         logger.info("Added tag %s to artifact %s", tag.tag_id, artifact_id)
         return tag
 
     def remove_tag(self, artifact_id: str, tag_name: str) -> bool:
-        tag = self.storage.get_tag_by_name(tag_name)
+        artifact = self.storage.get_artifact(artifact_id)
+        scope = self._tag_scope(artifact) if artifact else None
+        tag = self.storage.get_tag_by_name(tag_name, scope)
         if tag is None:
-            logger.warning("Tag not found: %s", tag_name)
+            logger.warning("Tag not found: %s scope=%s", tag_name, scope)
             return False
         ok = self.storage.remove_artifact_tag(artifact_id, tag.tag_id)
         logger.info("Removed tag %s from artifact %s ok=%s", tag_name, artifact_id, ok)
         return ok
 
-    def list_tags(self) -> list[ArtifactTag]:
-        return self.storage.list_tags()
+    def list_tags(self, scope: str | None = None) -> list[ArtifactTag]:
+        return self.storage.list_tags(scope)
 
     def list_artifact_tags(self, artifact_id: str) -> list[ArtifactTag]:
         return self.storage.list_artifact_tags(artifact_id)
@@ -892,18 +1023,18 @@ class ArtifactEngine:
         session_id: str | None = None,
         payload: dict | None = None,
     ) -> ArtifactEvent:
+        import time as _time
         import uuid
-        from datetime import datetime
 
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
-        now_iso = datetime.now(UTC).isoformat()
+        now_ts = _time.time()
         event = ArtifactEvent(
             event_id=event_id,
             artifact_id=artifact_id,
             session_id=session_id,
             event_type=event_type,
             payload=payload,
-            created_at=now_iso,
+            created_at=now_ts,
         )
         self.storage.save_event(event)
         logger.info(
@@ -1014,42 +1145,68 @@ class ArtifactEngine:
         return version, patch_info
 
     @staticmethod
+    def _all_section_bounds(
+        content: str, artifact_type: str
+    ) -> list[tuple[int, int, int, str]]:
+        # P-1: 一次线性扫预计算所有标题位置 + section 边界，避免 O(n^2)。
+        # 返回 (start, end, level, anchor) 列表，end 为下一同级/更高级标题行号。
+        lines = content.split("\n")
+        headers: list[tuple[int, int, str]] = []
+        for i, line in enumerate(lines):
+            if artifact_type == "markdown":
+                m = re.match(r"^(#{1,6})\s+(.+)$", line)
+                if m:
+                    headers.append((i, len(m.group(1)), m.group(2).strip()))
+            elif artifact_type == "code":
+                # E4: 多语言 section 检测。覆盖 Python(def/class/async def)
+                # JS/TS(function/const/export class/arrow)、Go(func)、Rust(fn/impl/struct/pub)
+                # Java(class/public..)。标识符允许 unicode（Python3 非ASCII方法名）。
+                m = re.match(
+                    r"^\s*(?:"
+                    r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)"
+                    r"|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*="
+                    r"|(?:export\s+)?(?:default\s+)?class\s+(\w+)"
+                    r"|(?:async\s+)?def\s+(\w+)"
+                    r"|class\s+(\w+)"
+                    r"|(?:pub\s+)?fn\s+(\w+)"
+                    r"|(?:pub\s+)?(?:struct|enum|trait|impl)\s+(\w+)"
+                    r"|func(?:\s+\([^)]*\))?\s+(\w+)"
+                    r"|(?:public|private|protected|static)\s+(?:[\w<>\[\]]+\s+)?(\w+)\s*\("
+                    r")",
+                    line,
+                )
+                if m:
+                    name = next((g for g in m.groups() if g), None)
+                    if name:
+                        headers.append((i, 1, name))
+        bounds: list[tuple[int, int, int, str]] = []
+        for idx, (start, level, anchor) in enumerate(headers):
+            end = len(lines)
+            if artifact_type == "markdown":
+                for j in range(idx + 1, len(headers)):
+                    s2, l2, _ = headers[j]
+                    if l2 <= level:
+                        end = s2
+                        break
+            else:
+                if idx + 1 < len(headers):
+                    end = headers[idx + 1][0]
+            bounds.append((start, end, level, anchor))
+        return bounds
+
+    @staticmethod
     def _find_section_bounds(
         content: str, anchor: str, artifact_type: str
     ) -> list[tuple[int, int, int]]:
+        # P-1: 复用 _all_section_bounds 线性结果，按 anchor 过滤；保持原多重匹配语义。
         anchor = normalize_anchor(anchor)
-        lines = content.split("\n")
-        matches = []
-        for i, line in enumerate(lines):
-            matched = False
-            if artifact_type == "markdown":
-                m = re.match(r"^(#{1,6})\s+(.+)$", line)
-                if m and m.group(2).strip() == anchor:
-                    matched = True
-                    level = len(m.group(1))
-            elif artifact_type == "code":
-                m = re.match(r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", line)
-                if m and m.group(1) == anchor:
-                    matched = True
-                    level = 1
-            if matched:
-                end = len(lines)
-                if artifact_type == "markdown":
-                    for j in range(i + 1, len(lines)):
-                        m2 = re.match(r"^(#{1,6})\s+", lines[j])
-                        if m2 and len(m2.group(1)) <= level:
-                            end = j
-                            break
-                elif artifact_type == "code":
-                    for j in range(i + 1, len(lines)):
-                        m2 = re.match(
-                            r"^(?:async\s+)?(?:def|class|func)\s+\w+", lines[j]
-                        )
-                        if m2:
-                            end = j
-                            break
-                matches.append((i, end, level))
-        return matches
+        return [
+            (s, e, lvl)
+            for s, e, lvl, anc in ArtifactEngine._all_section_bounds(
+                content, artifact_type
+            )
+            if anc == anchor
+        ]
 
     def _replace_section(
         self, content: str, anchor: str, new_content: str, artifact_type: str
@@ -1092,35 +1249,19 @@ class ArtifactEngine:
     def _build_sections_with_tokens(
         self, content: str, artifact_type: str
     ) -> list[dict]:
+        # P-1: 单次线性扫导出所有 section 边界，避免每标题一次 O(n) 扫。
         lines = content.split("\n")
         sections = []
-        i = 0
-        while i < len(lines):
-            matched = False
-            anchor = ""
-            if artifact_type == "markdown":
-                m = re.match(r"^(#{1,6})\s+(.+)$", lines[i])
-                if m:
-                    anchor = m.group(2).strip()
-                    matched = True
-            elif artifact_type == "code":
-                m = re.match(r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", lines[i])
-                if m:
-                    anchor = m.group(1)
-                    matched = True
-            if matched:
-                bounds = self._find_section_bounds(content, anchor, artifact_type)
-                for start, end, _ in bounds:
-                    if start == i:
-                        section_text = "\n".join(lines[start:end])
-                        sections.append(
-                            {
-                                "anchor": anchor,
-                                "tokens": count_tokens(section_text),
-                            }
-                        )
-                        break
-            i += 1
+        for start, end, _lvl, anchor in ArtifactEngine._all_section_bounds(
+            content, artifact_type
+        ):
+            section_text = "\n".join(lines[start:end])
+            sections.append(
+                {
+                    "anchor": anchor,
+                    "tokens": count_tokens(section_text),
+                }
+            )
         return sections
 
     def load_artifact(
@@ -1190,25 +1331,12 @@ class ArtifactEngine:
         session_id: str | None = None,
         context_window: int | None = None,
     ) -> dict:
-        if session_id:
-            artifacts = self.storage.list_artifacts(session_id)
-        else:
-            artifacts, _total = self.storage.list_all_artifacts(
-                page_size=100000,
-            )
-        artifact_list = []
-        total_tokens = 0
-        for art in artifacts:
-            ver = self.get_version_content(art.id)
-            tc = ver.token_count if ver else 0
-            total_tokens += tc
-            artifact_list.append(
-                {
-                    "artifact_id": art.id,
-                    "name": art.name,
-                    "tokens": tc,
-                }
-            )
+        # P-2: 用存储层一条 SQL 聚合 token，替代 N+1 逐版本读 + 无界 page_size=100000。
+        if context_window is not None and context_window < 1:
+            raise ValueError("context_window must be >= 1")
+        total_tokens, artifact_list = self.storage.sum_token_counts(
+            session_id=session_id
+        )
         effective_window = (
             context_window
             if context_window is not None
@@ -1371,7 +1499,7 @@ class ArtifactEngine:
         # 边界说明：本方法不执行浏览器渲染，只做 (1) 阈值判定 (2) 类型检测
         # (3) 存储为 artifact (4) 返回 render_type 提示 + 原始 content。
         # 浏览器渲染由调用方 (fusion-studio) 负责；服务端渲染场景见
-        # _render_share_html (公开分享只读预览)。
+        # _render_share_html (公开分享只读预览，实现在 render.py)。
         from fusion_artifacts_engine.auto_identifier import (
             detect_artifact_type,
             detect_renderable_type,
@@ -1448,8 +1576,9 @@ class ArtifactEngine:
     def inject(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
-        # NOTE: inject 当前仅做 token 预算检查，不注入也不修改 messages。
-        # 调用方应据返回的 safe 标志自行决定是否压缩，勿依赖注入副作用。
+        # R7/STUB: inject 是占位实现，仅做 token 预算检查，不注入也不修改 messages。
+        # 不是未来扩展——是已宣传但未实现的能力。商用集成勿依赖注入副作用。
+        # README/SDK 已标注 stub（见 Batch8 文档修正）。返回 injected=False + stub=True。
         total_tokens = 0
         for msg in messages:
             content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
@@ -1472,7 +1601,8 @@ class ArtifactEngine:
             "total_tokens": total_tokens,
             "safe": safe,
             "injected": False,
-            "note": "no-op: budget check only, messages unchanged",
+            "stub": True,
+            "note": "STUB: budget check only, messages unchanged; inject not implemented",
         }
 
     def interact_artifact(
@@ -1500,7 +1630,8 @@ class ArtifactEngine:
             "action": action,
             "event_id": event.event_id,
             "dispatched": False,
-            "note": "stub: records interaction event only, no action dispatch",
+            "stub": True,
+            "note": "STUB: records interaction event only, no action dispatch implemented",
         }
 
     async def sync_artifact_file(
@@ -1513,7 +1644,24 @@ class ArtifactEngine:
         artifact = self.storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        path = Path(file_path)
+        path = Path(file_path).expanduser()
+        # C-1: 路径必须落在配置的 sync_root 内，杜绝任意文件写/读 (LFI)
+        sync_root = self.config.sync_root
+        if sync_root is None:
+            raise PermissionError(
+                "sync_root not configured; refuse sync_artifact_file"
+            )
+        root_resolved = sync_root.resolve()
+        try:
+            target_resolved = path.resolve()
+            target_resolved.relative_to(root_resolved)
+        except ValueError as e:
+            logger.warning(
+                "sync path %s escapes sync_root %s", file_path, sync_root
+            )
+            raise PermissionError(
+                f"file_path must be within sync_root: {file_path}"
+            ) from e
         if direction == "artifact_to_code":
             version = self.get_version_content(artifact_id)
             if version is None:
@@ -1547,5 +1695,15 @@ class ArtifactEngine:
         }
 
     def close(self) -> None:
+        # A-4: 优雅停机——先 flush share access 缓冲防计数丢失，再通知 EventBus 关流
+        # 让 SSE handler 退出，最后关 storage，避免线程悬在已关闭 storage handle 上
+        try:
+            self.shutdown_share_buffer()
+        except Exception:
+            logger.exception("share buffer flush error during close")
+        try:
+            self.event_bus.shutdown()
+        except Exception:
+            logger.exception("EventBus shutdown error during close")
         self.storage.close()
         logger.info("ArtifactEngine closed")

@@ -1,10 +1,10 @@
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
 
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.rpc.errors import RpcError
-from fusion_artifacts_engine.rpc.event_bus import event_bus
+from fusion_artifacts_engine.rpc.errors import NotFoundError, RpcError
 from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -24,14 +24,22 @@ class RPCHandler:
     def _publish(self, event_type: str, aid: str | None, **extra) -> None:
         # SSE ?kind= 过滤按 artifact kind (app/code/...) 而非事件名。
         # 每个 artifact 事件都必须携带 kind，否则订阅者按 kind 过滤时静默丢弃。
-        kind = None
-        if aid:
+        # L-3: 调用方可经 extra 传 kind= 覆盖（删除事件用删除前 kind，避免硬删后读 None）
+        # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
+        # E10: kind 经覆盖 + 回查仍为 None 时记 warning，避免静默丢事件难排查
+        kind = extra.get("kind")
+        if kind is None and aid:
             artifact = self.engine.storage.get_artifact(aid)
             if artifact is not None:
                 kind = artifact.kind
+        if kind is None:
+            logger.warning(
+                "publish %s for artifact %s has no kind (SSE kind-filter will drop)",
+                event_type, aid,
+            )
         payload = {"event_type": event_type, "kind": kind}
         payload.update(extra)
-        event_bus.publish(event_type, payload)
+        self.engine.event_bus.publish(event_type, payload)
 
     def _build_methods(self) -> dict:
         return {
@@ -123,7 +131,9 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
+        self._publish(
+            "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
+        )
         return {
             "artifact": artifact.model_dump(),
             "version": version.model_dump(),
@@ -135,7 +145,7 @@ class RPCHandler:
             params["artifact_id"], project_id=params.get("project_id")
         )
         if artifact is None:
-            raise ValueError(f"Artifact not found: {params['artifact_id']}")
+            raise NotFoundError(f"Artifact not found: {params['artifact_id']}")
         return {"artifact": artifact.model_dump()}
 
     async def _get_content(self, params: dict) -> dict:
@@ -149,7 +159,7 @@ class RPCHandler:
             version = None
         result = self.engine.get_version_content(params["artifact_id"], version)
         if result is None:
-            raise ValueError("Version not found")
+            raise NotFoundError("Version not found")
         return {
             "content": result.content,
             "token_count": result.token_count,
@@ -166,12 +176,22 @@ class RPCHandler:
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
     async def _delete(self, params: dict) -> dict:
+        aid = params["artifact_id"]
+        # L-3: 删除前缓存 kind，硬删后 get_artifact 返回 None 导致 kind-filter SSE 丢事件
+        pre_artifact = self.engine.storage.get_artifact(aid)
+        pre_kind = pre_artifact.kind if pre_artifact is not None else None
         ok = self.engine.delete_artifact(
-            params["artifact_id"],
+            aid,
             params.get("soft_delete", True),
             project_id=params.get("project_id"),
         )
-        self._publish("artifact.deleted", params["artifact_id"], artifact_id=params["artifact_id"])
+        # L-4: 仅删除成功才发 delete 事件，否则对未删 artifact 发虚假事件
+        if ok:
+            self._publish(
+                "artifact.deleted", aid, artifact_id=aid, kind=pre_kind
+            )
+        else:
+            logger.warning("artifact.delete no-op for %s, skip publish", aid)
         return {"ok": ok}
 
     async def _update(self, params: dict) -> dict:
@@ -179,6 +199,10 @@ class RPCHandler:
         source = params.get("source", "manual")
         if source not in valid_sources:
             raise ValueError(f"Invalid source, must be one of {valid_sources}")
+        # P-6: 经 to_thread 读 kind，不阻塞 event loop；变更前缓存供 _publish 复用
+        pre = await asyncio.to_thread(
+            self.engine.storage.get_artifact, params["artifact_id"]
+        )
         version, ref_text = await self.engine.create_version(
             params["artifact_id"],
             params["content"],
@@ -186,11 +210,21 @@ class RPCHandler:
             source=source,
             expected_content_hash=params.get("expected_content_hash"),
         )
-        self._publish("artifact.updated", params["artifact_id"], artifact_id=params["artifact_id"])
+        self._publish(
+            "artifact.updated",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            kind=pre.kind if pre is not None else None,
+        )
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
-        versions = self.engine.list_versions(params["artifact_id"])
+        versions = self.engine.list_versions(
+            params["artifact_id"],
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 200)),
+            include_content=bool(params.get("include_content", True)),
+        )
         return {"versions": [v.model_dump() for v in versions]}
 
     async def _version_rollback(self, params: dict) -> dict:
@@ -208,7 +242,7 @@ class RPCHandler:
     async def _export(self, params: dict) -> dict:
         artifact = self.engine.get_artifact(params["artifact_id"])
         if artifact is None:
-            raise ValueError("Artifact not found")
+            raise NotFoundError("Artifact not found")
         include_versions = params.get("include_versions", False)
         data = {"artifact": artifact.model_dump()}
         if include_versions:
@@ -273,7 +307,9 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=artifact_data.get("metadata"),
         )
-        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
+        self._publish(
+            "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
+        )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
     async def _export_code(self, params: dict) -> dict:
@@ -289,7 +325,9 @@ class RPCHandler:
             name=params.get("name", ""),
             metadata=params.get("metadata"),
         )
-        self._publish("artifact.created", artifact.id, artifact_id=artifact.id)
+        self._publish(
+            "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
+        )
         return {
             "artifact": artifact.model_dump(),
             "version": version.model_dump(),
@@ -364,7 +402,7 @@ class RPCHandler:
         )
         if dup is None:
             raise ValueError("Failed to duplicate artifact")
-        self._publish("artifact.created", dup.id, artifact_id=dup.id)
+        self._publish("artifact.created", dup.id, artifact_id=dup.id, kind=dup.kind)
         return {"artifact": dup.model_dump()}
 
     async def _list_all(self, params: dict) -> dict:
@@ -416,16 +454,25 @@ class RPCHandler:
         return {"version": snapshot.model_dump()}
 
     async def _list_snapshots(self, params: dict) -> dict:
-        snapshots = self.engine.list_snapshots(params["artifact_id"])
+        snapshots = self.engine.list_snapshots(
+            params["artifact_id"],
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 200)),
+            include_content=bool(params.get("include_content", True)),
+        )
         return {"snapshots": [s.model_dump() for s in snapshots]}
 
     # ── P1: share ──────────────────────────────────────────────
 
     async def _create_share(self, params: dict) -> dict:
+        max_accesses = params.get("max_accesses")
+        if max_accesses is not None:
+            max_accesses = int(max_accesses)
         share = self.engine.create_share(
             params["artifact_id"],
             created_by=params.get("created_by"),
             expires_at=params.get("expires_at"),
+            max_accesses=max_accesses,
         )
         self._publish(
             "artifact.shared",
@@ -438,7 +485,7 @@ class RPCHandler:
     async def _get_shared(self, params: dict) -> dict:
         result = self.engine.get_shared_artifact(params["share_id"])
         if result is None:
-            raise ValueError("Shared artifact not found or access denied")
+            raise NotFoundError("Shared artifact not found or access denied")
         return result
 
     async def _revoke_share(self, params: dict) -> dict:
@@ -512,7 +559,9 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _list_tags(self, params: dict) -> dict:
-        tags = self.engine.list_tags()
+        # L-7: 按 scope 过滤；不传则返回全部
+        scope = params.get("scope")
+        tags = self.engine.list_tags(scope)
         return {"tags": [t.model_dump() for t in tags]}
 
     async def _list_artifact_tags(self, params: dict) -> dict:
@@ -600,6 +649,8 @@ class RPCHandler:
             source_module=params["source_module"],
             workspace_id=params.get("workspace_id"),
             workflow_run_id=params.get("workflow_run_id"),
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 200)),
         )
         return {"artifacts": [a.model_dump() for a in artifacts]}
 
@@ -610,6 +661,10 @@ class RPCHandler:
         operation = params.get("operation", "")
         if operation not in valid_ops:
             raise ValueError(f"Invalid operation, must be one of {valid_ops}")
+        # P-6: 经 to_thread 读 kind，不阻塞 event loop；变更前缓存供 _publish 复用
+        pre = await asyncio.to_thread(
+            self.engine.storage.get_artifact, params["artifact_id"]
+        )
         version, patch_info = await self.engine.patch_artifact(
             artifact_id=params["artifact_id"],
             operation=operation,
@@ -617,7 +672,12 @@ class RPCHandler:
             content=params.get("content", ""),
             expected_version=params.get("expected_version"),
         )
-        self._publish("artifact.patched", params["artifact_id"], artifact_id=params["artifact_id"])
+        self._publish(
+            "artifact.patched",
+            params["artifact_id"],
+            artifact_id=params["artifact_id"],
+            kind=pre.kind if pre is not None else None,
+        )
         return {"version": version.model_dump(), "patch_info": patch_info}
 
     async def _load(self, params: dict) -> dict:
@@ -668,15 +728,19 @@ class RPCHandler:
             project_id=params.get("project_id"),
         )
         if result.get("created"):
+            rid = result["artifact"]["id"]
+            rkind = result["artifact"].get("kind")
             self._publish(
                 "artifact.created",
-                result["artifact"]["id"],
-                artifact_id=result["artifact"]["id"],
+                rid,
+                artifact_id=rid,
+                kind=rkind,
             )
             self._publish(
                 "artifact.rendered",
-                result["artifact"]["id"],
-                artifact_id=result["artifact"]["id"],
+                rid,
+                artifact_id=rid,
+                kind=rkind,
             )
         return result
 

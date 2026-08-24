@@ -35,11 +35,37 @@ def _remove_comments(content: str, artifact_type: str) -> str:
     lines = content.split("\n")
     out = []
     if artifact_type == "code":
-        for line in lines:
+        # L-17: 仅剥整行 # 注释，保留 #! shebang 与 # -*- coding -*- 声明；
+        # 跳过三引号字符串内部以 # 开头的行，避免损坏 Python 多行字符串
+        in_triple = False
+        triple_delims = ('"""', "'''")
+        for idx, line in enumerate(lines):
             stripped = line.lstrip()
-            if stripped.startswith("#"):
-                continue
-            out.append(line)
+            for delim in triple_delims:
+                count = line.count(delim)
+                if count and not in_triple:
+                    if count % 2 == 1:
+                        in_triple = True
+                    out.append(line)
+                    break
+                elif count and in_triple:
+                    if count % 2 == 1:
+                        in_triple = False
+                    out.append(line)
+                    break
+            else:
+                if in_triple:
+                    out.append(line)
+                    continue
+                if idx == 0 and stripped.startswith("#!"):
+                    out.append(line)
+                    continue
+                if stripped.startswith(("# -*-", "#coding")):
+                    out.append(line)
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                out.append(line)
     elif artifact_type == "markdown":
         for line in lines:
             stripped = line.lstrip()
@@ -99,9 +125,11 @@ def _truncate_sections(content: str, artifact_type: str, token_budget: int) -> s
 
     if not sections:
         truncated = "\n".join(lines)
-        if count_tokens(truncated) <= token_budget:
+        # P-7: 复用 token 计数，避免回退路径两次全量 tiktoken encode
+        total = count_tokens(truncated)
+        if total <= token_budget:
             return truncated
-        ratio = token_budget / max(1, count_tokens(truncated))
+        ratio = token_budget / max(1, total)
         cut = int(len(lines) * ratio)
         return "\n".join(lines[:cut])
 

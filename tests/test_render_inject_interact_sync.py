@@ -7,7 +7,7 @@ from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 @pytest.fixture
 def engine_with_tmp(tmp_path):
-    cfg = ArtifactEngineConfig(storage_root=str(tmp_path))
+    cfg = ArtifactEngineConfig(storage_root=str(tmp_path), sync_root=str(tmp_path))
     return ArtifactEngine(config=cfg)
 
 

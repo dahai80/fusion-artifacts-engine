@@ -2,6 +2,7 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 from pathlib import Path
 
 from fusion_artifacts_engine.config import load_config
@@ -45,21 +46,34 @@ def main():
         engine = ArtifactEngine(config)
         server = ArtifactRPCServer(engine, host=host, port=port)
 
+        # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
+        # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
+        # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
+        stop_event = threading.Event()
+
         def shutdown(sig, frame):
             logger.info("Received signal %s, shutting down", sig)
-            server.stop()
-            engine.close()
-            sys.exit(0)
+            stop_event.set()
 
-        signal.signal(signal.SIGINT, shutdown)
-        signal.signal(signal.SIGTERM, shutdown)
+        # 信号只能在主线程注册；非主线程（如测试里线程跑 main）跳过，由 stop_event 自然退出
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGINT, shutdown)
+            signal.signal(signal.SIGTERM, shutdown)
+        else:
+            logger.warning(
+                "Not main thread, skip signal handlers (SIGINT/SIGTERM won't stop daemon)"
+            )
 
         logger.info("fusion-artifacts-engine starting...")
+        server.start_async()
         try:
-            server.start()
+            stop_event.wait()
         except KeyboardInterrupt:
+            pass
+        finally:
             server.stop()
             engine.close()
+            logger.info("fusion-artifacts-engine stopped")
 
     elif args.command == "status":
         import os
@@ -73,6 +87,7 @@ def main():
         api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
         if api_key:
             headers["X-API-Key"] = api_key
+        healthy = False
         try:
             resp = httpx.post(
                 f"http://{host}:{port}",
@@ -82,11 +97,14 @@ def main():
             )
             data = resp.json()
             if "result" in data and data["result"].get("pong"):
+                healthy = True
                 print(f"Running: version={data['result'].get('version', 'unknown')}")
             else:
                 print("Not running or error")
         except Exception as e:  # noqa: BLE001
             print(f"Not running: {e}")
+        # L-20: 健康检查退出码——0 健康，1 未运行；start.sh 依赖 $? 判定
+        sys.exit(0 if healthy else 1)
 
     elif args.command == "version":
         print(f"fusion-artifacts-engine {get_package_version()}")

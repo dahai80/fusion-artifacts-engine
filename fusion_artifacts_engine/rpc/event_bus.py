@@ -4,16 +4,33 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+EVENT_DROPPED = "__dropped__"
+EVENT_CLOSED = "__closed__"
+_DEFAULT_MAX_SUBSCRIBERS = 64
+
 
 class EventBus:
-    def __init__(self, maxsize: int = 256):
+    def __init__(self, maxsize: int = 256, max_subscribers: int = _DEFAULT_MAX_SUBSCRIBERS):
         self._subscribers: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._maxsize = maxsize
+        self._max_subscribers = max_subscribers
+        self._closed = False
 
     def subscribe(self) -> queue.Queue:
+        # C-7: 订阅者上限，防无界增长耗内存
         q = queue.Queue(maxsize=self._maxsize)
         with self._lock:
+            if self._closed:
+                q.put_nowait({"event_type": EVENT_CLOSED})
+                return q
+            if len(self._subscribers) >= self._max_subscribers:
+                logger.warning(
+                    "EventBus subscribe rejected: %d >= max %d",
+                    len(self._subscribers), self._max_subscribers,
+                )
+                q.put_nowait({"event_type": EVENT_DROPPED})
+                return q
             self._subscribers.append(q)
         logger.info("EventBus subscriber added, total=%d", len(self._subscribers))
         return q
@@ -25,19 +42,43 @@ class EventBus:
         logger.info("EventBus subscriber removed, total=%d", len(self._subscribers))
 
     def publish(self, event_type: str, data: dict) -> None:
+        # P-5: 锁内只快照订阅者列表，释放锁后再 put，避免 put 阻塞期间持锁
         with self._lock:
-            dead = []
-            for q in self._subscribers:
+            if self._closed:
+                return
+            snapshot = list(self._subscribers)
+        dead = []
+        for q in snapshot:
+            try:
+                q.put_nowait({"event_type": event_type, **data})
+            except queue.Full:
+                # A-3: 队列满删除前先投递 __dropped__ 信号，让 SSE handler 关流促客户端重连
                 try:
-                    q.put_nowait({"event_type": event_type, **data})
+                    q.put_nowait({"event_type": EVENT_DROPPED})
                 except queue.Full:
-                    dead.append(q)
-            for q in dead:
-                self._subscribers.remove(q)
-                logger.warning(
-                    "EventBus dropped full subscriber, remaining=%d",
-                    len(self._subscribers),
-                )
+                    pass
+                dead.append(q)
+        if dead:
+            with self._lock:
+                for q in dead:
+                    if q in self._subscribers:
+                        self._subscribers.remove(q)
+            logger.warning(
+                "EventBus dropped %d full subscriber(s), remaining=%d",
+                len(dead), len(self._subscribers),
+            )
 
-
-event_bus = EventBus()
+    def shutdown(self) -> None:
+        # A-4: 优雅停机——向所有订阅者投递 __closed__ 信号，SSE handler 收到即关流
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            snapshot = list(self._subscribers)
+            self._subscribers.clear()
+        for q in snapshot:
+            try:
+                q.put_nowait({"event_type": EVENT_CLOSED})
+            except queue.Full:
+                pass
+        logger.info("EventBus shutdown: notified %d subscriber(s)", len(snapshot))

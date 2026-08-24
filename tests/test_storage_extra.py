@@ -356,7 +356,7 @@ def test_share_crud(storage):
         share_id="shr1",
         artifact_id="art1",
         created_by="user1",
-        created_at="2026-01-01",
+        created_at=time.time(),
         expires_at=None,
         revoked=False,
         access_count=0,
@@ -402,7 +402,7 @@ def test_folder_crud(storage):
         name="Test",
         parent_id=None,
         project_id="p1",
-        created_at="2026-01-01",
+        created_at=time.time(),
     )
     storage.save_folder(folder)
     got = storage.get_folder("f1")
@@ -487,7 +487,7 @@ def test_event_crud(storage):
         session_id="s1",
         event_type="test",
         payload={"k": "v"},
-        created_at="2026-01-01T00:00:00",
+        created_at=time.time(),
     )
     storage.save_event(event)
     _events, total = storage.list_events(session_id="s1")
@@ -570,13 +570,13 @@ def test_list_artifacts_include_deleted(storage):
 
 
 def test_list_all_owner_filter(storage):
-    art = _make_artifact(owner_user_id="u1", ownership_type="owned")
+    art = _make_artifact(owner_user_id="u1", ownership_type="project")
     ver = _make_version()
     storage.save_artifact_and_version(art, ver)
     _arts, total = storage.list_all_artifacts(filters={"owner_user_id": "u1"})
     assert total >= 1
 
-    _arts2, total2 = storage.list_all_artifacts(filters={"ownership_type": "owned"})
+    _arts2, total2 = storage.list_all_artifacts(filters={"ownership_type": "project"})
     assert total2 >= 1
 
 
@@ -597,7 +597,7 @@ def test_list_all_folder_filter(storage):
         name="Test",
         parent_id=None,
         project_id="p1",
-        created_at="2026-01-01",
+        created_at=time.time(),
     )
     storage.save_folder(folder)
     art = _make_artifact(folder_id="f1")
@@ -637,5 +637,6 @@ def test_content_file_missing(storage):
     content_dir = storage.content_dir / "art1"
     for f in content_dir.iterdir():
         f.unlink()
-    v = storage.get_version("art1", 1)
-    assert v.content == ""
+    # L-16: 内容文件缺失是数据损坏，storage 上抛而非伪造空版本
+    with pytest.raises(FileNotFoundError):
+        storage.get_version("art1", 1)
