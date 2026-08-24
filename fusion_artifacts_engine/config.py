@@ -24,7 +24,7 @@ def _default_user_config_path() -> Path:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             data = yaml.safe_load(f)
         logger.info("Loaded config from %s", path)
         return data or {}
@@ -49,12 +49,14 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         "server": {
             "host": ("server_host", None),
             "port": ("server_port", None),
+            "max_workers": ("server_max_workers", None),
         },
         "storage": {
             "root": ("storage_root", _expanduser_path),
             "db_name": ("db_name", None),
             "small_content_limit": ("small_content_limit", None),
             "sync_root": ("sync_root", _expanduser_path),
+            "disk_space_warning_pct": ("disk_space_warning_pct", None),
         },
         "thresholds": {
             "auto_create_lines": ("auto_create_threshold_lines", None),
@@ -62,6 +64,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         },
         "artifact": {
             "id_prefix": ("artifact_id_prefix", None),
+            "max_versions_per_artifact": ("max_versions_per_artifact", None),
         },
         "security": {
             "api_key": ("api_key", None),
@@ -71,6 +74,9 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         },
         "sse": {
             "heartbeat_interval": ("sse_heartbeat_interval", None),
+        },
+        "cluster": {
+            "node_id": ("cluster_node_id", None),
         },
     }
     flat: dict[str, Any] = {}
@@ -83,7 +89,8 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             if yaml_key not in section_data:
                 continue
             val = section_data[yaml_key]
-            if field_name == "sync_root" and not val:
+            # 空字符串归一为 None：sync_root（禁用 sync）/ cluster_node_id（单机）
+            if field_name in ("sync_root", "cluster_node_id") and not val:
                 flat[field_name] = None
                 continue
             if converter is not None:
@@ -105,6 +112,8 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         # L-23: env STORAGE_ROOT 也展开 ~
         "FUSION_ARTIFACTS_STORAGE_ROOT": ("storage_root", _expanduser_path),
         "FUSION_ARTIFACTS_API_KEY": ("api_key", str),
+        # H8: 多节点 ID——多节点部署时区分本节点
+        "FUSION_ARTIFACTS_NODE_ID": ("cluster_node_id", str),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -139,6 +148,8 @@ class ArtifactEngineConfig(BaseModel):
     artifact_id_prefix: str = Field(default="art_")
     server_host: str = Field(default="127.0.0.1")
     server_port: int = Field(default=11451)
+    # R1: HTTP 线程池上限，0=不限（回退 ThreadingMixIn 默认）。防 SSE/并发耗尽线程
+    server_max_workers: int = Field(default=64)
     recycle_retention_days: int = Field(default=7)
     # L-6: share expires_at 最大 TTL（天），0=不限；过去日期一律拒绝
     share_max_ttl_days: int = Field(default=90)
@@ -149,6 +160,12 @@ class ArtifactEngineConfig(BaseModel):
     context_budget_default: int = Field(default=200000)
     # C-1: sync_artifact_file 文件读写根目录，路径必须在其下
     sync_root: Path | None = Field(default=None)
+    # R9: 单 artifact 版本上限，0=不限；超限淘汰最旧非快照版本（防磁盘无限增长）
+    max_versions_per_artifact: int = Field(default=100)
+    # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning
+    disk_space_warning_pct: int = Field(default=90)
+    # H8: 多节点 ID。单机默认 None；多节点部署经 FUSION_ARTIFACTS_NODE_ID 或 cluster.node_id 配置
+    cluster_node_id: str | None = Field(default=None)
 
     @property
     def db_path(self) -> Path:

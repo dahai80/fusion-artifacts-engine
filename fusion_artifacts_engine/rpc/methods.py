@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.rpc.errors import RpcError
+from fusion_artifacts_engine.rpc.errors import NotFoundError, RpcError
 from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -26,11 +26,17 @@ class RPCHandler:
         # 每个 artifact 事件都必须携带 kind，否则订阅者按 kind 过滤时静默丢弃。
         # L-3: 调用方可经 extra 传 kind= 覆盖（删除事件用删除前 kind，避免硬删后读 None）
         # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
+        # E10: kind 经覆盖 + 回查仍为 None 时记 warning，避免静默丢事件难排查
         kind = extra.get("kind")
         if kind is None and aid:
             artifact = self.engine.storage.get_artifact(aid)
             if artifact is not None:
                 kind = artifact.kind
+        if kind is None:
+            logger.warning(
+                "publish %s for artifact %s has no kind (SSE kind-filter will drop)",
+                event_type, aid,
+            )
         payload = {"event_type": event_type, "kind": kind}
         payload.update(extra)
         self.engine.event_bus.publish(event_type, payload)
@@ -139,7 +145,7 @@ class RPCHandler:
             params["artifact_id"], project_id=params.get("project_id")
         )
         if artifact is None:
-            raise ValueError(f"Artifact not found: {params['artifact_id']}")
+            raise NotFoundError(f"Artifact not found: {params['artifact_id']}")
         return {"artifact": artifact.model_dump()}
 
     async def _get_content(self, params: dict) -> dict:
@@ -153,7 +159,7 @@ class RPCHandler:
             version = None
         result = self.engine.get_version_content(params["artifact_id"], version)
         if result is None:
-            raise ValueError("Version not found")
+            raise NotFoundError("Version not found")
         return {
             "content": result.content,
             "token_count": result.token_count,
@@ -236,7 +242,7 @@ class RPCHandler:
     async def _export(self, params: dict) -> dict:
         artifact = self.engine.get_artifact(params["artifact_id"])
         if artifact is None:
-            raise ValueError("Artifact not found")
+            raise NotFoundError("Artifact not found")
         include_versions = params.get("include_versions", False)
         data = {"artifact": artifact.model_dump()}
         if include_versions:
@@ -459,10 +465,14 @@ class RPCHandler:
     # ── P1: share ──────────────────────────────────────────────
 
     async def _create_share(self, params: dict) -> dict:
+        max_accesses = params.get("max_accesses")
+        if max_accesses is not None:
+            max_accesses = int(max_accesses)
         share = self.engine.create_share(
             params["artifact_id"],
             created_by=params.get("created_by"),
             expires_at=params.get("expires_at"),
+            max_accesses=max_accesses,
         )
         self._publish(
             "artifact.shared",
@@ -475,7 +485,7 @@ class RPCHandler:
     async def _get_shared(self, params: dict) -> dict:
         result = self.engine.get_shared_artifact(params["share_id"])
         if result is None:
-            raise ValueError("Shared artifact not found or access denied")
+            raise NotFoundError("Shared artifact not found or access denied")
         return result
 
     async def _revoke_share(self, params: dict) -> dict:
@@ -718,15 +728,19 @@ class RPCHandler:
             project_id=params.get("project_id"),
         )
         if result.get("created"):
+            rid = result["artifact"]["id"]
+            rkind = result["artifact"].get("kind")
             self._publish(
                 "artifact.created",
-                result["artifact"]["id"],
-                artifact_id=result["artifact"]["id"],
+                rid,
+                artifact_id=rid,
+                kind=rkind,
             )
             self._publish(
                 "artifact.rendered",
-                result["artifact"]["id"],
-                artifact_id=result["artifact"]["id"],
+                rid,
+                artifact_id=rid,
+                kind=rkind,
             )
         return result
 

@@ -90,6 +90,7 @@ def test_share_rest_expired_gone(share_server):
     )["result"]["artifact"]["id"]
     # L-6 后 create_share 拒绝过去日期；直接构造过期 share 测试读取路径 fail-closed
     import uuid
+
     from fusion_artifacts_engine.models import ArtifactShare
     past_iso = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     share_id = f"shr_{uuid.uuid4().hex[:12]}"
@@ -98,7 +99,7 @@ def test_share_rest_expired_gone(share_server):
             share_id=share_id,
             artifact_id=art_id,
             created_by="u1",
-            created_at=datetime.now(UTC).isoformat(),
+            created_at=time.time(),
             expires_at=past_iso,
         )
     )

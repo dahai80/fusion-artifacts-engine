@@ -356,7 +356,7 @@ def test_share_crud(storage):
         share_id="shr1",
         artifact_id="art1",
         created_by="user1",
-        created_at="2026-01-01",
+        created_at=time.time(),
         expires_at=None,
         revoked=False,
         access_count=0,
@@ -402,7 +402,7 @@ def test_folder_crud(storage):
         name="Test",
         parent_id=None,
         project_id="p1",
-        created_at="2026-01-01",
+        created_at=time.time(),
     )
     storage.save_folder(folder)
     got = storage.get_folder("f1")
@@ -487,7 +487,7 @@ def test_event_crud(storage):
         session_id="s1",
         event_type="test",
         payload={"k": "v"},
-        created_at="2026-01-01T00:00:00",
+        created_at=time.time(),
     )
     storage.save_event(event)
     _events, total = storage.list_events(session_id="s1")
@@ -597,7 +597,7 @@ def test_list_all_folder_filter(storage):
         name="Test",
         parent_id=None,
         project_id="p1",
-        created_at="2026-01-01",
+        created_at=time.time(),
     )
     storage.save_folder(folder)
     art = _make_artifact(folder_id="f1")

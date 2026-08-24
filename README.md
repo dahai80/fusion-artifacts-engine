@@ -26,19 +26,30 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
-## Security (v0.3.8 audit hardening)
+## Security (v0.3.9 audit hardening)
 
-v0.3.8 resolves all 59 findings from the 0824 security audit (14 CRITICAL / 23 LOGIC / 10 ARCH / 7 PERF / 5 MAINT), 367 tests green. Highlights:
+v0.3.8 resolved all 59 findings from the 0824 security audit; **v0.3.9 completes the remaining 28 P0-P3 audit findings** (H1-H8 architecture, R1-R9 runtime, E1-E11 engineering) including 4 large refactors — write-conn pooling, event-loop thread pool, engine split, multi-node storage abstraction. 381 tests green. v0.3.9 highlights:
+
+- **R9 version-limit eviction**: `max_versions_per_artifact` enforced — evicts oldest non-snapshot versions past the limit (default 100, 0=unlimited). Fixed a transaction-leak regression where eviction DELETE left an implicit txn open.
+- **R2 share write amplification**: public share access is memory-buffered (5s/50-count flush), no write-lock per GET; `max_accesses` returns `410 Gone` once exhausted.
+- **H2 two-phase file write**: large content writes go to `.tmp_*` outside the transaction, committed then renamed; `gc_orphan_files()` cleans orphans + residue on rollback.
+- **R1 thread cap**: `server_max_workers` (BoundedSemaphore, default 64) — over-cap connections get `503`, no unbounded thread spawn.
+- **R8 error codes**: JSON-RPC custom range `-32001` NotFound / `-32002` Conflict (retryable) / `-32003` ResourceLimit (retryable) / `-32004` BusinessRule, mapped to REST HTTP codes.
+- **H5 timeout tiers**: per-method timeout (ping 5s, render/auto_compact 120s, default 30s); large-body (≥2MB) auto-escalates to 120s.
+- **H6 token cache**: LRU `count_tokens` cache (blake2b-keyed, max 2048, skip <256B).
+- **H3/H7 share render**: `lxml` Cleaner (real HTML parser) replaces regex sanitization; strict CSP on share iframe.
+- **H8 StorageDriver ABC**: expanded 8→46 abstract methods — multi-node/Postgres/object-storage swap implements the full ABC, engine untouched.
+- **E7 read connection pool**: read-only connection pool (max 4) replaces per-call connect/close.
+- **R5 migration gating**: `applied_migrations` registry — migrations run once, idempotent on restart.
+- **E9 lint gate**: `[tool.ruff]` config; `ruff check .` clean.
+- **E11 concurrency/fault tests**: 14 new tests cover H2 orphan GC, R9 eviction, R2 buffer, H6 cache, R8 codes, H8 ABC contract, R1 thread cap, E7 pool reuse, R5 gating.
+
+v0.3.8 retained highlights:
 
 - **Auth fail-closed**: `allow_no_auth` defaults `false`; no configured key rejects requests (was fail-open).
 - **Path confinement**: `sync_root` bounds file sync; content paths validated `is_relative_to`; extension whitelist.
-- **XSS**: stdlib HTML sanitize + sandboxed share iframe + strict CSP.
 - **Atomic versioning**: `create_version_atomic` (BEGIN IMMEDIATE) closes the optimistic-lock race.
 - **EventBus**: per-engine instance (no cross-engine bleed), subscriber cap, drop/closed SSE signals.
-- **Tag scoping**: `scope` column isolates tags per session/project.
-- **Clean shutdown**: `start_async` + `threading.Event` — no signal deadlock.
-- **Pagination**: `version_list`/snapshots/by_source now paginated (cap 500).
-- **Linear section bounds**: O(n²) → O(n) for `load_artifact` section indexing.
 
 See `audit/fusion-artifacts-audit-0824.md` §9 for the per-finding fix map.
 
@@ -265,40 +276,32 @@ RESTful CRUD API alongside JSON-RPC:
 
 **GET** endpoints:
 ```bash
-GET /api/v1/artifacts          # List artifacts (supports query params: created_by, since, until, kind, type, sort, page, page_size)
-GET /api/v1/external?source_module=fusion-mlx&workspace_id=ws-001  # List artifacts by source module
-GET /api/v1/folders            # List folders
-GET /api/v1/tags               # List tags
-GET /api/v1/events             # List events
-GET /api/v1/recycle            # List recycle bin
-GET /api/v1/share/{share_id}   # Public share access (no auth; 410 Gone if revoked/expired)
+GET /api/v1/artifacts?session_id=sess-001            # List artifacts in a session (also: include_deleted, project_id, metadata_filter, filters)
+GET /api/v1/artifacts?page=1&page_size=20&sort=updated_at  # List all artifacts (no session_id); supports filters JSON
+GET /api/v1/artifacts/{artifact_id}                  # Get artifact metadata
+GET /api/v1/artifacts/{artifact_id}/versions         # List artifact versions
+GET /api/v1/artifacts/{artifact_id}/versions/{num}   # Get a specific version's content
+GET /api/v1/share/{share_id}                         # Public share access (no auth; 410 Gone if revoked/expired/exhausted)
 ```
 
 Query parameters for `GET /api/v1/artifacts`:
-- `created_by` — filter by owner_user_id
-- `since` / `until` — filter by created_at timestamp (Unix epoch)
-- `kind` — filter by artifact kind (app/code/document/game/tool/template)
-- `type` — filter by artifact type (code/markdown/html/react/data)
+- `session_id` — scope list to a session; omitted → list all artifacts (paginated)
+- `include_deleted` — include recycle-bin artifacts (true/false)
+- `project_id` — scope to a project KB
+- `metadata_filter` / `filters` — JSON query object passed to storage filtering
+- `page` / `page_size` — pagination (list-all mode)
 - `sort` — sort field (updated_at, created_at, name, starred)
-- `page` / `page_size` — pagination
 
-**POST** endpoints (action-based):
+**POST** endpoints:
 ```bash
-POST /api/v1/rename            # {"artifact_id": "...", "name": "..."}
-POST /api/v1/star              # {"artifact_id": "...", "starred": true}
-POST /api/v1/pin               # {"artifact_id": "...", "pinned": true}
-POST /api/v1/duplicate         # {"artifact_id": "..."}
-POST /api/v1/restore           # {"artifact_id": "..."}
-POST /api/v1/move-to-kb        # {"artifact_id": "..."}
-POST /api/v1/move-to-folder    # {"artifact_id": "...", "folder_id": "..."}
-POST /api/v1/snapshot          # {"artifact_id": "...", "label": "..."}
-POST /api/v1/share             # {"artifact_id": "...", "max_accesses": 10}
-POST /api/v1/tags              # {"artifact_id": "...", "tag_name": "..."}
-POST /api/v1/folders           # {"name": "...", "parent_id": "..."}
-POST /api/v1/events            # {"artifact_id": "...", "event_type": "..."}
-POST /api/v1/purge             # {}
-POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id": "ws-001", "name": "...", "type": "code", "content": "..."}
+POST /api/v1/artifacts/create    # {"session_id": "...", "name": "...", "artifact_type": "code", "content": "..."}  → 201
+POST /api/v1/artifacts/{id}      # {"action": "delete"} → delete; otherwise → artifact.update
 ```
+
+All other mutations (rename, star, pin, duplicate, restore, move-to-kb, move-to-folder,
+snapshot, share creation, tags, folders, events, purge, external-source create) are
+**JSON-RPC only** — the REST surface intentionally covers artifact CRUD + public share;
+see the method table above for the JSON-RPC method names (e.g. `artifact.create_share`).
 
 ### SSE Events Stream (P4)
 
@@ -401,6 +404,7 @@ asyncio.run(main())
 
 **ArtifactShare** — share links with access control:
 - `share_id` (shr_*), `max_accesses`, `access_count`, `expires_at` (ISO datetime; expiry compared via timezone-aware parse, not string compare), `is_revoked`
+- Access control enforced on public GET: returns `410 Gone` once `access_count` (persisted + in-memory buffer) reaches `max_accesses`. Public access is buffered in memory and flushed every 5s / 50 counts to avoid write-lock contention (R2); `max_accesses=None` means unlimited.
 
 **ArtifactFolder** — hierarchical artifact organization
 
@@ -435,7 +439,7 @@ artifact:
   id_prefix: "art_"
 
 security:
-  allow_no_auth: true
+  allow_no_auth: false   # fail-closed default; set true only for trusted single-user local use
   recycle_retention_days: 7
 
 sse:

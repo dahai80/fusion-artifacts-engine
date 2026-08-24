@@ -82,6 +82,3 @@ class EventBus:
             except queue.Full:
                 pass
         logger.info("EventBus shutdown: notified %d subscriber(s)", len(snapshot))
-
-
-event_bus = EventBus()

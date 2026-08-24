@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-artifacts-engine"
-version = "0.3.8"
+version = "0.3.9"
 description = "Artifact management middleware for Fusion architecture"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,7 +12,9 @@ dependencies = [
     "tiktoken>=0.7",
     "httpx>=0.27",
     "pyyaml>=6.0",  # config.py load_config() reads YAML config files
-    "markdown>=3.5",  # _render_share_html renders markdown share preview
+    "markdown>=3.5",  # render.py renders markdown share preview
+    "lxml>=5.0",  # H3: _sanitize_html 用真实 HTML 解析器替换正则
+    "lxml_html_clean>=0.4.0",  # H3: lxml 6.x 的 Cleaner 拆分为独立包
 ]
 
 [project.optional-dependencies]
@@ -37,3 +39,41 @@ fusion_artifacts_engine = ["default_config.yaml"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["tests/fixtures"]
+
+[tool.ruff.lint]
+# E9: 启用 lint 门禁。select 偏保守——只开与正确性/一致性强相关的规则族，
+# 避免一开全红、反而让人关掉门禁。BLE001（blind except）大量是顶层 fail-closed
+# 兜底，按需豁免而非全局禁用。
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused vars/imports)
+    "I",    # isort
+    "W",    # pycodestyle warnings
+    "UP",   # pyupgrade
+    "SIM",  # simplify
+    "PIE",  # misc
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",  # line too long — line-length 已设，但长字符串/URL 不强拆
+    "BLE001",  # blind except：顶层 fail-closed 兜底有意为之（engine/server 多处）
+    "RUF001",  # ambiguous unicode 字符串：CJK 标点正常，中文注释
+    "RUF002",  # ambiguous unicode 注释：同上
+    "RUF003",  # ambiguous unicode docstring：同上
+    "RUF012",  # mutable class default：dataclass/配置模式可接受
+    "RUF100",  # unused noqa：旧 noqa 兼容
+    "SIM105",  # try/except/pass → suppress：显式 close/shutdown 可读性优先
+    "SIM117",  # nested if 合并：可读性优先
+    "SIM118",  # key in dict.keys()：与旧代码风格一致
+    "RUF005",  # list concat → unpack：可读性偏好
+    "E402",  # module import not top：render.py/sqlite_storage 延迟导入有意为之
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试用例放宽：长行、盲异常（断言/注入故障）可接受
+"tests/*" = ["E501", "BLE001", "S101"]

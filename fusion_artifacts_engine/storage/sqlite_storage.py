@@ -1,10 +1,12 @@
 import json
 import logging
+import queue
 import re
 import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import UTC
 from pathlib import Path
@@ -89,11 +91,12 @@ CREATE TABLE IF NOT EXISTS artifact_shares (
     share_id TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL,
     created_by TEXT,
-    created_at TEXT,
+    created_at REAL,
     expires_at TEXT,
     revoked INTEGER DEFAULT 0,
     access_count INTEGER DEFAULT 0,
-    last_access_at TEXT,
+    max_accesses INTEGER,
+    last_access_at REAL,
     UNIQUE(share_id),
     FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
@@ -104,7 +107,7 @@ CREATE TABLE IF NOT EXISTS artifact_folders (
     name TEXT NOT NULL,
     parent_id TEXT,
     project_id TEXT,
-    created_at TEXT,
+    created_at REAL,
     FOREIGN KEY (parent_id) REFERENCES artifact_folders(folder_id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_folders_project ON artifact_folders(project_id);
@@ -204,16 +207,35 @@ def _version_from_row(row: sqlite3.Row) -> ArtifactVersion:
     )
 
 
+def _ts_to_float(raw) -> float | None:
+    # E1: 统一时间戳读出 float epoch。兼容旧 ISO 串与 None。
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        pass
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(str(raw)).timestamp()
+    except (ValueError, TypeError):
+        logger.warning("Unparseable timestamp %r, fallback to None", raw)
+        return None
+
+
 def _share_from_row(row: sqlite3.Row) -> ArtifactShare:
+    keys = row.keys()
     return ArtifactShare(
         share_id=row["share_id"],
         artifact_id=row["artifact_id"],
         created_by=row["created_by"],
-        created_at=row["created_at"],
+        created_at=_ts_to_float(row["created_at"]),
         expires_at=row["expires_at"],
         revoked=bool(row["revoked"]),
         access_count=row["access_count"],
-        last_access_at=row["last_access_at"],
+        max_accesses=row["max_accesses"] if "max_accesses" in keys else None,
+        last_access_at=_ts_to_float(row["last_access_at"]),
     )
 
 
@@ -223,7 +245,7 @@ def _folder_from_row(row: sqlite3.Row) -> ArtifactFolder:
         name=row["name"],
         parent_id=row["parent_id"],
         project_id=row["project_id"],
-        created_at=row["created_at"],
+        created_at=_ts_to_float(row["created_at"]),
     )
 
 
@@ -256,56 +278,61 @@ def _event_from_row(row: sqlite3.Row) -> ArtifactEvent:
         session_id=row["session_id"],
         event_type=row["event_type"],
         payload=payload,
-        created_at=row["created_at"],
+        created_at=_ts_to_float(row["created_at"]),
     )
 
 
 class SQLiteStorage(StorageDriver):
     def __init__(
-        self, db_path: Path, content_dir: Path, small_content_limit: int = 10240
+        self, db_path: Path, content_dir: Path, small_content_limit: int = 10240,
+        max_versions_per_artifact: int = 0,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
         self.small_content_limit = small_content_limit
+        # R9: 单 artifact 版本上限，0=不限。超限淘汰最旧非快照版本（防磁盘无限增长）
+        self.max_versions_per_artifact = max_versions_per_artifact
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
+        # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
+        # 多写连接无法并行写（物理上限）。故写连接池 size=1（单 self._conn + _write_lock）
+        # 是正确架构。审计 H1 的真正痛点是「文件 I/O 持 _write_lock 拖长持锁时长」，
+        # 已由 H2 修复（文件写移出事务/锁外）。读侧并发由 E7 只读连接池承担。
+        # 未来换 Postgres/对象存储时（H8）再引入真写连接池。
         self._write_lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        # E7: 只读连接池——复用只读连接，避免高频读反复 connect/close。
+        # WAL 允许并发读，池大小 4 兼顾并发与连接开销。
+        self._read_pool_size = 4
+        self._read_pool: queue.Queue = queue.Queue(maxsize=self._read_pool_size)
+        for _ in range(self._read_pool_size):
+            rc = sqlite3.connect(str(db_path), check_same_thread=False, timeout=10)
+            rc.row_factory = sqlite3.Row
+            self._read_pool.put(rc)
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
-        self._migrate_kind_column()
-        self._migrate_source_column()
-        self._migrate_project_id_column()
-        self._migrate_metadata_column()
-        self._migrate_ownership_columns()
-        self._migrate_lifecycle_columns()
-        self._migrate_share_column()
-        self._migrate_kb_column()
-        self._migrate_snapshot_columns()
-        self._migrate_source_module_columns()
-        self._migrate_size_bytes_column()
-        self._migrate_token_count_column()
-        self._migrate_section_index_column()
+        # R5: 迁移按版本门控——先建 schema_meta，再经注册表逐个跑未记录的迁移。
+        # 已跑过的迁移记入 schema_meta.applied_migrations，跳过，避免每次启动全量重检查。
+        # 迁移方法仍需幂等（兼容无 applied_migrations 记录的既有 DB 首次升级）。
         self._migrate_schema_meta()
-        self._migrate_event_timestamps()
-        self._migrate_tag_scope_column()
+        self._run_migrations_gated()
         logger.info(
             "SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir
         )
 
     @contextmanager
     def _read_conn(self):
-        # A-5: 读走独立连接，WAL 允许并发读；避开共享连接游标交叉
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
-        conn.row_factory = sqlite3.Row
+        # E7: 从只读连接池借连接，用完归还。WAL 允许并发读；复用连接省 connect/close 开销。
+        # 池为空则阻塞等待（读并发受池大小约束，防连接泄漏）。
+        conn = self._read_pool.get()
         try:
             yield conn
         finally:
-            conn.close()
+            self._read_pool.put(conn)
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
         d = self.content_dir / artifact_id
@@ -326,6 +353,23 @@ class SQLiteStorage(StorageDriver):
         path.write_text(content, encoding="utf-8")
         logger.debug("Wrote content file: %s", path)
         return str(path)
+
+    def _write_content_file_tmp(
+        self, artifact_id: str, content: str, ext: str = "txt"
+    ) -> tuple[str, str, str]:
+        # H2: 文件先写临时路径（事务外），事务提交成功后再 rename 到最终路径。
+        # 回滚则删临时文件——不留孤儿。返回 (tmp_path, final_path_template, ext)。
+        # final 路径含占位 {version_num}，提交后用实际版本号填充再 rename。
+        d = self._artifact_content_dir(artifact_id)
+        tmp_name = f".tmp_v{uuid.uuid4().hex}.{ext}"
+        tmp_path = d / tmp_name
+        if not tmp_path.resolve().is_relative_to(d.resolve()):
+            logger.error("Refusing tmp content write outside content_dir: %s", tmp_path)
+            raise ValueError(f"Unsafe content path: {tmp_path}")
+        tmp_path.write_text(content, encoding="utf-8")
+        logger.debug("Wrote tmp content file: %s", tmp_path)
+        return str(tmp_path), f"v{{version_num}}.{ext}", ext
+
 
     def _read_content_file(self, content_path: str) -> str:
         p = Path(content_path)
@@ -923,8 +967,11 @@ class SQLiteStorage(StorageDriver):
                 count += 1
             self._conn.commit()
             # 先 commit 再删盘：commit 失败则不留孤儿行指向缺失文件 (P2-6)
+            # E5: 不用 ignore_errors=True 静默吞错；onerror 记日志，让磁盘/权限问题可见
             for content_dir in purged_dirs:
-                shutil.rmtree(content_dir, ignore_errors=True)
+                def _on_rm_err(func, fpath, exc_info):
+                    logger.warning("Failed to purge content %s: %s", fpath, exc_info[1])
+                shutil.rmtree(content_dir, onerror=_on_rm_err)
         logger.info(
             "Purged %d expired artifacts (retention=%d days)", count, retention_days
         )
@@ -933,19 +980,34 @@ class SQLiteStorage(StorageDriver):
     # ── versions ───────────────────────────────────────────────
 
     def save_version(self, version: ArtifactVersion) -> None:
-        # C-11/C-12: 文件写与 version_num 必须同步——文件写在写锁内，
-        # 重试改 version_num 时重算 content_path 并重写文件，避免覆盖历史版本与串号。
+        # C-11/C-12/H2: 文件写事务外临时路径，提交后 rename 到最终路径。
+        # 重试改 version_num 时只重算最终路径（tmp 文件不变），避免覆盖历史版本与串号，
+        # 旧版本号不再写盘（tmp 单文件），彻底消除孤儿。
         with self._write_lock:
             max_retries = 3
+            tmp_path = None
+            final_template = None
+            content = version.content
+            if len(content.encode("utf-8")) > self.small_content_limit:
+                ext = self._guess_ext(version.artifact_id, version.content)
+                tmp_path, final_template, _ext = self._write_content_file_tmp(
+                    version.artifact_id, content, ext
+                )
+                content = ""
             for attempt in range(max_retries):
-                content = version.content
                 content_path = None
-                if len(content.encode("utf-8")) > self.small_content_limit:
-                    ext = self._guess_ext(version.artifact_id, version.content)
-                    content_path = self._write_content_file(
-                        version.artifact_id, version.version_num, content, ext
+                if tmp_path is not None:
+                    content_path = str(
+                        self.content_dir / version.artifact_id
+                        / final_template.format(version_num=version.version_num)
                     )
-                    content = ""
+                    if not Path(content_path).resolve().is_relative_to(
+                        (self.content_dir / version.artifact_id).resolve()
+                    ):
+                        if attempt >= max_retries - 1:
+                            raise ValueError(f"Unsafe content path: {content_path}")
+                        version.version_num = self.next_version_num(version.artifact_id)
+                        continue
                 try:
                     self._conn.execute(
                         """INSERT INTO artifact_versions
@@ -972,6 +1034,19 @@ class SQLiteStorage(StorageDriver):
                         ),
                     )
                     self._conn.commit()
+                    # H2: 提交成功后 rename 临时文件到最终路径
+                    if tmp_path is not None and content_path is not None:
+                        try:
+                            Path(tmp_path).rename(content_path)
+                            tmp_path = None
+                        except OSError as e:
+                            logger.error(
+                                "save_version rename failed %s -> %s: %s; "
+                                "orphan/tmp left for GC", tmp_path, content_path, e,
+                            )
+                            tmp_path = None
+                    # R9: 写入后按版本上限淘汰最旧非快照版本
+                    self._enforce_version_limit(version.artifact_id)
                     logger.info(
                         "Saved version: %s v%d size=%d tokens=%d",
                         version.artifact_id,
@@ -982,6 +1057,12 @@ class SQLiteStorage(StorageDriver):
                     return
                 except sqlite3.IntegrityError:
                     if attempt >= max_retries - 1:
+                        # 重试耗尽——清理 tmp 文件，不留孤儿
+                        if tmp_path is not None:
+                            try:
+                                Path(tmp_path).unlink(missing_ok=True)
+                            except OSError:
+                                pass
                         raise
                     version.version_num = self.next_version_num(version.artifact_id)
                     logger.warning(
@@ -989,6 +1070,12 @@ class SQLiteStorage(StorageDriver):
                         version.artifact_id,
                         version.version_num,
                     )
+            # 循环正常结束（理论不会到这）——清理 tmp
+            if tmp_path is not None:
+                try:
+                    Path(tmp_path).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def next_version_num(self, artifact_id: str) -> int:
         with self._write_lock:
@@ -998,6 +1085,90 @@ class SQLiteStorage(StorageDriver):
             )
             row = cur.fetchone()
             return row[0]
+
+    def _enforce_version_limit(self, artifact_id: str) -> None:
+        # R9: 超过 max_versions_per_artifact 时淘汰最旧非快照版本（含其磁盘文件）。
+        # 必须在 _write_lock 内调。快照（snapshot_type='named'）不计入上限、不被淘汰。
+        # 当前版本（artifacts.current_version）绝不被淘汰，避免误删活版本。
+        if self.max_versions_per_artifact <= 0:
+            return
+        cur = self._conn.execute(
+            "SELECT current_version FROM artifacts WHERE id = ?", (artifact_id,)
+        ).fetchone()
+        current_version = cur[0] if cur else None
+        rows = self._conn.execute(
+            "SELECT version_num, content_path FROM artifact_versions "
+            "WHERE artifact_id = ? AND (snapshot_type IS NULL OR snapshot_type != 'named') "
+            "ORDER BY version_num ASC",
+            (artifact_id,),
+        ).fetchall()
+        # 可淘汰数 = 非快照版本数 - max（已超 max 才淘汰）
+        excess = len(rows) - self.max_versions_per_artifact
+        if excess <= 0:
+            return
+        purged = 0
+        for row in rows:
+            if excess <= 0:
+                break
+            vnum = row["version_num"]
+            if vnum == current_version:
+                continue
+            content_path = row["content_path"]
+            self._conn.execute(
+                "DELETE FROM artifact_versions WHERE artifact_id = ? AND version_num = ?",
+                (artifact_id, vnum),
+            )
+            if content_path:
+                try:
+                    Path(content_path).unlink(missing_ok=True)
+                except OSError as e:
+                    logger.warning("Failed to purge old version file %s: %s", content_path, e)
+            excess -= 1
+            purged += 1
+        if purged:
+            # E11/R9: DELETE 隐式开事务，显式提交，否则下次 BEGIN IMMEDIATE 报
+            # "cannot start a transaction within a transaction"
+            self._conn.commit()
+            logger.info("Version limit enforced: %s evicted %d old version(s)", artifact_id, purged)
+
+    def gc_orphan_files(self) -> int:
+        # H2: 孤儿文件 GC——扫描 content_dir，删无 DB 行指向的文件 + 残留 .tmp_ 文件。
+        # DB 行指向的 content_path 集合与磁盘文件集合做差，多余即孤儿。
+        # 返回清理的文件数。调用方应在低峰期或周期触发。
+        with self._write_lock:
+            valid_paths: set[str] = set()
+            for r in self._conn.execute(
+                "SELECT content_path FROM artifact_versions "
+                "WHERE content_path IS NOT NULL AND content_path != ''"
+            ).fetchall():
+                valid_paths.add(r["content_path"])
+        removed = 0
+        if not self.content_dir.exists():
+            return 0
+        for art_dir in self.content_dir.iterdir():
+            if not art_dir.is_dir():
+                continue
+            for f in art_dir.iterdir():
+                if not f.is_file():
+                    continue
+                # .tmp_ 前缀=两阶段写残留（rename 失败/进程崩溃），直接清
+                if f.name.startswith(".tmp_"):
+                    try:
+                        f.unlink()
+                        removed += 1
+                    except OSError as e:
+                        logger.warning("GC failed to remove tmp %s: %s", f, e)
+                    continue
+                if str(f) not in valid_paths:
+                    try:
+                        f.unlink()
+                        removed += 1
+                        logger.info("GC removed orphan content file: %s", f)
+                    except OSError as e:
+                        logger.warning("GC failed to remove orphan %s: %s", f, e)
+        if removed:
+            logger.info("GC orphan files: removed %d", removed)
+        return removed
 
     def create_version_atomic(
         self,
@@ -1010,8 +1181,19 @@ class SQLiteStorage(StorageDriver):
         # C-8: 乐观锁校验+写入收进单事务，BEGIN IMMEDIATE 序列化并发写，
         # 事务内重读 current_version/content_hash 校验，分配 version_num，
         # 写 version 行并更新 artifact.current_version/content_hash，原子提交。
-        # 返回实际分配的 version_num。
+        # H2: 文件写移出事务——先写临时文件（事务外），事务提交后 rename 到最终路径。
+        # 回滚则删临时文件，不留孤儿。返回实际分配的 version_num。
         with self._write_lock:
+            # H2 阶段1：文件写事务外临时路径（version_num 未知，先写 tmp）
+            tmp_path = None
+            final_template = None
+            content = version.content
+            if len(content.encode("utf-8")) > self.small_content_limit:
+                ext = self._guess_ext(version.artifact_id, version.content)
+                tmp_path, final_template, _ext = self._write_content_file_tmp(
+                    version.artifact_id, content, ext
+                )
+                content = ""
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
@@ -1020,7 +1202,6 @@ class SQLiteStorage(StorageDriver):
                 ).fetchone()
                 if row is None:
                     raise ValueError(f"Artifact not found: {artifact.id}")
-                db_current_version = row["current_version"]
                 db_content_hash = row["content_hash"]
                 db_summary = row["summary"]
                 if expected_content_hash is not None and db_content_hash != expected_content_hash:
@@ -1035,14 +1216,17 @@ class SQLiteStorage(StorageDriver):
                     ).fetchone()[0]
                 )
                 version.version_num = new_version_num
-                content = version.content
                 content_path = None
-                if len(content.encode("utf-8")) > self.small_content_limit:
-                    ext = self._guess_ext(version.artifact_id, version.content)
-                    content_path = self._write_content_file(
-                        version.artifact_id, new_version_num, content, ext
+                if tmp_path is not None:
+                    # H2 阶段2：事务内只记最终路径（实际 rename 在提交后）
+                    content_path = str(
+                        self.content_dir / version.artifact_id
+                        / final_template.format(version_num=new_version_num)
                     )
-                    content = ""
+                    if not Path(content_path).resolve().is_relative_to(
+                        (self.content_dir / version.artifact_id).resolve()
+                    ):
+                        raise ValueError(f"Unsafe content path: {content_path}")
                 self._conn.execute(
                     """INSERT INTO artifact_versions
                        (artifact_id, version_num, content, content_path, size_bytes,
@@ -1073,6 +1257,24 @@ class SQLiteStorage(StorageDriver):
                     (new_version_num, version.created_at, content_hash, final_summary, artifact.id),
                 )
                 self._conn.execute("COMMIT")
+                # H2 阶段3：提交成功后 rename 临时文件到最终路径
+                if tmp_path is not None and content_path is not None:
+                    try:
+                        Path(tmp_path).rename(content_path)
+                    except OSError as e:
+                        # rename 失败：DB 行已指向 content_path 但文件在 tmp_path。
+                        # 不回滚 DB（已提交）；gc_orphan_files 会清理，且下次读该版本
+                        # content_path 会 FileNotFoundError——记 ERROR 便于定位
+                        logger.error(
+                            "Failed to rename tmp content %s -> %s: %s; "
+                            "DB row committed, orphan/tmp file left for GC",
+                            tmp_path, content_path, e,
+                        )
+                # R9: 提交后按版本上限淘汰最旧非快照版本（独立于事务，淘汰失败不影响版本写入）
+                try:
+                    self._enforce_version_limit(artifact.id)
+                except Exception as e:
+                    logger.warning("Version limit enforcement failed for %s: %s", artifact.id, e)
                 artifact.current_version = new_version_num
                 artifact.updated_at = version.created_at
                 artifact.content_hash = content_hash
@@ -1088,6 +1290,12 @@ class SQLiteStorage(StorageDriver):
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
+                # H2: 回滚则删临时文件，不留孤儿
+                if tmp_path is not None:
+                    try:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except OSError as e:
+                        logger.warning("Failed to clean tmp content %s: %s", tmp_path, e)
                 raise
 
     def _hydrate_version_content(self, artifact_id: str, ver: ArtifactVersion) -> None:
@@ -1180,14 +1388,15 @@ class SQLiteStorage(StorageDriver):
     def save_share(self, share: ArtifactShare) -> None:
         with self._write_lock:
             self._conn.execute(
-                """INSERT INTO artifact_shares (share_id, artifact_id, created_by, created_at, expires_at, revoked, access_count, last_access_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO artifact_shares (share_id, artifact_id, created_by, created_at, expires_at, revoked, access_count, max_accesses, last_access_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(share_id) DO UPDATE SET
                      artifact_id=excluded.artifact_id,
                      created_by=excluded.created_by,
                      expires_at=excluded.expires_at,
                      revoked=excluded.revoked,
                      access_count=excluded.access_count,
+                     max_accesses=excluded.max_accesses,
                      last_access_at=excluded.last_access_at""",
                 (
                     share.share_id,
@@ -1197,6 +1406,7 @@ class SQLiteStorage(StorageDriver):
                     share.expires_at,
                     int(share.revoked),
                     share.access_count,
+                    share.max_accesses,
                     share.last_access_at,
                 ),
             )
@@ -1240,14 +1450,16 @@ class SQLiteStorage(StorageDriver):
         logger.info("Revoked share %s ok=%s", share_id, ok)
         return ok
 
-    def increment_share_access(self, share_id: str) -> None:
-        from datetime import datetime
-
-        now_iso = datetime.now(UTC).isoformat()
+    def increment_share_access(self, share_id: str, delta: int = 1) -> None:
+        # E1: last_access_at 写 float epoch，与列定义 REAL 一致
+        # R2: delta 支持批量刷盘（公开 GET 内存缓冲聚合后一次写）
+        if delta <= 0:
+            return
+        now_ts = time.time()
         with self._write_lock:
             self._conn.execute(
-                "UPDATE artifact_shares SET access_count = access_count + 1, last_access_at = ? WHERE share_id = ?",
-                (now_iso, share_id),
+                "UPDATE artifact_shares SET access_count = access_count + ?, last_access_at = ? WHERE share_id = ?",
+                (delta, now_ts, share_id),
             )
             self._conn.commit()
 
@@ -1769,6 +1981,13 @@ class SQLiteStorage(StorageDriver):
         return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
+        # E7: 关连接池里的只读连接（非阻塞取出，取不到说明正被借出，跳过）
+        while True:
+            try:
+                rc = self._read_pool.get_nowait()
+                rc.close()
+            except queue.Empty:
+                break
         self._conn.close()
         logger.info("SQLiteStorage closed")
 
@@ -1813,12 +2032,17 @@ class SQLiteStorage(StorageDriver):
         except Exception as e:  # noqa: BLE001
             logger.warning("Migration size_bytes failed: %s", e)
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def _migrate_schema_meta(self) -> None:
         # A-6: schema_meta 记录 schema_version，支持迁移框架与版本检测
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value INTEGER)"
+        )
+        # R5: applied_migrations 记录已跑过的迁移名，支持按版本跳过
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS applied_migrations "
+            "(name TEXT PRIMARY KEY, applied_at REAL)"
         )
         self._conn.commit()
         row = self._conn.execute(
@@ -1838,6 +2062,44 @@ class SQLiteStorage(StorageDriver):
                     f"DB schema_version {db_ver} > code {self._SCHEMA_VERSION}; "
                     "downgrade unsupported"
                 )
+
+    # R5: 迁移注册表——顺序即执行顺序。新增迁移追加到末尾，勿改既有顺序。
+    _MIGRATIONS: list[tuple[str, str]] = [
+        ("migrate_kind_column", "_migrate_kind_column"),
+        ("migrate_source_column", "_migrate_source_column"),
+        ("migrate_project_id_column", "_migrate_project_id_column"),
+        ("migrate_metadata_column", "_migrate_metadata_column"),
+        ("migrate_ownership_columns", "_migrate_ownership_columns"),
+        ("migrate_lifecycle_columns", "_migrate_lifecycle_columns"),
+        ("migrate_share_column", "_migrate_share_column"),
+        ("migrate_kb_column", "_migrate_kb_column"),
+        ("migrate_snapshot_columns", "_migrate_snapshot_columns"),
+        ("migrate_source_module_columns", "_migrate_source_module_columns"),
+        ("migrate_size_bytes_column", "_migrate_size_bytes_column"),
+        ("migrate_token_count_column", "_migrate_token_count_column"),
+        ("migrate_section_index_column", "_migrate_section_index_column"),
+        ("migrate_event_timestamps", "_migrate_event_timestamps"),
+        ("migrate_share_max_accesses_and_timestamps", "_migrate_share_max_accesses_and_timestamps"),
+        ("migrate_tag_scope_column", "_migrate_tag_scope_column"),
+    ]
+
+    def _run_migrations_gated(self) -> None:
+        # R5: 仅跑未记入 applied_migrations 的迁移，跑完记录。避免每次启动全量重检查。
+        applied = {
+            r["name"]
+            for r in self._conn.execute("SELECT name FROM applied_migrations").fetchall()
+        }
+        for name, method_name in self._MIGRATIONS:
+            if name in applied:
+                continue
+            getattr(self, method_name)()
+            self._conn.execute(
+                "INSERT OR IGNORE INTO applied_migrations (name, applied_at) VALUES (?, ?)",
+                (name, time.time()),
+            )
+            self._conn.commit()
+            logger.debug("Migration applied and recorded: %s", name)
+
 
     def _migrate_event_timestamps(self) -> None:
         # A-8: artifact_events.created_at 统一 REAL epoch。旧 ISO 串转 epoch。
@@ -1874,6 +2136,64 @@ class SQLiteStorage(StorageDriver):
                 )
                 self._conn.commit()
             logger.info("Migrated %d event timestamps ISO -> REAL", len(updates))
+
+    def _migrate_share_max_accesses_and_timestamps(self) -> None:
+        # E1/E2: artifact_shares 加 max_accesses 列；created_at/last_access_at
+        # 由 TEXT ISO 迁移为 REAL epoch（schema_version 2）。
+        cols = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(artifact_shares)").fetchall()
+        }
+        if "max_accesses" not in cols:
+            self._conn.execute(
+                "ALTER TABLE artifact_shares ADD COLUMN max_accesses INTEGER"
+            )
+            self._conn.commit()
+            logger.info("Added max_accesses column to artifact_shares")
+        # ISO -> REAL epoch for shares
+        self._coerce_text_ts_to_real(
+            "artifact_shares", "share_id", ["created_at", "last_access_at"]
+        )
+        # folder created_at 同样迁移
+        self._coerce_text_ts_to_real("artifact_folders", "folder_id", ["created_at"])
+
+    def _coerce_text_ts_to_real(
+        self, table: str, id_col: str, ts_cols: list[str]
+    ) -> None:
+        # E1: 把 TEXT(ISO 串) 行的 created_at 类列转 REAL epoch；已是 float 的跳过。
+        from datetime import datetime
+
+        for col in ts_cols:
+            rows = self._conn.execute(
+                f"SELECT {id_col}, {col} FROM {table} WHERE {col} IS NOT NULL"
+            ).fetchall()
+            updates = []
+            for r in rows:
+                raw = r[col]
+                try:
+                    float(raw)
+                    continue
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    ts = datetime.fromisoformat(str(raw)).timestamp()
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Unparseable %s.%s=%r for %s, fallback to now",
+                        table, col, raw, r[id_col],
+                    )
+                    ts = time.time()
+                updates.append((ts, r[id_col]))
+            if updates:
+                with self._write_lock:
+                    self._conn.executemany(
+                        f"UPDATE {table} SET {col} = ? WHERE {id_col} = ?",
+                        updates,
+                    )
+                    self._conn.commit()
+                logger.info(
+                    "Migrated %d %s.%s ISO -> REAL", len(updates), table, col
+                )
 
     def _migrate_tag_scope_column(self) -> None:
         # L-7: artifact_tags 加 scope 列，name 唯一约束改为 (name, scope) 复合唯一

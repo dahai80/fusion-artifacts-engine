@@ -60,7 +60,7 @@ def _remove_comments(content: str, artifact_type: str) -> str:
                 if idx == 0 and stripped.startswith("#!"):
                     out.append(line)
                     continue
-                if stripped.startswith("# -*-") or stripped.startswith("#coding"):
+                if stripped.startswith(("# -*-", "#coding")):
                     out.append(line)
                     continue
                 if stripped.startswith("#"):

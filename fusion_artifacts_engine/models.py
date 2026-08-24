@@ -84,11 +84,17 @@ class ArtifactShare(BaseModel):
     share_id: str
     artifact_id: str
     created_by: str | None = None
-    created_at: str | None = None
+    # E1: created_at/last_access_at 统一 float epoch，与 Artifact/Version 一致，
+    # 避免按时间排序/范围过滤时 float<str TypeError。expires_at 保留 ISO str
+    # （经 _parse_expires_at/_is_expired 解析，不参与排序比较）。
+    created_at: float | None = None
     expires_at: str | None = None
     revoked: bool = False
     access_count: int = 0
-    last_access_at: str | None = None
+    # E2: README 宣传的访问上限字段，存储 max_accesses，None=不限。
+    # get_shared/get_public_share 在 increment 前校验 access_count>=max_accesses。
+    max_accesses: int | None = None
+    last_access_at: float | None = None
 
 
 class ArtifactFolder(BaseModel):
@@ -96,7 +102,7 @@ class ArtifactFolder(BaseModel):
     name: str
     parent_id: str | None = None
     project_id: str | None = None
-    created_at: str | None = None
+    created_at: float | None = None
 
 
 class ArtifactTag(BaseModel):
@@ -113,4 +119,5 @@ class ArtifactEvent(BaseModel):
     session_id: str | None = None
     event_type: str
     payload: dict | None = None
-    created_at: float | str | None = None
+    # E1: 统一 float epoch，与 Artifact/Version/Share/Folder 一致
+    created_at: float | None = None
