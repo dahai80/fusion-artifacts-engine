@@ -26,7 +26,9 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
-## Security (v0.3.10 audit hardening)
+## Security (v0.3.11 audit hardening)
+
+**v0.3.11** patches the `start.sh` lifecycle script: `ensure_venv` now prefers the repo-root `.venv` (monorepo convention) over a stale project-local `.venv`, fixing `ping.version` reporting an outdated version. No engine change; 385 tests green, ruff clean.
 
 v0.3.8 resolved all 59 findings from the 0824 security audit. v0.3.9 addressed the runtime/engineering findings (R1-R9, E1-E11) plus H2/H3/H6. **v0.3.10 completes the architecture refactors H5 and H7**, the two that materially change runtime behavior. H1 and H8 are retained by design (see below). 385 tests green, ruff clean. v0.3.10 highlights:
 
