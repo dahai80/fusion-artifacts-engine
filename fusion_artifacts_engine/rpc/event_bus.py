@@ -82,3 +82,8 @@ class EventBus:
             except queue.Full:
                 pass
         logger.info("EventBus shutdown: notified %d subscriber(s)", len(snapshot))
+
+    def is_closed(self) -> bool:
+        # 运维5: /readyz 探针依赖——EventBus 关闭后判定 not ready
+        with self._lock:
+            return self._closed

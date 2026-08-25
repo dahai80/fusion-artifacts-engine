@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.rpc.errors import NotFoundError, RpcError
+from fusion_artifacts_engine.rpc.errors import NotFoundError, NotImplementedError, RpcError
 from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -752,26 +752,19 @@ class RPCHandler:
         return result
 
     async def _inject(self, params: dict) -> dict:
-        result = self.engine.inject(
-            messages=params.get("messages", []),
-            output_budget=params.get("output_budget"),
+        # 运维6: inject 占位已下线。保留方法注册（向后兼容旧客户端不报 method not found），
+        # 执行即拒，返回 -32005 NotImplementedError。调用方应改用 context.budget + check_safety。
+        raise NotImplementedError(
+            "artifact.inject is not implemented; use context.budget and "
+            "check_safety for token budget management"
         )
-        return result
 
     async def _interact(self, params: dict) -> dict:
-        result = self.engine.interact_artifact(
-            artifact_id=params["artifact_id"],
-            action=params.get("action", "state_change"),
-            payload=params.get("payload"),
-            session_id=params.get("session_id"),
+        # 运维6: interact 占位已下线。保留方法注册（向后兼容），执行即拒，
+        # 返回 -32005 NotImplementedError。不再记录 interaction event（无副作用）。
+        raise NotImplementedError(
+            "artifact.interact is not implemented; action dispatch is not supported"
         )
-        self._publish(
-            "artifact.interacted",
-            params["artifact_id"],
-            artifact_id=params["artifact_id"],
-            action=result["action"],
-        )
-        return result
 
     async def _sync(self, params: dict) -> dict:
         result = await self.engine.sync_artifact_file(

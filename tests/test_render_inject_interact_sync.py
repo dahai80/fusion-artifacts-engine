@@ -2,6 +2,7 @@ import pytest
 
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.rpc.errors import NotImplementedError
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 
@@ -203,26 +204,30 @@ async def test_check_safety_rpc_dispatch(engine_with_tmp):
 
 
 async def test_inject_rpc_dispatch(engine_with_tmp):
+    # 运维6: artifact.inject 占位方法下线，RPC 层显式拒绝 (-32005)
     engine = engine_with_tmp
     handler = RPCHandler(engine)
-    result = await handler.dispatch(
-        "artifact.inject",
-        {"messages": [{"role": "user", "content": "hi"}], "output_budget": 1000},
-    )
-    assert "total_tokens" in result
+    with pytest.raises(NotImplementedError) as exc:
+        await handler.dispatch(
+            "artifact.inject",
+            {"messages": [{"role": "user", "content": "hi"}], "output_budget": 1000},
+        )
+    assert exc.value.code == -32005
 
 
 async def test_interact_rpc_dispatch(engine_with_tmp):
+    # 运维6: artifact.interact 占位方法下线，RPC 层显式拒绝 (-32005)
     engine = engine_with_tmp
     handler = RPCHandler(engine)
     artifact, _, _ = await engine.create_artifact(
         session_id="s1", name="doc.md", artifact_type="markdown", content="x"
     )
-    result = await handler.dispatch(
-        "artifact.interact",
-        {"artifact_id": artifact.id, "action": "click", "payload": {}},
-    )
-    assert result["ok"] is True
+    with pytest.raises(NotImplementedError) as exc:
+        await handler.dispatch(
+            "artifact.interact",
+            {"artifact_id": artifact.id, "action": "click", "payload": {}},
+        )
+    assert exc.value.code == -32005
 
 
 async def test_sync_rpc_dispatch(engine_with_tmp, tmp_path):

@@ -37,3 +37,16 @@ sse:
 cluster:
   # H8: 多节点 ID。单机留空；多节点部署设唯一节点标识（或 FUSION_ARTIFACTS_NODE_ID）
   node_id: ""
+
+rate_limit:
+  # 运维1: 令牌桶限流。rps=0 表示不限流（默认，向后兼容）。
+  # default 桶覆盖 JSON-RPC + 鉴权 REST；超限返回 429（JSON-RPC 用 -32003）
+  rps: 0
+  burst: 0
+  # 公开 share 端点独立配额（无鉴权，易被刷量）
+  public_rps: 0
+  public_burst: 0
+
+metrics:
+  # 运维2: Prometheus /metrics 端点开关。自实现文本格式，无外部依赖
+  enabled: true

@@ -78,6 +78,15 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         "cluster": {
             "node_id": ("cluster_node_id", None),
         },
+        "rate_limit": {
+            "rps": ("rate_limit_rps", None),
+            "burst": ("rate_limit_burst", None),
+            "public_rps": ("public_rate_limit_rps", None),
+            "public_burst": ("public_rate_limit_burst", None),
+        },
+        "metrics": {
+            "enabled": ("metrics_enabled", None),
+        },
     }
     flat: dict[str, Any] = {}
     for section, field_map in section_map.items():
@@ -162,10 +171,19 @@ class ArtifactEngineConfig(BaseModel):
     sync_root: Path | None = Field(default=None)
     # R9: 单 artifact 版本上限，0=不限；超限淘汰最旧非快照版本（防磁盘无限增长）
     max_versions_per_artifact: int = Field(default=100)
-    # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning
-    disk_space_warning_pct: int = Field(default=90)
+    # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning。
+    # 字段默认 0（禁用，单元测试不依赖宿主机磁盘状态）；生产经 default_config.yaml 设 90。
+    disk_space_warning_pct: int = Field(default=0)
     # H8: 多节点 ID。单机默认 None；多节点部署经 FUSION_ARTIFACTS_NODE_ID 或 cluster.node_id 配置
     cluster_node_id: str | None = Field(default=None)
+    # 运维1: 令牌桶限流。rps=0 表示不限流（默认）。default 桶覆盖 JSON-RPC + 鉴权 REST
+    rate_limit_rps: float = Field(default=0)
+    rate_limit_burst: int = Field(default=0)
+    # 运维1: 公开 share 端点独立配额（无鉴权，易刷量，须独立桶）
+    public_rate_limit_rps: float = Field(default=0)
+    public_rate_limit_burst: int = Field(default=0)
+    # 运维2: Prometheus /metrics 端点开关
+    metrics_enabled: bool = Field(default=True)
 
     @property
     def db_path(self) -> Path:
