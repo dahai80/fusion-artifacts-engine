@@ -11,6 +11,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Monorepo 约定：27 子项目共享 repo 根 .venv。优先用根 venv，回退项目内 .venv。
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_VENV="${REPO_ROOT}/.venv"
 VENV="${SCRIPT_DIR}/.venv"
 HOST="${FUSION_ARTIFACTS_HOST:-127.0.0.1}"
 PORT="${FUSION_ARTIFACTS_PORT:-11451}"
@@ -25,11 +28,16 @@ log_warn()  { printf "\033[0;33m[WARN]\033[0m  %s\n" "$*"; }
 log_error() { printf "\033[0;31m[ERROR]\033[0m %s\n" "$*"; }
 
 ensure_venv() {
-    if [[ -f "${VENV}/bin/activate" ]]; then
+    # 优先 repo 根 venv（monorepo 共享，metadata 最新）；回退项目内 .venv；再回退 system。
+    if [[ -f "${ROOT_VENV}/bin/activate" ]]; then
+        # shellcheck disable=SC1091
+        source "${ROOT_VENV}/bin/activate"
+    elif [[ -f "${VENV}/bin/activate" ]]; then
         # shellcheck disable=SC1091
         source "${VENV}/bin/activate"
+        log_warn "using project-local .venv (stale?); prefer repo-root .venv at ${ROOT_VENV}"
     else
-        log_warn "no .venv found at ${VENV}, using system python3"
+        log_warn "no .venv found at ${ROOT_VENV} or ${VENV}, using system python3"
     fi
 }
 
