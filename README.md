@@ -4,6 +4,8 @@ English | **[中文](./README_CN.md)**
 
 Structured artifact CRUD middleware for the Fusion architecture. Physically separates generated artifacts from chat messages to solve context overflow in long AI conversations.
 
+> **New: [Usage Guide / 使用指南](./docs/USAGE_GUIDE.md)** — bilingual (EN + 中文), scenario-based walkthrough with runnable examples covering create/version/share/render/budget/lifecycle/recycle/ops.
+
 ## How It Works
 
 When a model generates long content (code, documents, HTML apps), the engine:
