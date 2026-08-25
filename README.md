@@ -28,6 +28,13 @@ fusion-artifacts-engine status
 
 ## Security (v0.3.11 audit hardening)
 
+**v0.4.1** adds ops-integration test coverage on top of v0.4.0 — `tests/test_ops_integration.py`
+(9 live-server tests) covers the do_POST/do_GET paths the v0.4.0 unit tests exercised only at the
+handler level: JSON-RPC rate-limit `429` / `-32003` trigger, public-share rate-limit `429`,
+`/metrics` Prometheus content + `404`-when-disabled, `/readyz` `503` on storage failure/exception,
+and `artifact.inject`/`artifact.interact` JSON-RPC `-32005` at the HTTP layer. server.py coverage
+77.4% → 80.0%, total 92.5%, **425 tests green**, ruff clean.
+
 **v0.4.0** lands the ops-readiness batch — six production-operations capabilities added
 on top of v0.3.11. No domain behavior change; 416 tests green, ruff clean. v0.4.0 highlights:
 
@@ -562,7 +569,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage across 416 tests (v0.4.0).
+Current coverage across 425 tests (v0.4.1).
 
 ## License
 
