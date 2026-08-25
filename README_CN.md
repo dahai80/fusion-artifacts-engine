@@ -69,8 +69,8 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.version_diff` | artifact_id, from_version, to_version | 两版本间统一差异对比 |
 | `artifact.render` | content, session_id, lang_hint, project_id? | 自动检测类型，创建可渲染产物 |
 | `artifact.check_safety` | messages, output_budget | 令牌预算安全检查 |
-| `artifact.inject` | messages, output_budget | 消息注入令牌核算 |
-| `artifact.interact` | artifact_id, action, payload, session_id? | 记录产物交互事件 |
+| `artifact.inject` | messages, output_budget | **已下线 (运维6)**：抛 `-32005` NotImplementedError；请用 `context.budget` + `check_safety` |
+| `artifact.interact` | artifact_id, action, payload, session_id? | **已下线 (运维6)**：抛 `-32005` NotImplementedError；不支持动作分发 |
 | `artifact.sync` | artifact_id, file_path, direction | 产物内容与文件双向同步 |
 | `artifact.version_list` | artifact_id | 列出所有版本 |
 | `artifact.version_rollback` | artifact_id, target_version | 回滚到指定版本 |

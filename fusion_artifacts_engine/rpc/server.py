@@ -5,15 +5,19 @@ import logging
 import os
 import queue
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.metrics import get_metrics
+from fusion_artifacts_engine.rate_limiter import RateLimiter
 from fusion_artifacts_engine.rpc.errors import (
     BusinessRuleError,
     ConflictError,
     NotFoundError,
+    NotImplementedError,
     ResourceLimitError,
     RpcError,
 )
@@ -56,6 +60,7 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self._max_workers = max(1, int(max_workers))
         self._worker_sem = threading.BoundedSemaphore(self._max_workers)
         self._rejected_count = 0
+        self._rate_limiter = RateLimiter()
         super().__init__(server_address, handler_cls)
 
     def process_request(self, request, client_address):
@@ -127,6 +132,31 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         else:
             self._send_rest_response(401, {"error": "Unauthorized"})
 
+    def _send_rate_limited(self, jsonrpc: bool = True) -> None:
+        # 运维1: 令牌桶耗尽。JSON-RPC 用 -32003 ResourceLimitError（可重试），REST 用 429。
+        if jsonrpc:
+            self._send_response(
+                429,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32003,
+                        "message": "Rate limit exceeded, retryable",
+                        "retryable": True,
+                    },
+                },
+            )
+        else:
+            self._send_rest_response(
+                429,
+                {
+                    "error": "Rate limit exceeded",
+                    "code": -32003,
+                    "retryable": True,
+                },
+            )
+
     def do_POST(self):
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_post()
@@ -134,6 +164,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=True)
             return
+        # 运维1: 鉴权后、解析前限流，避免被刷量请求拖垮解析+dispatch
+        if not self.server._rate_limiter.check_default():
+            self._send_rate_limited(jsonrpc=True)
+            return
+        # 运维2: 计量——活跃连接 +1，请求计数，延迟直方图，错误计数
+        metrics = get_metrics()
+        metrics.inc_gauge("rpc_active_conns")
+        metrics.inc_counter("rpc_requests_total", labels={"path": "jsonrpc"})
+        t0 = time.monotonic()
+        method_name = ""
+        errored = False
         try:
             length = int(self.headers.get("Content-Length", 0))
             if length > _MAX_BODY_SIZE:
@@ -181,10 +222,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     timeout,
                 )
             response = self._run_async(self._handle(request), timeout=timeout)
+            if isinstance(response, dict) and "error" in response:
+                errored = True
             self._send_response(200, response)
         except TimeoutError:
             # H5: 协程排队超时（慢操作拖累全站）。返回 -32603 并标记 retryable，
             # 调用方可退避重试而非当致命错误。区分 R8 的业务错误码。
+            errored = True
             logger.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
             self._send_response(
                 200,
@@ -199,6 +243,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 },
             )
         except Exception:
+            errored = True
             logger.exception("RPC error")
             self._send_response(
                 200,
@@ -208,8 +253,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     "error": {"code": -32603, "message": "Internal error"},
                 },
             )
+        finally:
+            metrics.observe("rpc_request_latency_seconds", time.monotonic() - t0)
+            if errored:
+                metrics.inc_counter("rpc_error_total", labels={"path": "jsonrpc"})
+            metrics.dec_gauge("rpc_active_conns")
 
     def do_GET(self):
+        # 运维5: /healthz（liveness）+ /readyz（readiness）分离，无鉴权（K8s probe 标配）
+        if self.path == "/healthz":
+            self._handle_healthz()
+            return
+        if self.path == "/readyz":
+            self._handle_readyz()
+            return
+        # 运维2: /metrics 端点——Prometheus 文本格式，无鉴权（监控 scrape 标配）
+        if self.path == "/metrics":
+            self._handle_metrics()
+            return
         if self.path.startswith("/api/v1/events/stream"):
             self._handle_sse()
             return
@@ -217,6 +278,48 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._handle_rest_v1_get()
             return
         self._send_rest_response(404, {"error": "Not found"})
+
+    def _handle_healthz(self) -> None:
+        # 运维5: liveness——进程能响应即 200。不查依赖，避免依赖抖动导致重启循环。
+        self._send_rest_response(200, {"status": "ok", "check": "liveness"})
+
+    def _handle_readyz(self) -> None:
+        # 运维5: readiness——存储可用 + EventBus 未关闭才 200，否则 503。
+        # 依赖未就绪时 K8s 不导流量，但 liveness 仍 200 不重启。
+        engine = self.server._rpc_handler.engine
+        checks = {"storage": False, "event_bus": False}
+        ok = True
+        try:
+            storage_ok = engine.storage.health_check()
+            checks["storage"] = storage_ok
+            if not storage_ok:
+                ok = False
+        except Exception:  # noqa: BLE001
+            logger.exception("readyz storage check failed")
+            ok = False
+        try:
+            checks["event_bus"] = not engine.event_bus.is_closed()
+            if not checks["event_bus"]:
+                ok = False
+        except Exception:  # noqa: BLE001
+            logger.exception("readyz event_bus check failed")
+            ok = False
+        if ok:
+            self._send_rest_response(200, {"status": "ready", "checks": checks})
+        else:
+            self._send_rest_response(503, {"status": "not_ready", "checks": checks})
+
+    def _handle_metrics(self) -> None:
+        engine = self.server._rpc_handler.engine
+        if not getattr(engine.config, "metrics_enabled", True):
+            self._send_rest_response(404, {"error": "metrics disabled"})
+            return
+        body = get_metrics().expose().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def _handle_rest_v1_get(self) -> None:
         engine = self.server._rpc_handler.engine
@@ -226,6 +329,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         # Public share endpoint — no auth required (#38, #26-B)
         if len(path_parts) == 4 and path_parts[2] == "share":
+            # 运维1: 公开端点独立令牌桶，防刷量拖垮鉴权后端
+            if not self.server._rate_limiter.check_public():
+                self._send_rest_response(
+                    429,
+                    {"error": "Rate limit exceeded", "code": -32003, "retryable": True},
+                )
+                return
             share_id = path_parts[3]
             result = engine.get_public_share(share_id)
             status = result.get("status")
@@ -477,6 +587,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(503, {"error": exc.message, "code": exc.code, "retryable": True})
         elif isinstance(exc, BusinessRuleError):
             self._send_rest_response(422, {"error": exc.message, "code": exc.code})
+        elif isinstance(exc, NotImplementedError):
+            # 运维6: 占位方法下线——501 Not Implemented
+            self._send_rest_response(501, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, RpcError):
             # 未细分的 RpcError：负 32000 段按业务推断，否则当服务端错误
             status = 400 if exc.code == -32602 else 500
@@ -585,6 +698,15 @@ class ArtifactRPCServer:
         self._loop_thread.start()
         logger.info("Persistent async event loop started")
 
+    def _build_rate_limiter(self) -> RateLimiter:
+        cfg = self.engine.config
+        return RateLimiter(
+            rps=getattr(cfg, "rate_limit_rps", 0),
+            burst=getattr(cfg, "rate_limit_burst", 0),
+            public_rps=getattr(cfg, "public_rate_limit_rps", 0),
+            public_burst=getattr(cfg, "public_rate_limit_burst", 0),
+        )
+
     def start(self) -> None:
         self._start_loop()
         max_workers = getattr(self.engine.config, "server_max_workers", 64)
@@ -593,6 +715,7 @@ class ArtifactRPCServer:
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop
+        self._server._rate_limiter = self._build_rate_limiter()
         logger.info(
             "ArtifactRPCServer starting on %s:%d (max_workers=%d)",
             self.host, self.port, max_workers,
@@ -607,6 +730,7 @@ class ArtifactRPCServer:
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop
+        self._server._rate_limiter = self._build_rate_limiter()
         thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         thread.start()
         logger.info(

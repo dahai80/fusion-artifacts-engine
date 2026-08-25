@@ -28,6 +28,37 @@ fusion-artifacts-engine status
 
 ## Security (v0.3.11 audit hardening)
 
+**v0.4.0** lands the ops-readiness batch — six production-operations capabilities added
+on top of v0.3.11. No domain behavior change; 416 tests green, ruff clean. v0.4.0 highlights:
+
+- **运维1 令牌桶限流**: `RateLimiter` (token bucket) guards the default JSON-RPC path and the
+  public share path with separate buckets, so unauthenticated share abuse cannot starve the
+  authenticated backend. `rps=0` = unlimited (backward-compatible default). Over-capacity calls
+  return JSON-RPC `-32003` (retryable) / HTTP `429`. See `rate_limiter.py`.
+- **运维2 Prometheus /metrics**: `GET /metrics` emits Prometheus text exposition format 0.0.4
+  (counters `rpc_requests_total` / `rpc_error_total`, gauge `rpc_active_conns`, histogram
+  `rpc_request_latency_seconds`). Self-implemented, no `prometheus_client` dependency. See `metrics.py`.
+- **运维3 日志轮转 + 结构化 JSON**: `RotatingFileHandler` (10MB, 5 backups) with a
+  `JsonFormatter` writes machine-parseable structured logs to `logs/` under the storage root
+  (env override `FUSION_ARTIFACTS_LOG_DIR`); a human-readable console handler stays on stderr.
+  Initialized at daemon startup in `__main__`. See `utils.py`.
+- **运维4 磁盘空间检测**: `shutil.disk_usage` pre-write check in `SQLiteStorage` rejects writes
+  (raise `ResourceLimitError` `-32003`) when used-disk pct ≥ `storage.disk_space_warning_pct`
+  (default 90 via `default_config.yaml`; field default 0 so unit tests stay decoupled from host
+  disk state). The engine catches the error, publishes a `system.alarm` / `disk_full_alarm`
+  event (severity critical) on the EventBus, then re-raises.
+- **运维5 /healthz + /readyz 分离**: `GET /healthz` (liveness, always `200`, process-alive, no
+  auth) vs `GET /readyz` (readiness, `200` ready / `503` not_ready, checks `storage.health_check()`
+  + `event_bus.is_closed()`, no auth). Proper K8s probe separation — no restart loop on a
+  transiently-unready dependency.
+- **运维6 inject/interact 下线**: `artifact.inject` / `artifact.interact` were advertised but
+  never implemented (returned stubs). Commercial release must fail explicitly, not silently.
+  RPC handlers now raise `-32005` `NotImplementedError` (REST `501`); the method names stay
+  registered so old clients do not get `-32601` method-not-found. Engine-level
+  `inject()` / `interact_artifact()` keep their signatures (internal API preserved). Error code
+  range now: `-32001` NotFound / `-32002` Conflict / `-32003` ResourceLimit / `-32004` BusinessRule
+  / `-32005` NotImplementedError.
+
 **v0.3.11** patches the `start.sh` lifecycle script: `ensure_venv` now prefers the repo-root `.venv` (monorepo convention) over a stale project-local `.venv`, fixing `ping.version` reporting an outdated version. No engine change; 385 tests green, ruff clean.
 
 v0.3.8 resolved all 59 findings from the 0824 security audit. v0.3.9 addressed the runtime/engineering findings (R1-R9, E1-E11) plus H2/H3/H6. **v0.3.10 completes the architecture refactors H5 and H7**, the two that materially change runtime behavior. H1 and H8 are retained by design (see below). 385 tests green, ruff clean. v0.3.10 highlights:
@@ -38,7 +69,7 @@ v0.3.8 resolved all 59 findings from the 0824 security audit. v0.3.9 addressed t
 ### H1 / H8 — retained by design
 
 - **H1 write-connection pool**: not added. SQLite WAL with `BEGIN IMMEDIATE` physically serializes writes, so a write-connection pool would be cargo-cult — the real write-amplification pain (file I/O under lock) was fixed by H2's two-phase write. A single write connection is architecturally correct.
-- **H8 multi-node storage**: the `StorageDriver` ABC (46 abstract methods) is the swap point; actual multi-node replication belongs to the `fusion-multi-node` project, out of scope for this middleware.
+- **H8 multi-node storage**: the `StorageDriver` ABC (47 abstract methods) is the swap point; actual multi-node replication belongs to the `fusion-multi-node` project, out of scope for this middleware.
 
 ### v0.3.9 retained highlights:
 
@@ -108,8 +139,8 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.version_diff` | artifact_id, from_version, to_version | Unified diff between two versions |
 | `artifact.render` | content, session_id, lang_hint, project_id? | Auto-detect type, create renderable artifact |
 | `artifact.check_safety` | messages, output_budget | Token budget safety check |
-| `artifact.inject` | messages, output_budget | Token accounting check; returns `injected` + `note` (no-op: messages unchanged) |
-| `artifact.interact` | artifact_id, action, payload, session_id? | Record interaction event; returns `dispatched` + `note` (stub: no action dispatch) |
+| `artifact.inject` | messages, output_budget | **Removed (运维6)**: raises `-32005` NotImplementedError; use `context.budget` + `check_safety` |
+| `artifact.interact` | artifact_id, action, payload, session_id? | **Removed (运维6)**: raises `-32005` NotImplementedError; action dispatch not supported |
 | `artifact.sync` | artifact_id, file_path, direction | Sync artifact content ↔ file |
 | `artifact.version_list` | artifact_id, page?, page_size?, include_content? | List versions (paginated, default page_size=200, cap 500) |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
@@ -314,6 +345,24 @@ snapshot, share creation, tags, folders, events, purge, external-source create) 
 **JSON-RPC only** — the REST surface intentionally covers artifact CRUD + public share;
 see the method table above for the JSON-RPC method names (e.g. `artifact.create_share`).
 
+### Ops Endpoints (运维5 / 运维2)
+
+Liveness/readiness probes and metrics, all **no-auth** (K8s probes carry no API key):
+
+```bash
+GET /healthz    # Liveness — process alive = 200 {"status":"ok","check":"liveness"}
+GET /readyz     # Readiness — 200 {"status":"ready","checks":{...}} / 503 {"status":"not_ready",...}
+                #   checks: storage (SELECT 1 + content_dir exists), event_bus (not closed)
+GET /metrics    # Prometheus text exposition 0.0.4 — counters/gauge/histogram (运维2)
+                #   404 if metrics.enabled=false
+```
+
+`/healthz` always returns 200 if the process can answer — it never depends on storage or the
+event bus, so a transiently-unready dependency does not trigger a K8s restart loop. `/readyz`
+returns 503 when storage is unreachable or the EventBus is shut down, signalling "do not route
+traffic here yet". `/metrics` exposes `rpc_requests_total`, `rpc_error_total`, `rpc_active_conns`,
+and `rpc_request_latency_seconds` (histogram, fixed buckets) for scraping.
+
 ### SSE Events Stream (P4)
 
 Server-Sent Events endpoint for real-time push-based artifact change notifications:
@@ -441,6 +490,7 @@ storage:
   root: "~/.fusion/artifacts"
   db_name: "meta.db"
   small_content_limit: 10240
+  disk_space_warning_pct: 90   # 运维4: reject writes (ResourceLimitError) + alarm when used-disk ≥ pct
 
 thresholds:
   auto_create_lines: 30
@@ -452,6 +502,15 @@ artifact:
 security:
   allow_no_auth: false   # fail-closed default; set true only for trusted single-user local use
   recycle_retention_days: 7
+
+rate_limit:              # 运维1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
+  rps: 0                 # default JSON-RPC bucket
+  burst: 0
+  public_rps: 0          # public share bucket (separate so share abuse can't starve backend)
+  public_burst: 0
+
+metrics:                 # 运维2
+  enabled: true          # false → GET /metrics returns 404
 
 sse:
   heartbeat_interval: 30
@@ -471,8 +530,15 @@ Middleware: Artifacts Engine (Python daemon, JSON-RPC 2.0 + REST /api/v1 + SSE)
     └─ auto_identifier.py should_create_artifact (threshold + renderable-type)
   async engine methods offload blocking storage calls via asyncio.to_thread
 ---------------------------------------------------------
+Ops layer (v0.4.0):
+  rpc/server.py  ─ /healthz (liveness) / /readyz (readiness) / /metrics (Prometheus)
+  rate_limiter.py ─ token bucket (default + public share buckets), 429 / -32003
+  metrics.py     ─ Prometheus text exposition 0.0.4 (counters/gauge/histogram)
+  utils.py       ─ RotatingFileHandler + JsonFormatter (10MB/5 backups, structured JSON)
+  storage        ─ disk_usage pre-write check → ResourceLimitError + disk_full_alarm event
+---------------------------------------------------------
 Storage: SQLite (WAL, single write conn + read pool of 4) + Filesystem
-  StorageDriver ABC (46 abstract methods) — swap point for multi-node/Postgres
+  StorageDriver ABC (47 abstract methods) — swap point for multi-node/Postgres
 ```
 
 ## Roadmap
@@ -496,7 +562,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 385 tests.
+Current coverage across 416 tests (v0.4.0).
 
 ## License
 

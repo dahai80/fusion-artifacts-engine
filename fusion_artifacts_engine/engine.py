@@ -20,6 +20,7 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
+from fusion_artifacts_engine.rpc.errors import ResourceLimitError
 from fusion_artifacts_engine.rpc.event_bus import EventBus
 from fusion_artifacts_engine.section_index import build_sections_with_tokens as _build_secs
 from fusion_artifacts_engine.section_index import delete_section as _delete_sec
@@ -91,6 +92,7 @@ class ArtifactEngine:
             content_dir=self.config.content_dir,
             small_content_limit=self.config.small_content_limit,
             max_versions_per_artifact=self.config.max_versions_per_artifact,
+            disk_space_warning_pct=self.config.disk_space_warning_pct,
         )
         # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
         # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
@@ -106,6 +108,17 @@ class ArtifactEngine:
         logger.info(
             "ArtifactEngine initialized: storage_root=%s", self.config.storage_root
         )
+
+    def _publish_disk_alarm(self, message: str) -> None:
+        # 运维4: 磁盘水位告警事件，经 EventBus 投递给 SSE 订阅者（运维侧监听）
+        try:
+            self.event_bus.publish(
+                "disk_full_alarm",
+                {"kind": "system.alarm", "message": message, "severity": "critical"},
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to publish disk alarm event")
+        logger.critical("DISK ALARM: %s", message)
 
     def shutdown_share_buffer(self) -> None:
         # H7: 委托 ShareManager.shutdown（R2 最终 flush 防计数丢失）
@@ -156,7 +169,12 @@ class ArtifactEngine:
             created_at=now,
         )
         # H5: 阻塞 storage 写卸到线程池，不独占事件循环
-        await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
+        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        try:
+            await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
+        except ResourceLimitError as e:
+            self._publish_disk_alarm(str(e))
+            raise
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
         logger.info(
             "Created artifact: %s name=%s size=%d tokens=%d sections=%d",
@@ -217,7 +235,12 @@ class ArtifactEngine:
             created_at=now,
         )
         # H5: 阻塞 storage 写卸到线程池
-        await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
+        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        try:
+            await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
+        except ResourceLimitError as e:
+            self._publish_disk_alarm(str(e))
+            raise
         if project_id:
             await asyncio.to_thread(self.storage.move_to_project_kb, artifact_id, project_id)
             artifact = self.storage.get_artifact(artifact_id)
@@ -600,14 +623,19 @@ class ArtifactEngine:
         summary = _truncate_summary(content) if not artifact.summary else None
         # C-8: 校验+分配+写入原子化，BEGIN IMMEDIATE 序列化并发写
         # H5: 原子写卸到线程池
-        new_version = await asyncio.to_thread(
-            self.storage.create_version_atomic,
-            artifact,
-            version,
-            content_hash,
-            summary,
-            expected_content_hash=expected_content_hash,
-        )
+        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        try:
+            new_version = await asyncio.to_thread(
+                self.storage.create_version_atomic,
+                artifact,
+                version,
+                content_hash,
+                summary,
+                expected_content_hash=expected_content_hash,
+            )
+        except ResourceLimitError as e:
+            self._publish_disk_alarm(str(e))
+            raise
         ref_text = generate_ref_text(
             artifact_id,
             artifact.name,

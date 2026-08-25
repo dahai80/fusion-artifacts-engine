@@ -50,6 +50,7 @@ from fusion_artifacts_engine.models import (
     ArtifactTag,
     ArtifactVersion,
 )
+from fusion_artifacts_engine.rpc.errors import ResourceLimitError
 from fusion_artifacts_engine.storage.base import StorageDriver
 
 _SCHEMA_SQL = """
@@ -285,13 +286,15 @@ def _event_from_row(row: sqlite3.Row) -> ArtifactEvent:
 class SQLiteStorage(StorageDriver):
     def __init__(
         self, db_path: Path, content_dir: Path, small_content_limit: int = 10240,
-        max_versions_per_artifact: int = 0,
+        max_versions_per_artifact: int = 0, disk_space_warning_pct: int = 0,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
         self.small_content_limit = small_content_limit
         # R9: 单 artifact 版本上限，0=不限。超限淘汰最旧非快照版本（防磁盘无限增长）
         self.max_versions_per_artifact = max_versions_per_artifact
+        # 运维4: 磁盘水位告警百分比（0-100），0=禁用预检。写前预检，超阈拒绝写
+        self.disk_space_warning_pct = max(0, int(disk_space_warning_pct))
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
         # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
@@ -380,7 +383,40 @@ class SQLiteStorage(StorageDriver):
 
     # ── artifact CRUD ──────────────────────────────────────────
 
+    def check_disk_space(self) -> tuple[int, int, float] | None:
+        # 运维4: 写前磁盘预检。返回 (used_pct, free_bytes, total) 或 None（禁用）。
+        # 0=禁用监控。超阈值由调用方判定是否拒绝写。
+        if self.disk_space_warning_pct <= 0:
+            return None
+        try:
+            usage = shutil.disk_usage(str(self.db_path.parent))
+        except OSError as e:
+            logger.warning("disk_usage check failed: %s", e)
+            return None
+        used_pct = round(usage.used / usage.total * 100, 1) if usage.total else 0.0
+        return (used_pct, usage.free, usage.total)
+
+    def ensure_disk_available(self) -> None:
+        # 运维4: 写前预检——磁盘使用率超阈值则拒绝写并抛 ResourceLimitError。
+        # 阈值 0 禁用。调用方在写路径入口调用。
+        if self.disk_space_warning_pct <= 0:
+            return
+        info = self.check_disk_space()
+        if info is None:
+            return
+        used_pct, _free, _total = info
+        if used_pct >= self.disk_space_warning_pct:
+            logger.error(
+                "disk space warning: %.1f%% used >= %d%% threshold, rejecting write",
+                used_pct, self.disk_space_warning_pct,
+            )
+            raise ResourceLimitError(
+                f"disk space at {used_pct}% (threshold {self.disk_space_warning_pct}%)"
+            )
+
     def save_artifact(self, artifact: Artifact) -> None:
+        # 运维4: 写前磁盘预检，超阈值拒绝写
+        self.ensure_disk_available()
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
             self._conn.execute(
@@ -455,6 +491,8 @@ class SQLiteStorage(StorageDriver):
     def save_artifact_and_version(
         self, artifact: Artifact, version: ArtifactVersion
     ) -> None:
+        # 运维4: 写前磁盘预检，超阈值拒绝写
+        self.ensure_disk_available()
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
             self._conn.execute(
@@ -980,6 +1018,8 @@ class SQLiteStorage(StorageDriver):
     # ── versions ───────────────────────────────────────────────
 
     def save_version(self, version: ArtifactVersion) -> None:
+        # 运维4: 写前磁盘预检，超阈值拒绝写
+        self.ensure_disk_available()
         # C-11/C-12/H2: 文件写事务外临时路径，提交后 rename 到最终路径。
         # 重试改 version_num 时只重算最终路径（tmp 文件不变），避免覆盖历史版本与串号，
         # 旧版本号不再写盘（tmp 单文件），彻底消除孤儿。
@@ -1178,6 +1218,8 @@ class SQLiteStorage(StorageDriver):
         summary: str | None,
         expected_content_hash: str | None = None,
     ) -> int:
+        # 运维4: 写前磁盘预检，超阈值拒绝写
+        self.ensure_disk_available()
         # C-8: 乐观锁校验+写入收进单事务，BEGIN IMMEDIATE 序列化并发写，
         # 事务内重读 current_version/content_hash 校验，分配 version_num，
         # 写 version 行并更新 artifact.current_version/content_hash，原子提交。
@@ -1990,6 +2032,19 @@ class SQLiteStorage(StorageDriver):
                 break
         self._conn.close()
         logger.info("SQLiteStorage closed")
+
+    def health_check(self) -> bool:
+        # 运维5: /readyz 探针依赖——SELECT 1 验证 DB 连接可用，content_dir 可写。
+        # 不做实质写入，仅探活。失败返回 False 不抛（调用方按状态码处理）。
+        try:
+            with self._write_lock:
+                row = self._conn.execute("SELECT 1").fetchone()
+                if row is None or row[0] != 1:
+                    return False
+            return self.content_dir.exists()
+        except Exception:  # noqa: BLE001
+            logger.exception("storage health_check failed")
+            return False
 
     def _migrate_token_count_column(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(artifact_versions)")

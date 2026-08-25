@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 #   -32002 optimistic-lock / 状态冲突（可重试）
 #   -32003 rate/资源受限（可重试/降级）
 #   -32004 业务规则拒绝（不可重试）
+#   -32005 未实现（占位方法已下线，不可重试，调用方应改用替代能力）
 
 
 class RpcError(Exception):
@@ -40,3 +41,10 @@ class BusinessRuleError(RpcError):
     # 业务规则拒绝（如非法状态转换）—— 不可重试
     def __init__(self, message: str = "Business rule violated"):
         super().__init__(-32004, message)
+
+
+class NotImplementedError(RpcError):
+    # 运维6: 占位方法下线（inject/interact 已宣传未实现，商用前显式拒绝而非返回 stub）。
+    # 保留 RPC 方法名注册（向后兼容旧客户端不报 method not found），但执行即拒。
+    def __init__(self, message: str = "Method not implemented"):
+        super().__init__(-32005, message)
