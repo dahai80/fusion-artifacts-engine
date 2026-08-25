@@ -1,11 +1,10 @@
+import asyncio
 import difflib
 import hashlib
 import json
 import logging
-import re
 import threading
 import time
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
 
@@ -21,43 +20,32 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
-from fusion_artifacts_engine.render import render_share_html
 from fusion_artifacts_engine.rpc.event_bus import EventBus
-from fusion_artifacts_engine.section_index import extract_sections, normalize_anchor
+from fusion_artifacts_engine.section_index import build_sections_with_tokens as _build_secs
+from fusion_artifacts_engine.section_index import delete_section as _delete_sec
+from fusion_artifacts_engine.section_index import (
+    extract_sections,
+    normalize_anchor,
+)
+from fusion_artifacts_engine.section_index import find_section_bounds as _find_bounds
+from fusion_artifacts_engine.section_index import replace_section as _replace_sec
+from fusion_artifacts_engine.share import ShareManager
 from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
+from fusion_artifacts_engine.token_budget import (
+    check_safety as _check_safety_fn,
+)
+from fusion_artifacts_engine.token_budget import (
+    context_budget as _context_budget_fn,
+)
+from fusion_artifacts_engine.token_budget import (
+    inject as _inject_fn,
+)
 from fusion_artifacts_engine.token_counter import count_tokens
 from fusion_artifacts_engine.utils import generate_artifact_id
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MAX_LEN = 200
-
-
-def _is_expired(expires_at: str | None) -> bool:
-    # L-1: fail-closed——无过期时间才放行；解析失败一律视为已过期，拒绝访问
-    if not expires_at:
-        return False
-    try:
-        exp = datetime.fromisoformat(expires_at)
-    except ValueError:
-        logger.warning("Unparseable expires_at %r, treat as expired (fail-closed)", expires_at)
-        return True
-    if exp.tzinfo is None:
-        exp = exp.replace(tzinfo=UTC)
-    return datetime.now(UTC) > exp
-
-
-def _parse_expires_at(expires_at: str | None) -> datetime | None:
-    # L-6: 解析 expires_at 为 aware datetime；None 放行，不可解析抛 ValueError
-    if not expires_at:
-        return None
-    try:
-        exp = datetime.fromisoformat(expires_at)
-    except ValueError as e:
-        raise ValueError(f"Invalid expires_at format: {expires_at!r}") from e
-    if exp.tzinfo is None:
-        exp = exp.replace(tzinfo=UTC)
-    return exp
 
 
 def _truncate_summary(content: str) -> str:
@@ -113,74 +101,15 @@ class ArtifactEngine:
         self._watchers_lock = threading.Lock()
         # A-2: EventBus 注入 engine 实例，避免模块级单例跨 engine 串流
         self.event_bus = EventBus()
-        # R2: share access_count 内存缓冲——公开 GET 只增内存计数，后台批量刷盘，
-        # 避免病毒式传播时每次公开访问都持 _write_lock 写 SQLite（写放大 DoS）。
-        # 刷新阈值/间隔兼顾准确性（max_accesses 校验含缓冲值）与写收敛。
-        self._share_access_buffer: dict[str, int] = {}
-        self._share_access_lock = threading.Lock()
-        self._share_flush_threshold = 50
-        self._share_flush_interval = 5.0
-        self._share_flush_stop = threading.Event()
-        self._share_flush_thread = threading.Thread(
-            target=self._share_flush_loop, name="share-access-flush", daemon=True
-        )
-        self._share_flush_thread.start()
+        # H7: share 访问控制 + R2 内存缓冲抽到 ShareManager
+        self.share_mgr = ShareManager(self)
         logger.info(
             "ArtifactEngine initialized: storage_root=%s", self.config.storage_root
         )
 
-    def _share_flush_loop(self) -> None:
-        # R2: 后台定期刷盘 share access 增量。daemon 线程，stop event 退出。
-        while not self._share_flush_stop.wait(self._share_flush_interval):
-            try:
-                self._flush_share_access()
-            except Exception as e:
-                logger.warning("share access flush failed: %s", e)
-
-    def _flush_share_access(self) -> None:
-        # R2: 原子取出缓冲增量，批量 UPDATE access_count += delta + last_access_at=now。
-        with self._share_access_lock:
-            if not self._share_access_buffer:
-                return
-            pending = self._share_access_buffer
-            self._share_access_buffer = {}
-        flushed = 0
-        for share_id, delta in pending.items():
-            try:
-                self.storage.increment_share_access(share_id, delta=delta)
-                flushed += 1
-            except Exception as e:
-                # 单条失败回填缓冲，下次再刷，不丢计数
-                logger.warning("flush share %s delta=%d failed: %s", share_id, delta, e)
-                with self._share_access_lock:
-                    self._share_access_buffer[share_id] = (
-                        self._share_access_buffer.get(share_id, 0) + delta
-                    )
-        if flushed:
-            logger.debug("share access flushed: %d share(s)", flushed)
-
-    def _buffer_share_access(self, share_id: str, share: ArtifactShare) -> None:
-        # R2: 内存增计数。max_accesses 校验用 access_count（已持久化）+ buffer（未刷）。
-        with self._share_access_lock:
-            self._share_access_buffer[share_id] = (
-                self._share_access_buffer.get(share_id, 0) + 1
-            )
-            buffered = self._share_access_buffer[share_id]
-        if buffered >= self._share_flush_threshold:
-            self._flush_share_access()
-
-    def _buffered_access_count(self, share_id: str, persisted: int) -> int:
-        # R2: 含缓冲的总访问数，供 E2 max_accesses 上限校验
-        with self._share_access_lock:
-            return persisted + self._share_access_buffer.get(share_id, 0)
-
     def shutdown_share_buffer(self) -> None:
-        # R2: 关停刷盘线程前最终 flush，防计数丢失
-        self._share_flush_stop.set()
-        try:
-            self._flush_share_access()
-        except Exception as e:
-            logger.warning("final share access flush failed: %s", e)
+        # H7: 委托 ShareManager.shutdown（R2 最终 flush 防计数丢失）
+        self.share_mgr.shutdown()
 
 
     async def create_artifact(
@@ -226,7 +155,8 @@ class ArtifactEngine:
             change_log=change_log,
             created_at=now,
         )
-        self.storage.save_artifact_and_version(artifact, version)
+        # H5: 阻塞 storage 写卸到线程池，不独占事件循环
+        await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
         ref_text = generate_ref_text(artifact_id, name, artifact_type, 1, size, summary)
         logger.info(
             "Created artifact: %s name=%s size=%d tokens=%d sections=%d",
@@ -286,9 +216,10 @@ class ArtifactEngine:
             change_log="Created by external module",
             created_at=now,
         )
-        self.storage.save_artifact_and_version(artifact, version)
+        # H5: 阻塞 storage 写卸到线程池
+        await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
         if project_id:
-            self.storage.move_to_project_kb(artifact_id, project_id)
+            await asyncio.to_thread(self.storage.move_to_project_kb, artifact_id, project_id)
             artifact = self.storage.get_artifact(artifact_id)
             logger.info(
                 "Auto-archived external artifact %s to project %s",
@@ -373,8 +304,11 @@ class ArtifactEngine:
         artifact_id: str,
         target_version: int,
     ) -> tuple[ArtifactVersion, str]:
+        # H5: 阻塞 storage 读卸到线程池
         try:
-            target = self.storage.get_version(artifact_id, target_version)
+            target = await asyncio.to_thread(
+                self.storage.get_version, artifact_id, target_version
+            )
         except FileNotFoundError as e:
             logger.error(
                 "Content file missing for %s v%s: %s", artifact_id, target_version, e
@@ -630,11 +564,14 @@ class ArtifactEngine:
         snapshot_type: str = "auto",
         parent_version: int | None = None,
     ) -> tuple[ArtifactVersion, str]:
-        artifact = self.storage.get_artifact(artifact_id)
+        # H5: 阻塞 storage 读卸到线程池
+        artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         if not change_log:
-            old = self.storage.get_version(artifact_id, artifact.current_version)
+            old = await asyncio.to_thread(
+                self.storage.get_version, artifact_id, artifact.current_version
+            )
             change_log = _auto_changelog(old.content if old else "", content)
         now = time.time()
         size = _size_bytes(content)
@@ -662,7 +599,9 @@ class ArtifactEngine:
         content_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:16]
         summary = _truncate_summary(content) if not artifact.summary else None
         # C-8: 校验+分配+写入原子化，BEGIN IMMEDIATE 序列化并发写
-        new_version = self.storage.create_version_atomic(
+        # H5: 原子写卸到线程池
+        new_version = await asyncio.to_thread(
+            self.storage.create_version_atomic,
             artifact,
             version,
             content_hash,
@@ -697,178 +636,22 @@ class ArtifactEngine:
         expires_at: str | None = None,
         max_accesses: int | None = None,
     ) -> ArtifactShare:
-        artifact = self.storage.get_artifact(artifact_id)
-        if artifact is None:
-            raise ValueError(f"Artifact not found: {artifact_id}")
-        # C-9: 仅拥有者可分享——artifact 有 owner_user_id 时校验 created_by 一致
-        if artifact.owner_user_id and created_by != artifact.owner_user_id:
-            logger.warning(
-                "Share denied: caller %s != owner %s for artifact %s",
-                created_by,
-                artifact.owner_user_id,
-                artifact_id,
-            )
-            raise PermissionError(
-                f"Only the owner can share artifact {artifact_id}"
-            )
-        # E2: 校验 max_accesses——必须为正整数，None=不限
-        if max_accesses is not None and max_accesses < 1:
-            logger.warning("create_share bad max_accesses %r", max_accesses)
-            raise ValueError(f"max_accesses must be >= 1 or null: {max_accesses}")
-        # L-6: 校验 expires_at 格式/范围——拒绝过去日期与超 max-TTL
-        if expires_at is not None:
-            try:
-                exp = _parse_expires_at(expires_at)
-            except ValueError:
-                logger.warning("create_share bad expires_at %r", expires_at)
-                raise
-            if exp is not None:
-                now_utc = datetime.now(UTC)
-                if exp <= now_utc:
-                    logger.warning("create_share past expires_at %r", expires_at)
-                    raise ValueError(f"expires_at must be in the future: {expires_at}")
-                max_ttl_days = self.config.share_max_ttl_days
-                if max_ttl_days > 0:
-                    max_exp = now_utc + timedelta(days=max_ttl_days)
-                    if exp > max_exp:
-                        logger.warning(
-                            "create_share expires_at %r exceeds max TTL %d days",
-                            expires_at, max_ttl_days,
-                        )
-                        raise ValueError(
-                            f"expires_at exceeds max TTL {max_ttl_days} days: {expires_at}"
-                        )
-        existing = self.storage.get_share_by_artifact(artifact_id)
-        if existing is not None:
-            logger.info(
-                "Returning existing share %s for artifact %s",
-                existing.share_id,
-                artifact_id,
-            )
-            return existing
-        import uuid
-
-        share_id = f"shr_{uuid.uuid4().hex[:12]}"
-        # E1: created_at 用 float epoch，与 Artifact/Version 一致
-        share = ArtifactShare(
-            share_id=share_id,
-            artifact_id=artifact_id,
-            created_by=created_by,
-            created_at=time.time(),
-            expires_at=expires_at,
-            max_accesses=max_accesses,
+        # H7: 委托 ShareManager
+        return self.share_mgr.create_share(
+            artifact_id, created_by, expires_at, max_accesses
         )
-        self.storage.save_share(share)
-        self.storage.set_artifact_share_id(artifact_id, share_id)
-        logger.info(
-            "Created share %s for artifact %s max_accesses=%s",
-            share_id, artifact_id, max_accesses,
-        )
-        return share
 
     def get_shared_artifact(self, share_id: str) -> dict | None:
-        share = self.storage.get_share(share_id)
-        if share is None:
-            return None
-        if share.revoked:
-            logger.info("Share %s is revoked", share_id)
-            return None
-        if _is_expired(share.expires_at):
-            logger.info("Share %s expired", share_id)
-            return None
-        # E2: 超过 max_accesses 上限则拒绝（在 increment 前，含缓冲值）
-        effective_count = self._buffered_access_count(share_id, share.access_count)
-        if share.max_accesses is not None and effective_count >= share.max_accesses:
-            logger.info(
-                "Share %s exhausted: %d >= %d", share_id,
-                effective_count, share.max_accesses,
-            )
-            return None
-        artifact = self.storage.get_artifact(share.artifact_id)
-        if artifact is None:
-            return None
-        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
-        self.storage.increment_share_access(share_id)
-        version = self.get_version_content(share.artifact_id)
-        content_type_map = {
-            "html": "text/html",
-            "react": "text/html",
-            "markdown": "text/markdown",
-            "code": "text/plain",
-            "data": "application/json",
-        }
-        ct = content_type_map.get(artifact.type, "text/plain")
-        return {
-            "artifact": artifact.model_dump(),
-            "content": version.content if version else "",
-            "content_type": ct,
-        }
+        # H7: 委托 ShareManager
+        return self.share_mgr.get_shared_artifact(share_id)
 
     def revoke_share(self, share_id: str) -> bool:
-        ok = self.storage.revoke_share(share_id)
-        logger.info("Revoked share %s ok=%s", share_id, ok)
-        return ok
+        # H7: 委托 ShareManager
+        return self.share_mgr.revoke_share(share_id)
 
     def get_public_share(self, share_id: str) -> dict:
-        share = self.storage.get_share(share_id)
-        if share is None:
-            logger.info("Public share %s not found", share_id)
-            return {"status": "not_found"}
-        if share.revoked:
-            logger.info("Public share %s revoked", share_id)
-            return {"status": "gone", "reason": "revoked"}
-        if _is_expired(share.expires_at):
-            logger.info("Public share %s expired", share_id)
-            return {"status": "gone", "reason": "expired"}
-        # E2: 超过 max_accesses 上限则返回 410 Gone（在 increment 前，含缓冲值）
-        effective_count = self._buffered_access_count(share_id, share.access_count)
-        if share.max_accesses is not None and effective_count >= share.max_accesses:
-            logger.info(
-                "Public share %s exhausted: %d >= %d", share_id,
-                effective_count, share.max_accesses,
-            )
-            return {"status": "gone", "reason": "exhausted"}
-        artifact = self.storage.get_artifact(share.artifact_id)
-        if artifact is None:
-            logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
-            return {"status": "not_found"}
-        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
-        # R2: 公开端点走内存缓冲（不持写锁），后台批量刷盘
-        self._buffer_share_access(share_id, share)
-        version = self.get_version_content(share.artifact_id)
-        raw_content = version.content if version else ""
-        rendered_html = render_share_html(artifact, raw_content)
-        logger.info(
-            "Public share %s served artifact %s (rendered, source isolated)",
-            share_id,
-            share.artifact_id,
-        )
-        # C-5: 公共未认证端点只回展示字段，不泄露 session_id/project_id/
-        # owner_user_id/metadata/content_hash/folder_id/created_by 等内部 PII
-        public_share = {
-            "share_id": share.share_id,
-            "expires_at": share.expires_at,
-            "revoked": share.revoked,
-            "max_accesses": share.max_accesses,
-            "access_count": effective_count + 1,
-        }
-        public_artifact = {
-            "id": artifact.id,
-            "name": artifact.name,
-            "type": artifact.type,
-            "kind": artifact.kind,
-            "summary": artifact.summary,
-            "current_version": artifact.current_version,
-            "created_at": artifact.created_at,
-            "updated_at": artifact.updated_at,
-        }
-        return {
-            "status": "ok",
-            "share": public_share,
-            "artifact": public_artifact,
-            "rendered_html": rendered_html,
-            "content_type": "text/html",
-        }
+        # H7: 委托 ShareManager
+        return self.share_mgr.get_public_share(share_id)
 
     # ── P2: snapshots ──────────────────────────────────────────
 
@@ -878,10 +661,13 @@ class ArtifactEngine:
         label: str | None = None,
         author: str | None = None,
     ) -> ArtifactVersion:
-        artifact = self.storage.get_artifact(artifact_id)
+        # H5: 阻塞 storage 读写卸到线程池
+        artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        current = self.storage.get_version(artifact_id, artifact.current_version)
+        current = await asyncio.to_thread(
+            self.storage.get_version, artifact_id, artifact.current_version
+        )
         if current is None:
             raise ValueError(f"No current version for artifact: {artifact_id}")
         new_ver_num = self.storage.next_version_num(artifact_id)
@@ -904,10 +690,10 @@ class ArtifactEngine:
             author=author,
             parent_version=artifact.current_version,
         )
-        self.storage.save_version(snapshot)
+        await asyncio.to_thread(self.storage.save_version, snapshot)
         artifact.current_version = new_ver_num
         artifact.updated_at = now
-        self.storage.save_artifact(artifact)
+        await asyncio.to_thread(self.storage.save_artifact, artifact)
         logger.info(
             "Created snapshot: %s v%d label=%s", artifact_id, new_ver_num, label
         )
@@ -1081,7 +867,8 @@ class ArtifactEngine:
         content: str = "",
         expected_version: int | None = None,
     ) -> tuple[ArtifactVersion, dict]:
-        artifact = self.storage.get_artifact(artifact_id)
+        # H5: 阻塞 storage 读卸到线程池
+        artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         if (
@@ -1092,7 +879,9 @@ class ArtifactEngine:
                 f"Optimistic lock failed: expected version {expected_version}, "
                 f"got {artifact.current_version}"
             )
-        current = self.storage.get_version(artifact_id, artifact.current_version)
+        current = await asyncio.to_thread(
+            self.storage.get_version, artifact_id, artifact.current_version
+        )
         if current is None:
             raise ValueError(f"No current version for artifact: {artifact_id}")
         old_content = current.content
@@ -1101,7 +890,8 @@ class ArtifactEngine:
         if operation == "replace_section":
             if not anchor:
                 raise ValueError("anchor is required for replace_section")
-            new_content, replaced_content = self._replace_section(
+            # H7: section patch 抽到 section_index 模块
+            new_content, replaced_content = _replace_sec(
                 old_content, anchor, content, artifact.type
             )
         elif operation == "append":
@@ -1113,7 +903,8 @@ class ArtifactEngine:
         elif operation == "delete_section":
             if not anchor:
                 raise ValueError("anchor is required for delete_section")
-            new_content, replaced_content = self._delete_section(
+            # H7: section patch 抽到 section_index 模块
+            new_content, replaced_content = _delete_sec(
                 old_content, anchor, artifact.type
             )
         else:
@@ -1144,125 +935,7 @@ class ArtifactEngine:
         )
         return version, patch_info
 
-    @staticmethod
-    def _all_section_bounds(
-        content: str, artifact_type: str
-    ) -> list[tuple[int, int, int, str]]:
-        # P-1: 一次线性扫预计算所有标题位置 + section 边界，避免 O(n^2)。
-        # 返回 (start, end, level, anchor) 列表，end 为下一同级/更高级标题行号。
-        lines = content.split("\n")
-        headers: list[tuple[int, int, str]] = []
-        for i, line in enumerate(lines):
-            if artifact_type == "markdown":
-                m = re.match(r"^(#{1,6})\s+(.+)$", line)
-                if m:
-                    headers.append((i, len(m.group(1)), m.group(2).strip()))
-            elif artifact_type == "code":
-                # E4: 多语言 section 检测。覆盖 Python(def/class/async def)
-                # JS/TS(function/const/export class/arrow)、Go(func)、Rust(fn/impl/struct/pub)
-                # Java(class/public..)。标识符允许 unicode（Python3 非ASCII方法名）。
-                m = re.match(
-                    r"^\s*(?:"
-                    r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)"
-                    r"|(?:export\s+)?(?:const|let|var)\s+(\w+)\s*="
-                    r"|(?:export\s+)?(?:default\s+)?class\s+(\w+)"
-                    r"|(?:async\s+)?def\s+(\w+)"
-                    r"|class\s+(\w+)"
-                    r"|(?:pub\s+)?fn\s+(\w+)"
-                    r"|(?:pub\s+)?(?:struct|enum|trait|impl)\s+(\w+)"
-                    r"|func(?:\s+\([^)]*\))?\s+(\w+)"
-                    r"|(?:public|private|protected|static)\s+(?:[\w<>\[\]]+\s+)?(\w+)\s*\("
-                    r")",
-                    line,
-                )
-                if m:
-                    name = next((g for g in m.groups() if g), None)
-                    if name:
-                        headers.append((i, 1, name))
-        bounds: list[tuple[int, int, int, str]] = []
-        for idx, (start, level, anchor) in enumerate(headers):
-            end = len(lines)
-            if artifact_type == "markdown":
-                for j in range(idx + 1, len(headers)):
-                    s2, l2, _ = headers[j]
-                    if l2 <= level:
-                        end = s2
-                        break
-            else:
-                if idx + 1 < len(headers):
-                    end = headers[idx + 1][0]
-            bounds.append((start, end, level, anchor))
-        return bounds
-
-    @staticmethod
-    def _find_section_bounds(
-        content: str, anchor: str, artifact_type: str
-    ) -> list[tuple[int, int, int]]:
-        # P-1: 复用 _all_section_bounds 线性结果，按 anchor 过滤；保持原多重匹配语义。
-        anchor = normalize_anchor(anchor)
-        return [
-            (s, e, lvl)
-            for s, e, lvl, anc in ArtifactEngine._all_section_bounds(
-                content, artifact_type
-            )
-            if anc == anchor
-        ]
-
-    def _replace_section(
-        self, content: str, anchor: str, new_content: str, artifact_type: str
-    ) -> tuple[str, str]:
-        matches = self._find_section_bounds(content, anchor, artifact_type)
-        if len(matches) > 1:
-            raise ValueError(
-                f"Multiple matches for anchor '{anchor}': "
-                f"found at lines {[m[0] + 1 for m in matches]}"
-            )
-        if not matches:
-            raise ValueError(f"Anchor '{anchor}' not found in content")
-        lines = content.split("\n")
-        start, end, _ = matches[0]
-        replaced_lines = lines[start:end]
-        replaced_content = "\n".join(replaced_lines)
-        new_lines = lines[:start] + new_content.split("\n") + lines[end:]
-        return "\n".join(new_lines), replaced_content
-
-    def _delete_section(
-        self, content: str, anchor: str, artifact_type: str
-    ) -> tuple[str, str]:
-        matches = self._find_section_bounds(content, anchor, artifact_type)
-        if len(matches) > 1:
-            raise ValueError(
-                f"Multiple matches for anchor '{anchor}': "
-                f"found at lines {[m[0] + 1 for m in matches]}"
-            )
-        if not matches:
-            raise ValueError(f"Anchor '{anchor}' not found in content")
-        lines = content.split("\n")
-        start, end, _ = matches[0]
-        replaced_lines = lines[start:end]
-        replaced_content = "\n".join(replaced_lines)
-        new_lines = lines[:start] + lines[end:]
-        return "\n".join(new_lines), replaced_content
-
     # ── AE-2: load_artifact ────────────────────────────────────
-
-    def _build_sections_with_tokens(
-        self, content: str, artifact_type: str
-    ) -> list[dict]:
-        # P-1: 单次线性扫导出所有 section 边界，避免每标题一次 O(n) 扫。
-        lines = content.split("\n")
-        sections = []
-        for start, end, _lvl, anchor in ArtifactEngine._all_section_bounds(
-            content, artifact_type
-        ):
-            section_text = "\n".join(lines[start:end])
-            sections.append(
-                {
-                    "anchor": anchor,
-                    "tokens": count_tokens(section_text),
-                }
-            )
-        return sections
 
     def load_artifact(
         self,
@@ -1277,7 +950,8 @@ class ArtifactEngine:
         if version is None:
             raise ValueError(f"No version found for artifact: {artifact_id}")
 
-        sections = self._build_sections_with_tokens(version.content, artifact.type)
+        # H7: section 构建/查找抽到 section_index 模块
+        sections = _build_secs(version.content, artifact.type)
 
         result: dict = {
             "artifact_id": artifact_id,
@@ -1291,7 +965,7 @@ class ArtifactEngine:
 
         if section:
             section = normalize_anchor(section)
-            matches = self._find_section_bounds(version.content, section, artifact.type)
+            matches = _find_bounds(version.content, section, artifact.type)
             if not matches:
                 raise ValueError(f"Section '{section}' not found in content")
             if len(matches) > 1:
@@ -1331,50 +1005,16 @@ class ArtifactEngine:
         session_id: str | None = None,
         context_window: int | None = None,
     ) -> dict:
-        # P-2: 用存储层一条 SQL 聚合 token，替代 N+1 逐版本读 + 无界 page_size=100000。
-        if context_window is not None and context_window < 1:
-            raise ValueError("context_window must be >= 1")
-        total_tokens, artifact_list = self.storage.sum_token_counts(
-            session_id=session_id
-        )
-        effective_window = (
-            context_window
-            if context_window is not None
-            else self.config.context_budget_default
-        )
-        utilization_pct = (
-            round(total_tokens / effective_window * 100, 1)
-            if effective_window > 0
-            else 0.0
-        )
-        warning = utilization_pct > 70
-        recommendation = None
-        if warning:
-            recommendation = "Consider using preview_only mode for artifact injection."
-        logger.info(
-            "Context budget session=%s total_tokens=%d window=%d utilization=%.1f%% warning=%s",
-            session_id,
-            total_tokens,
-            effective_window,
-            utilization_pct,
-            warning,
-        )
-        return {
-            "total_artifact_tokens": total_tokens,
-            "artifact_count": len(artifact_list),
-            "artifacts": artifact_list,
-            "context_window": effective_window,
-            "utilization_percent": utilization_pct,
-            "warning": warning,
-            "recommendation": recommendation,
-        }
+        # H7: token 预算逻辑抽到 token_budget 模块
+        return _context_budget_fn(self.config, self.storage, session_id, context_window)
 
     # ── AE-7: auto_compact ─────────────────────────────────────
 
     async def auto_compact(self, artifact_id: str, token_budget: int) -> dict:
         from fusion_artifacts_engine.compactor import compact_content
 
-        artifact = self.storage.get_artifact(artifact_id)
+        # H5: 阻塞 storage 读卸到线程池
+        artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         version = self.get_version_content(artifact_id)
@@ -1549,61 +1189,14 @@ class ArtifactEngine:
     def check_safety(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
-        current_tokens = 0
-        for msg in messages:
-            content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-            current_tokens += count_tokens(content)
-        effective_budget = (
-            output_budget
-            if output_budget and output_budget > 0
-            else self.config.context_budget_default
-        )
-        remaining = effective_budget - current_tokens
-        safe = remaining >= 0
-        logger.info(
-            "check_safety: current=%d budget=%d remaining=%d safe=%s",
-            current_tokens,
-            effective_budget,
-            remaining,
-            safe,
-        )
-        return {
-            "safe": safe,
-            "current_tokens": current_tokens,
-            "remaining_tokens": remaining,
-        }
+        # H7: 委托 token_budget 模块
+        return _check_safety_fn(self.config, messages, output_budget)
 
     def inject(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
-        # R7/STUB: inject 是占位实现，仅做 token 预算检查，不注入也不修改 messages。
-        # 不是未来扩展——是已宣传但未实现的能力。商用集成勿依赖注入副作用。
-        # README/SDK 已标注 stub（见 Batch8 文档修正）。返回 injected=False + stub=True。
-        total_tokens = 0
-        for msg in messages:
-            content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
-            total_tokens += count_tokens(content)
-        effective_budget = (
-            output_budget
-            if output_budget and output_budget > 0
-            else self.config.context_budget_default
-        )
-        safe = total_tokens <= effective_budget
-        logger.info(
-            "inject: messages=%d total_tokens=%d budget=%d safe=%s",
-            len(messages),
-            total_tokens,
-            effective_budget,
-            safe,
-        )
-        return {
-            "messages": messages,
-            "total_tokens": total_tokens,
-            "safe": safe,
-            "injected": False,
-            "stub": True,
-            "note": "STUB: budget check only, messages unchanged; inject not implemented",
-        }
+        # H7: 委托 token_budget 模块（R7/STUB 语义不变）
+        return _inject_fn(self.config, messages, output_budget)
 
     def interact_artifact(
         self,
@@ -1641,7 +1234,8 @@ class ArtifactEngine:
             raise ValueError(
                 "direction must be 'artifact_to_code' or 'code_to_artifact'"
             )
-        artifact = self.storage.get_artifact(artifact_id)
+        # H5: 阻塞 storage 读卸到线程池
+        artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         path = Path(file_path).expanduser()

@@ -26,9 +26,19 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
-## Security (v0.3.9 audit hardening)
+## Security (v0.3.10 audit hardening)
 
-v0.3.8 resolved all 59 findings from the 0824 security audit; **v0.3.9 completes the remaining 28 P0-P3 audit findings** (H1-H8 architecture, R1-R9 runtime, E1-E11 engineering) including 4 large refactors — write-conn pooling, event-loop thread pool, engine split, multi-node storage abstraction. 381 tests green. v0.3.9 highlights:
+v0.3.8 resolved all 59 findings from the 0824 security audit. v0.3.9 addressed the runtime/engineering findings (R1-R9, E1-E11) plus H2/H3/H6. **v0.3.10 completes the architecture refactors H5 and H7**, the two that materially change runtime behavior. H1 and H8 are retained by design (see below). 385 tests green, ruff clean. v0.3.10 highlights:
+
+- **H5 event-loop thread offload**: blocking synchronous storage calls inside async engine methods now run via `asyncio.to_thread` (default ThreadPoolExecutor), so sqlite/file I/O no longer stalls the single event loop while a write holds the write-lock. Storage stays thread-safe (`check_same_thread=False` + `_write_lock` + read pool of 4).
+- **H7 engine split**: the 1709-line `engine.py` god-class is split into modules behind a thin delegation layer (behavior-preserving) — `share.py` (`ShareManager` class with the R2 access buffer), `token_budget.py` (`context_budget`/`check_safety`/`inject`), and `section_index.py` (extended with `all_section_bounds`/`build_sections_with_tokens`/`replace_section`/`delete_section`). `engine.py` is now ~1300 lines and delegates.
+
+### H1 / H8 — retained by design
+
+- **H1 write-connection pool**: not added. SQLite WAL with `BEGIN IMMEDIATE` physically serializes writes, so a write-connection pool would be cargo-cult — the real write-amplification pain (file I/O under lock) was fixed by H2's two-phase write. A single write connection is architecturally correct.
+- **H8 multi-node storage**: the `StorageDriver` ABC (46 abstract methods) is the swap point; actual multi-node replication belongs to the `fusion-multi-node` project, out of scope for this middleware.
+
+### v0.3.9 retained highlights:
 
 - **R9 version-limit eviction**: `max_versions_per_artifact` enforced — evicts oldest non-snapshot versions past the limit (default 100, 0=unlimited). Fixed a transaction-leak regression where eviction DELETE left an implicit txn open.
 - **R2 share write amplification**: public share access is memory-buffered (5s/50-count flush), no write-lock per GET; `max_accesses` returns `410 Gone` once exhausted.
@@ -37,12 +47,11 @@ v0.3.8 resolved all 59 findings from the 0824 security audit; **v0.3.9 completes
 - **R8 error codes**: JSON-RPC custom range `-32001` NotFound / `-32002` Conflict (retryable) / `-32003` ResourceLimit (retryable) / `-32004` BusinessRule, mapped to REST HTTP codes.
 - **H5 timeout tiers**: per-method timeout (ping 5s, render/auto_compact 120s, default 30s); large-body (≥2MB) auto-escalates to 120s.
 - **H6 token cache**: LRU `count_tokens` cache (blake2b-keyed, max 2048, skip <256B).
-- **H3/H7 share render**: `lxml` Cleaner (real HTML parser) replaces regex sanitization; strict CSP on share iframe.
-- **H8 StorageDriver ABC**: expanded 8→46 abstract methods — multi-node/Postgres/object-storage swap implements the full ABC, engine untouched.
+- **H3 share render**: `lxml` Cleaner (real HTML parser) replaces regex sanitization; strict CSP on share iframe.
 - **E7 read connection pool**: read-only connection pool (max 4) replaces per-call connect/close.
 - **R5 migration gating**: `applied_migrations` registry — migrations run once, idempotent on restart.
 - **E9 lint gate**: `[tool.ruff]` config; `ruff check .` clean.
-- **E11 concurrency/fault tests**: 14 new tests cover H2 orphan GC, R9 eviction, R2 buffer, H6 cache, R8 codes, H8 ABC contract, R1 thread cap, E7 pool reuse, R5 gating.
+- **E11 concurrency/fault tests**: cover H2 orphan GC, R9 eviction, R2 buffer, H6 cache, R8 codes, H8 ABC contract, R1 thread cap, E7 pool reuse, R5 gating, plus H5 to_thread offload and H7 module extraction/line-count.
 
 v0.3.8 retained highlights:
 
@@ -452,8 +461,16 @@ sse:
 Product Layer: Fusion Code (tool_use) | Fusion Studio (GUI)
 ---------------------------------------------------------
 Middleware: Artifacts Engine (Python daemon, JSON-RPC 2.0 + REST /api/v1 + SSE)
+  engine.py (domain core, ~1300 lines, delegates to modules)
+    ├─ share.py        ShareManager — share access control + R2 access buffer
+    ├─ token_budget.py context_budget / check_safety / inject
+    ├─ section_index.py section bounds + patch (replace/delete section)
+    ├─ render.py       share HTML render (lxml Cleaner)
+    └─ auto_identifier.py should_create_artifact (threshold + renderable-type)
+  async engine methods offload blocking storage calls via asyncio.to_thread
 ---------------------------------------------------------
-Storage: SQLite (WAL) + Filesystem
+Storage: SQLite (WAL, single write conn + read pool of 4) + Filesystem
+  StorageDriver ABC (46 abstract methods) — swap point for multi-node/Postgres
 ```
 
 ## Roadmap
@@ -477,7 +494,7 @@ pytest tests/ -v
 pytest tests/ --cov=fusion_artifacts_engine --cov-report=term-missing
 ```
 
-Current coverage: **92%** across 367+ tests.
+Current coverage: **92%** across 385 tests.
 
 ## License
 

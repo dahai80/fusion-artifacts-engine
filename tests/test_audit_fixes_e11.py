@@ -151,8 +151,9 @@ def test_r2_share_access_buffered(tmp_path):
             got = eng.get_public_share(share.share_id)
             assert got["status"] == "ok"
         # buffer 中应有计数（未达刷盘阈值 50）
-        with eng._share_access_lock:
-            buffered = eng._share_access_buffer.get(share.share_id, 0)
+        # H7: share buffer 移到 ShareManager（eng.share_mgr）
+        with eng.share_mgr._lock:
+            buffered = eng.share_mgr._buffer.get(share.share_id, 0)
         assert buffered >= 10, f"R2 buffer should hold accesses: {buffered}"
     finally:
         eng.close()
@@ -330,3 +331,89 @@ def test_r5_migration_gating_idempotent(tmp_path):
     got = st2.get_artifact("art_r5")
     assert got is not None
     st2.close()
+
+
+# ── H5: 异步方法内阻塞 storage 调用卸到线程池 ─────────────────
+def test_h5_to_thread_offload(tmp_path):
+    # H5: create_artifact 是 async，内部 storage 写应经 asyncio.to_thread，
+    # 在事件循环线程外执行（to_thread 用默认 ThreadPoolExecutor，非 loop 线程）。
+    import asyncio as _asyncio
+    import threading
+
+    eng = _engine(tmp_path)
+    captured = {"caller_thread": None, "loop_thread": None}
+    real_save = eng.storage.save_artifact_and_version
+
+    def spy_save(art, ver):
+        captured["caller_thread"] = threading.current_thread()
+        return real_save(art, ver)
+
+    eng.storage.save_artifact_and_version = spy_save
+    try:
+        async def run():
+            captured["loop_thread"] = threading.current_thread()
+            art, _v, _r = await eng.create_artifact(
+                session_id="h5", name="offload",
+                artifact_type="code", content="x" * 500,
+            )
+            return art
+
+        art = _asyncio.run(run())
+        # to_thread 执行的 storage 写应在与 loop 线程不同的线程
+        assert captured["caller_thread"] is not None
+        assert captured["caller_thread"] is not captured["loop_thread"], (
+            "H5: storage write ran on event-loop thread (not offloaded)"
+        )
+        assert art.id.startswith("art_")
+    finally:
+        eng.close()
+
+
+# ── H7: engine.py 拆分——新模块存在且 engine 委托 ──────────────
+def test_h7_modules_extracted():
+    # H7: share/token_budget/section_index 模块抽出，engine 委托调用
+    import fusion_artifacts_engine.section_index as si_mod
+    import fusion_artifacts_engine.share as share_mod
+    import fusion_artifacts_engine.token_budget as tb_mod
+
+    assert hasattr(share_mod, "ShareManager")
+    assert hasattr(tb_mod, "context_budget")
+    assert hasattr(tb_mod, "check_safety")
+    assert hasattr(tb_mod, "inject")
+    assert hasattr(si_mod, "all_section_bounds")
+    assert hasattr(si_mod, "build_sections_with_tokens")
+    assert hasattr(si_mod, "replace_section")
+    assert hasattr(si_mod, "delete_section")
+
+
+def test_h7_engine_not_god_class(tmp_path):
+    # H7: engine.py 应从 1709 行降到 ~1300（god-class 缓解）
+    from pathlib import Path
+
+    engine_path = Path(__file__).resolve().parent.parent / "fusion_artifacts_engine" / "engine.py"
+    line_count = sum(1 for _ in engine_path.open())
+    assert line_count <= 1350, (
+        f"H7: engine.py still {line_count} lines (target <=1350 after extract)"
+    )
+
+
+def test_h7_patch_section_delegated(tmp_path):
+    # H7: patch replace_section/delete_section 走 section_index 模块，行为不变
+    eng = _engine(tmp_path)
+    try:
+        py_code = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+        art, _v, _ref = asyncio.run(
+            eng.create_artifact(
+                session_id="h7p", name="patch", artifact_type="code", content=py_code,
+            )
+        )
+        _ver, info = asyncio.run(
+            eng.patch_artifact(art.id, "replace_section", anchor="foo", content="def foo():\n    return 99\n")
+        )
+        assert info["new_version"] == 2
+        loaded = eng.load_artifact(art.id, preview_only=False)
+        assert "return 99" in loaded["content"]
+        assert "def bar" in loaded["content"]
+    finally:
+        eng.close()
+
