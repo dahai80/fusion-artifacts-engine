@@ -44,6 +44,8 @@ security:
 
 sse:
   heartbeat_interval: 30
+  # P1-7/M7: SSE 单连接最大存活秒。0=不限。超时服务端主动关流促重连，防僵尸长连接占线程
+  max_lifetime: 3600
 
 rate_limit:
   # 运维1: 令牌桶限流。rps=0 表示不限流（向后兼容，但生产不建议）。

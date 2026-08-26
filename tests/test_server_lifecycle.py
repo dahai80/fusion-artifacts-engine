@@ -224,3 +224,94 @@ def test_server_rest_body_too_large():
     server.stop()
     engine.close()
     shutil.rmtree(tmp)
+
+
+def test_server_sse_invalid_kind_filter_rejected():
+    # P1-7/M7: kind_filter 非法值应直接拒绝连接（400），不建立 SSE 流。
+    tmp = Path(tempfile.mkdtemp())
+    cfg = ArtifactEngineConfig(
+        storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1
+    )
+    engine = ArtifactEngine(cfg)
+    server = ArtifactRPCServer(engine, host="127.0.0.1", port=19916)
+    server.start_async()
+    time.sleep(0.5)
+
+    try:
+        resp = httpx.get(
+            "http://127.0.0.1:19916/api/v1/events/stream?kind=not-a-real-kind",
+            timeout=5.0,
+        )
+        assert resp.status_code == 400
+        assert "Invalid kind" in resp.text
+    finally:
+        server.stop()
+        engine.close()
+        shutil.rmtree(tmp)
+
+
+def test_server_sse_valid_kind_filter_accepted():
+    # P1-7/M7: kind_filter 合法值应正常建立 SSE 流。
+    tmp = Path(tempfile.mkdtemp())
+    cfg = ArtifactEngineConfig(
+        storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1
+    )
+    engine = ArtifactEngine(cfg)
+    server = ArtifactRPCServer(engine, host="127.0.0.1", port=19917)
+    server.start_async()
+    time.sleep(0.5)
+
+    received = b""
+    try:
+        with httpx.stream(
+            "GET",
+            "http://127.0.0.1:19917/api/v1/events/stream?kind=code",
+            timeout=5.0,
+        ) as resp:
+            assert resp.status_code == 200
+            for chunk in resp.iter_text():
+                received += chunk.encode()
+                if b"heartbeat" in received:
+                    break
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        pass
+    assert b"heartbeat" in received, "valid kind_filter must allow SSE stream"
+
+    server.stop()
+    engine.close()
+    shutil.rmtree(tmp)
+
+
+def test_server_sse_max_lifetime_closes_stream():
+    # P1-7/M7: sse_max_lifetime 到期后服务端主动关流，发 __max_lifetime__ 事件促重连。
+    tmp = Path(tempfile.mkdtemp())
+    cfg = ArtifactEngineConfig(
+        storage_root=tmp / "artifacts",
+        allow_no_auth=True,
+        sse_heartbeat_interval=1,
+        sse_max_lifetime=2,
+    )
+    engine = ArtifactEngine(cfg)
+    server = ArtifactRPCServer(engine, host="127.0.0.1", port=19918)
+    server.start_async()
+    time.sleep(0.5)
+
+    received = b""
+    try:
+        with httpx.stream(
+            "GET", "http://127.0.0.1:19918/api/v1/events/stream", timeout=8.0
+        ) as resp:
+            assert resp.status_code == 200
+            for chunk in resp.iter_text():
+                received += chunk.encode()
+                if b"__max_lifetime__" in received:
+                    break
+    except (httpx.ConnectError, httpx.TimeoutException, OSError):
+        pass
+    assert (
+        b"__max_lifetime__" in received
+    ), "SSE must close stream after max_lifetime and emit __max_lifetime__"
+
+    server.stop()
+    engine.close()
+    shutil.rmtree(tmp)

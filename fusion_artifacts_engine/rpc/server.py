@@ -6,12 +6,14 @@ import os
 import queue
 import threading
 import time
+import typing
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.models import ArtifactKind
 from fusion_artifacts_engine.metrics import get_metrics
 from fusion_artifacts_engine.rate_limiter import RateLimiter
 from fusion_artifacts_engine.rpc.errors import (
@@ -51,6 +53,9 @@ _LARGE_BODY_THRESHOLD = 2 * 1024 * 1024
 _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
 _API_CSP = "default-src 'none'; frame-ancestors 'none'"
+
+# P1-7/M7: 合法 ArtifactKind 值集合，SSE kind_filter 校验用。非法 kind 拒绝连接。
+_VALID_ARTIFACT_KINDS = set(typing.get_args(ArtifactKind))
 
 
 def _parse_json_query(query: dict, key: str) -> dict | None:
@@ -532,6 +537,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         kind_filter = query.get("kind", [None])[0]
+        # P1-7/M7: kind_filter 校验——非 None 时必须为合法 ArtifactKind，否则拒绝连接。
+        if kind_filter is not None and kind_filter not in _VALID_ARTIFACT_KINDS:
+            self._log.warning(
+                "SSE rejected invalid kind_filter=%s (allowed: %s)",
+                kind_filter, sorted(_VALID_ARTIFACT_KINDS),
+            )
+            self._send_rest_response(400, {"error": f"Invalid kind: {kind_filter}"})
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -548,14 +561,33 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
         sub = engine.event_bus.subscribe()
         heartbeat_interval = engine.config.sse_heartbeat_interval
+        # P1-7/M7: 单连接最大存活。0=不限；超时主动关流促客户端重连，防僵尸长连接占线程。
+        max_lifetime = max(0, getattr(engine.config, "sse_max_lifetime", 0))
 
         self._log.info(
-            "SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter
+            "SSE connected: watcher=%s kind_filter=%s max_lifetime=%s",
+            watcher_id, kind_filter, max_lifetime or "unlimited",
         )
+        deadline = time.monotonic() + max_lifetime if max_lifetime > 0 else None
         try:
             while True:
+                # P1-7: 到达存活上限主动关流
+                if deadline is not None and time.monotonic() >= deadline:
+                    self._log.info(
+                        "SSE max_lifetime reached, closing watcher=%s", watcher_id
+                    )
+                    try:
+                        self.wfile.write(b"event: __max_lifetime__\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    break
                 try:
-                    event = sub.get(timeout=heartbeat_interval)
+                    # P1-7: 取事件时不超过到 deadline 的剩余时间，避免超期仍阻塞整段心跳间隔
+                    wait = heartbeat_interval
+                    if deadline is not None:
+                        wait = max(0.1, min(wait, deadline - time.monotonic()))
+                    event = sub.get(timeout=wait)
                     if event is None:
                         break
                     etype = event.get("event_type")

@@ -460,6 +460,7 @@ security:
 
 sse:
   heartbeat_interval: 30
+  max_lifetime: 3600        # v0.4.2：单 SSE 连接最大存活秒；0=不限。到期服务端关流（发 __max_lifetime__）促客户端重连，防僵尸长连接占线程
 ```
 
 ## 架构

@@ -558,6 +558,7 @@ metrics:                 # 运维2
 
 sse:
   heartbeat_interval: 30
+  max_lifetime: 3600        # v0.4.2: max seconds per SSE connection; 0=unlimited. Server closes stream after expiry (emits __max_lifetime__) to force client reconnect; prevents zombie long-lived connections holding worker threads
 ```
 
 ## Architecture
