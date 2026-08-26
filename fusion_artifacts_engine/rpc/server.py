@@ -409,8 +409,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     },
                 )
             else:
-                page = int(query.get("page", ["1"])[0])
-                page_size = int(query.get("page_size", ["20"])[0])
+                try:
+                    page = int(query.get("page", ["1"])[0])
+                    page_size = int(query.get("page_size", ["20"])[0])
+                except ValueError:
+                    self._send_rest_response(400, {"error": "Invalid page or page_size"})
+                    return
                 sort = query.get("sort", ["updated_at"])[0]
                 artifacts, total = engine.list_all_artifacts(
                     filters=filters,
@@ -625,9 +629,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def _run_async(self, coro, timeout: int | None = None):
         loop = self.server._async_loop
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(
-            timeout=timeout or self._TIMEOUT_DEFAULT
-        )
+        # P1-9/M17: 捕获 future，超时后显式 cancel()，否则已提交任务在 event loop 里
+        # 孤儿般继续跑（占线程/内存/锁），超时只是放弃等待不放弃执行。
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout or self._TIMEOUT_DEFAULT)
+        except TimeoutError:
+            cancelled = future.cancel()
+            logger.warning(
+                "async dispatch timed out (timeout=%ss), future cancel=%s",
+                timeout or self._TIMEOUT_DEFAULT, cancelled,
+            )
+            raise
 
     async def _handle(self, request: dict) -> dict:
         method = request.get("method", "")

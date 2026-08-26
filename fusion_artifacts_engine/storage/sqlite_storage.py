@@ -96,6 +96,24 @@ def _enforce_metadata_limit(metadata: dict | None, limit: int) -> None:
         raise ResourceLimitError(
             f"Metadata too large: {size} bytes exceeds max_metadata_bytes {limit}"
         )
+
+
+def _clamp_pagination(page, page_size, max_size: int = 500) -> tuple[int, int]:
+    # P1-5/M5: 分页入参硬化——page>=1、page_size<=max_size、非整数 try/except 回退默认。
+    # 防 page_size=10**9 拉全表 DoS、page<=0 负偏移、page="abc" TypeError。
+    try:
+        page = int(page) if page is not None else 1
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        page_size = int(page_size) if page_size is not None else 20
+    except (ValueError, TypeError):
+        page_size = 20
+    page = max(1, page)
+    page_size = max(1, min(page_size, max_size))
+    return page, page_size
+
+
 from fusion_artifacts_engine.storage.base import StorageDriver
 
 _SCHEMA_SQL = """
@@ -730,6 +748,8 @@ class SQLiteStorage(StorageDriver):
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[Artifact], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0"]
         params: list = []
         if filters:
@@ -1020,6 +1040,8 @@ class SQLiteStorage(StorageDriver):
     def list_recycle(
         self, page: int = 1, page_size: int = 20
     ) -> tuple[list[Artifact], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 1"]
         params: list = []
         where = " AND ".join(conditions)
@@ -1456,7 +1478,8 @@ class SQLiteStorage(StorageDriver):
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
         # P-3: 分页 + 可选跳过内容文件读，避免无界扫描全量入内存
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
             cur = conn.execute(
@@ -1485,7 +1508,8 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
             cur = conn.execute(
@@ -1842,6 +1866,8 @@ class SQLiteStorage(StorageDriver):
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = []
         params: list = []
         if artifact_id:
@@ -2099,7 +2125,8 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
     ) -> list[Artifact]:
         # P-3: 分页避免无界扫描
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0", "source_module = ?"]
         params: list = [source_module]
         if workspace_id:

@@ -554,3 +554,47 @@ def test_context_budget_warning_high_utilization(rpc_server):
         result["recommendation"]
         == "Consider using preview_only mode for artifact injection."
     )
+
+
+def test_list_all_bad_page_returns_invalid_params(rpc_server):
+    # P1-5: list_all 直传 params（无 int()），storage _clamp_pagination 把非 int 兜底为默认——
+    # 不报错，防御性成功。验证不崩溃且返回正常结构。
+    r = rpc("artifact.list_all", {"page": "abc", "page_size": "xyz"})
+    assert "artifacts" in r["result"]
+
+
+def test_list_versions_bad_page_returns_invalid_params(rpc_server):
+    # P1-5: version_list 用 int(params.get("page"))，非 int → ValueError → dispatch 捕获转 -32602。
+    r = rpc(
+        "artifact.create",
+        {"session_id": "s_pg", "name": "pg.py", "type": "code", "content": "x"},
+    )
+    art_id = r["result"]["artifact"]["id"]
+    r2 = rpc("artifact.version_list", {"artifact_id": art_id, "page": "xx"})
+    assert r2["error"]["code"] == -32602
+
+
+def test_list_all_huge_page_size_clamped(rpc_server):
+    # P1-5: page_size 远超 500 时 storage _clamp_pagination 截到 500，不报错。
+    r = rpc("artifact.list_all", {"page": 1, "page_size": 99999})
+    assert "artifacts" in r["result"]
+
+
+def test_rest_list_bad_page_returns_400(rpc_server):
+    # P1-5: REST /api/v1/artifacts 非 int page → 400 而非 500。
+    resp = httpx.get(
+        f"http://127.0.0.1:{PORT}/api/v1/artifacts",
+        params={"page": "abc"},
+        timeout=5.0,
+    )
+    assert resp.status_code == 400
+
+
+def test_rest_list_huge_page_size_ok(rpc_server):
+    # P1-5: REST 大 page_size 截到 500，200 OK。
+    resp = httpx.get(
+        f"http://127.0.0.1:{PORT}/api/v1/artifacts",
+        params={"page": "1", "page_size": "99999"},
+        timeout=5.0,
+    )
+    assert resp.status_code == 200
