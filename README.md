@@ -487,6 +487,41 @@ asyncio.run(main())
 - **Optimistic locking**: concurrent update detection via `expected_content_hash`
 - **Path traversal protection**: export paths are sanitized
 
+## Backup & Restore (v0.4.2)
+
+The daemon runs in SQLite **WAL** mode. A background thread performs a periodic `PASSIVE` checkpoint (default every 300s) to bound `-wal` growth, and `close()` runs a final `TRUNCATE` checkpoint so a stopped instance leaves a clean `meta.db` with no outstanding WAL frames.
+
+**Online backup** — use `scripts/backup.sh` while the daemon is running (no lock, WAL-consistent snapshot):
+
+```bash
+# Default: ~/.fusion/artifacts -> ~/.fusion/artifacts-backup-<timestamp>
+./scripts/backup.sh
+
+# Custom destination
+./scripts/backup.sh /var/backups/artifacts-20260826
+
+# Override source storage root
+STORAGE_ROOT=/data/artifacts ./scripts/backup.sh /backup
+```
+
+The script snapshots `meta.db` via `sqlite3 .backup` (WAL-consistent, does not block reads/writes) and incrementally rsyncs `content/`. Requires `sqlite3` and `rsync` on PATH.
+
+**Restore** — stop the daemon, then copy the snapshot `meta.db` and `content/` back into the storage root:
+
+```bash
+./start.sh stop
+rsync -a /var/backups/artifacts-20260826/meta.db ~/.fusion/artifacts/
+rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
+./start.sh start
+```
+
+**Config** — tune the checkpoint interval via `wal_checkpoint_interval` (seconds; `0` disables the background thread, relying on SQLite's default 1000-page auto-checkpoint):
+
+```yaml
+storage:
+  wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
+```
+
 ## Configuration
 
 ```yaml

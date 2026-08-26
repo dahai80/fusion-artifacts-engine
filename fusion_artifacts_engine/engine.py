@@ -95,6 +95,7 @@ class ArtifactEngine:
             disk_space_warning_pct=self.config.disk_space_warning_pct,
             max_content_bytes=self.config.max_content_bytes,
             max_metadata_bytes=self.config.max_metadata_bytes,
+            wal_checkpoint_interval=self.config.wal_checkpoint_interval,
         )
         # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
         # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，

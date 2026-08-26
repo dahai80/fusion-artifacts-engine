@@ -351,6 +351,7 @@ class SQLiteStorage(StorageDriver):
         self, db_path: Path, content_dir: Path, small_content_limit: int = 10240,
         max_versions_per_artifact: int = 0, disk_space_warning_pct: int = 0,
         max_content_bytes: int = 0, max_metadata_bytes: int = 0,
+        wal_checkpoint_interval: int = 300,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
@@ -391,8 +392,22 @@ class SQLiteStorage(StorageDriver):
         # 迁移方法仍需幂等（兼容无 applied_migrations 记录的既有 DB 首次升级）。
         self._migrate_schema_meta()
         self._run_migrations_gated()
+        # P1-4: WAL 周期 checkpoint 后台线程。PASSIVE 模式不阻塞读写，控制 -wal 文件增长，
+        # 让 scripts/backup.sh 的 sqlite3 .backup（需 WAL 已 checkpoint 才能完整快照）可靠。
+        # interval=0 禁用（依赖 SQLite 默认 1000 页自动 checkpoint）。daemon 线程，stop event 退出。
+        self._wal_checkpoint_interval = max(0, int(wal_checkpoint_interval))
+        self._checkpoint_stop = threading.Event()
+        self._checkpoint_thread: threading.Thread | None = None
+        if self._wal_checkpoint_interval > 0:
+            self._checkpoint_thread = threading.Thread(
+                target=self._checkpoint_loop,
+                name="wal-checkpoint",
+                daemon=True,
+            )
+            self._checkpoint_thread.start()
         logger.info(
-            "SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir
+            "SQLiteStorage initialized: db=%s content_dir=%s wal_checkpoint=%ss",
+            db_path, content_dir, self._wal_checkpoint_interval or "disabled",
         )
 
     @contextmanager
@@ -404,6 +419,24 @@ class SQLiteStorage(StorageDriver):
             yield conn
         finally:
             self._read_pool.put(conn)
+
+    def _checkpoint_loop(self) -> None:
+        # P1-4: 后台周期 PASSIVE checkpoint。PASSIVE 不阻塞读写，把已提交的 WAL 帧合并回主库。
+        # 控制 -wal 文件无限增长（默认 1000 页才自动 checkpoint，长事务下会堆积）。
+        while not self._checkpoint_stop.wait(self._wal_checkpoint_interval):
+            try:
+                self._run_checkpoint("PASSIVE")
+            except Exception as e:
+                logger.warning("WAL PASSIVE checkpoint failed: %s", e)
+
+    def _run_checkpoint(self, mode: str = "PASSIVE") -> None:
+        # P1-4: 执行一次 wal_checkpoint。PASSIVE=非阻塞合并；TRUNCATE=合并后截断 -wal 文件。
+        # TRUNCATE 在 close 时用，确保停机后 -wal 文件清空（备份/迁移只拷 meta.db 即可）。
+        with self._write_lock:
+            cur = self._conn.execute(f"PRAGMA wal_checkpoint({mode})")
+            row = cur.fetchone()
+            # (busy, log, checkpointed)：busy=1 表示有读写未完成（PASSIVE 正常），不报错
+            logger.debug("WAL checkpoint(%s): busy=%s log=%s ckpt=%s", mode, row[0], row[1], row[2])
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
         d = self.content_dir / artifact_id
@@ -2146,6 +2179,15 @@ class SQLiteStorage(StorageDriver):
         return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
+        # P1-4: 先停 checkpoint 后台线程，再做最终 TRUNCATE checkpoint，确保停机后 -wal 清空。
+        if self._checkpoint_thread is not None:
+            self._checkpoint_stop.set()
+            self._checkpoint_thread.join(timeout=5)
+            self._checkpoint_thread = None
+        try:
+            self._run_checkpoint("TRUNCATE")
+        except Exception as e:
+            logger.warning("WAL final TRUNCATE checkpoint failed: %s", e)
         # E7: 关连接池里的只读连接（非阻塞取出，取不到说明正被借出，跳过）
         while True:
             try:

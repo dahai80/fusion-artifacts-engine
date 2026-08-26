@@ -640,3 +640,31 @@ def test_content_file_missing(storage):
     # L-16: 内容文件缺失是数据损坏，storage 上抛而非伪造空版本
     with pytest.raises(FileNotFoundError):
         storage.get_version("art1", 1)
+
+
+def test_p14_close_runs_truncate_checkpoint_clears_wal(storage):
+    # P1-4: 写入产生 WAL 帧，close() 跑 TRUNCATE checkpoint 后 -wal 文件应清空（不存在或 0 字节）。
+    # 验证停机后备份只拷 meta.db 即可，无需 -wal/-shm（scripts/backup.sh 依赖此前提）。
+    art = _make_artifact()
+    ver = _make_version(content="content for wal checkpoint test")
+    storage.save_artifact_and_version(art, ver)
+    wal_file = storage.db_path.parent / f"{storage.db_path.name}-wal"
+    # 写入后 -wal 可能存在且非空（WAL 模式未 checkpoint）
+    assert storage.db_path.exists()
+    storage.close()
+    # TRUNCATE 后 -wal 应为 0 字节或不存在
+    if wal_file.exists():
+        assert wal_file.stat().st_size == 0
+    storage._conn = None  # 防止 fixture teardown 二次 close
+
+
+def test_p14_disabled_checkpoint_no_thread():
+    # P1-4: wal_checkpoint_interval=0 禁用后台线程，_checkpoint_thread 应为 None。
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        s = SQLiteStorage(tmp / "test.db", tmp / "content", wal_checkpoint_interval=0)
+        assert s._checkpoint_thread is None
+        assert s._wal_checkpoint_interval == 0
+        s.close()
+    finally:
+        shutil.rmtree(tmp)

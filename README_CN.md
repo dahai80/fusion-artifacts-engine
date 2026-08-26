@@ -399,6 +399,41 @@ asyncio.run(main())
 - **乐观锁**：通过 `expected_content_hash` 检测并发更新
 - **路径穿越防护**：导出路径经过清洗
 
+## 备份与恢复 (v0.4.2)
+
+守护进程以 SQLite **WAL** 模式运行。后台线程周期性执行 `PASSIVE` checkpoint（默认每 300 秒），控制 `-wal` 文件增长；`close()` 时执行最终 `TRUNCATE` checkpoint，确保停机后 `meta.db` 自成一体、无残留 WAL 帧。
+
+**在线备份** —— 守护进程运行时使用 `scripts/backup.sh`（不锁库，WAL 一致性快照）：
+
+```bash
+# 默认：~/.fusion/artifacts -> ~/.fusion/artifacts-backup-<时间戳>
+./scripts/backup.sh
+
+# 指定目标
+./scripts/backup.sh /var/backups/artifacts-20260826
+
+# 覆盖源 storage root
+STORAGE_ROOT=/data/artifacts ./scripts/backup.sh /backup
+```
+
+脚本通过 `sqlite3 .backup` 对 `meta.db` 做在线一致性快照（不阻塞读写），并用 rsync 增量复制 `content/`。需 PATH 中有 `sqlite3` 与 `rsync`。
+
+**恢复** —— 停止守护进程后，将快照 `meta.db` 与 `content/` 拷回 storage root：
+
+```bash
+./start.sh stop
+rsync -a /var/backups/artifacts-20260826/meta.db ~/.fusion/artifacts/
+rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
+./start.sh start
+```
+
+**配置** —— 通过 `wal_checkpoint_interval`（秒；`0` 禁用后台线程，依赖 SQLite 默认 1000 页自动 checkpoint）调整 checkpoint 间隔：
+
+```yaml
+storage:
+  wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
+```
+
 ## 配置
 
 ```yaml

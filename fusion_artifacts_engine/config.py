@@ -67,6 +67,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "small_content_limit": ("small_content_limit", None),
             "sync_root": ("sync_root", _expanduser_path),
             "disk_space_warning_pct": ("disk_space_warning_pct", None),
+            "wal_checkpoint_interval": ("wal_checkpoint_interval", None),
         },
         "thresholds": {
             "auto_create_lines": ("auto_create_threshold_lines", None),
@@ -139,6 +140,8 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_PUBLIC_BURST": ("public_rate_limit_burst", int),
         "FUSION_ARTIFACTS_METRICS_ENABLED": ("metrics_enabled", _parse_bool),
         "FUSION_ARTIFACTS_DISK_WARNING_PCT": ("disk_space_warning_pct", int),
+        # P1-4: WAL checkpoint 间隔 env 覆盖
+        "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -196,6 +199,9 @@ class ArtifactEngineConfig(BaseModel):
     # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning。
     # 字段默认 0（禁用，单元测试不依赖宿主机磁盘状态）；生产经 default_config.yaml 设 90。
     disk_space_warning_pct: int = Field(default=0)
+    # P1-4: WAL 周期 checkpoint 间隔秒。0=禁用后台 checkpoint（依赖 SQLite 默认 1000 页自动）。
+    # 生产建议 300——后台 PASSIVE checkpoint 控制 -wal 文件增长，配合 backup.sh 在线备份。
+    wal_checkpoint_interval: int = Field(default=300)
     # 运维1: 令牌桶限流。rps=0 表示不限流（默认）。default 桶覆盖 JSON-RPC + 鉴权 REST
     rate_limit_rps: float = Field(default=0)
     rate_limit_burst: int = Field(default=0)

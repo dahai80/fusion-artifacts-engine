@@ -14,6 +14,9 @@ storage:
   sync_root: ""
   # R9: 磁盘水位告警百分比（0-100），0=禁用监控
   disk_space_warning_pct: 90
+  # P1-4: WAL 周期 checkpoint 间隔秒。0=禁用（依赖 SQLite 默认 1000 页自动）。
+  # 生产建议 300——后台 PASSIVE checkpoint 控制 -wal 文件增长，配合 scripts/backup.sh 在线备份。
+  wal_checkpoint_interval: 300
 
 thresholds:
   auto_create_lines: 30
