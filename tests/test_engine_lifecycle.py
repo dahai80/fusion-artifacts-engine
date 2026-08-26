@@ -374,7 +374,10 @@ async def test_create_version_optimistic_lock_fail(engine):
     art, _, _ = await engine.create_artifact("s1", "lock.py", "code", "v1")
     await engine.create_version(art.id, "v2")
     art = engine.storage.get_artifact(art.id)
-    with pytest.raises(ValueError, match="Optimistic lock failed"):
+    # P0-2: 乐观锁失败映射 ConflictError(-32002, 可重试) 而非 ValueError(-32603)
+    from fusion_artifacts_engine.rpc.errors import ConflictError
+
+    with pytest.raises(ConflictError, match="Optimistic lock failed"):
         await engine.create_version(art.id, "v3", expected_content_hash="wrong_hash")
 
 

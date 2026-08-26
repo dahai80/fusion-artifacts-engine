@@ -135,7 +135,7 @@ curl -X POST http://127.0.0.1:11451 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id?, metadata?, owner_user_id?, ownership_type? | Create artifact + v1 |
+| `artifact.create` | session_id, name, type, content, summary?, change_log?, kind?, project_id?, metadata? | Create artifact + v1 |
 | `artifact.get` | artifact_id, project_id? | Get metadata |
 | `artifact.get_content` | artifact_id, version? | Get version content |
 | `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | List session artifacts |
@@ -169,7 +169,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | Star/unstar artifact |
 | `artifact.pin` | artifact_id, pinned, chat_id? | Pin/unpin artifact to chat |
 | `artifact.duplicate` | artifact_id | Duplicate artifact with new ID |
-| `artifact.list_all` | owner_user_id?, ownership_type?, folder_id?, is_starred? | List all artifacts (cross-session) |
+| `artifact.list_all` | filters?, sort?, page?, page_size? | List all artifacts (cross-session) |
 
 ### Recycle Bin Methods (P1)
 
@@ -185,7 +185,7 @@ curl -X POST http://127.0.0.1:11451 \
 |---|---|---|
 | `artifact.create_share` | artifact_id, max_accesses?, expires_at? | Create share link |
 | `artifact.get_shared` | share_id | Get shared artifact (public) |
-| `artifact.revoke_share` | artifact_id | Revoke share link |
+| `artifact.revoke_share` | share_id | Revoke share link |
 
 ### Snapshot Methods (P2)
 
@@ -218,13 +218,13 @@ curl -X POST http://127.0.0.1:11451 \
 | Method | Params | Description |
 |---|---|---|
 | `artifact.emit_event` | artifact_id, event_type, payload? | Emit event |
-| `artifact.list_events` | artifact_id?, event_type?, limit? | List events |
+| `artifact.list_events` | artifact_id?, session_id?, since_ts?, page?, page_size? | List events |
 
 ### Project KB Method (P3)
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.move_to_project_kb` | artifact_id | Move artifact to project knowledge base |
+| `artifact.move_to_project_kb` | artifact_id, project_id | Move artifact to project knowledge base |
 
 ### External Module Methods
 

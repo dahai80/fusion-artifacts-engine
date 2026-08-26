@@ -3,6 +3,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
 
 from fusion_artifacts_engine.config import load_config
@@ -18,6 +19,53 @@ from fusion_artifacts_engine.utils import get_package_version, setup_logging
 logger = logging.getLogger(__name__)
 
 
+def _run_once(config, host, port) -> int:
+    # P0-8: 单次 engine 运行，返回退出码。0=优雅退出，非 0=崩溃（watch loop 据此重启）。
+    engine = ArtifactEngine(config)
+    server = ArtifactRPCServer(engine, host=host, port=port)
+
+    # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
+    # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
+    # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
+    stop_event = threading.Event()
+    graceful = {"yes": False}
+
+    def shutdown(sig, frame):
+        logger.info("Received signal %s, shutting down", sig)
+        graceful["yes"] = True
+        stop_event.set()
+
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGINT, shutdown)
+        signal.signal(signal.SIGTERM, shutdown)
+    else:
+        logger.warning(
+            "Not main thread, skip signal handlers (SIGINT/SIGTERM won't stop daemon)"
+        )
+
+    logger.info("fusion-artifacts-engine starting...")
+    server.start_async()
+    code = 0
+    try:
+        stop_event.wait()
+    except KeyboardInterrupt:
+        graceful["yes"] = True
+    except Exception as e:  # noqa: BLE001
+        logger.exception("engine crashed: %s", e)
+        code = 1
+    finally:
+        try:
+            server.stop()
+            engine.close()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("error during shutdown: %s", e)
+            code = 1
+        logger.info("fusion-artifacts-engine stopped")
+    if not graceful["yes"]:
+        code = 1
+    return code
+
+
 def main():
     parser = argparse.ArgumentParser(prog="fusion-artifacts-engine")
     sub = parser.add_subparsers(dest="command")
@@ -27,6 +75,16 @@ def main():
     start_parser.add_argument("--port", type=int, default=None)
     start_parser.add_argument("--storage-root", default=None)
     start_parser.add_argument("--config", default=None, help="Path to config YAML file")
+    # P0-8: 崩溃自动重启。engine 异常退出（非 0）后 backoff 秒重启；
+    # SIGTERM/SIGINT 优雅退出（stop_event 被 set）返回 0，watch loop 不再重启。
+    start_parser.add_argument(
+        "--watch", action="store_true",
+        help="Restart daemon on crash (backoff between restarts)",
+    )
+    start_parser.add_argument(
+        "--restart-backoff", type=float, default=3.0,
+        help="Seconds to wait between crash restarts (default 3.0)",
+    )
 
     sub.add_parser("status", help="Check if daemon is running")
     sub.add_parser("version", help="Print version")
@@ -43,37 +101,18 @@ def main():
         host = args.host or config.server_host
         port = args.port or config.server_port
 
-        engine = ArtifactEngine(config)
-        server = ArtifactRPCServer(engine, host=host, port=port)
-
-        # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
-        # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
-        # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
-        stop_event = threading.Event()
-
-        def shutdown(sig, frame):
-            logger.info("Received signal %s, shutting down", sig)
-            stop_event.set()
-
-        # 信号只能在主线程注册；非主线程（如测试里线程跑 main）跳过，由 stop_event 自然退出
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, shutdown)
-            signal.signal(signal.SIGTERM, shutdown)
-        else:
-            logger.warning(
-                "Not main thread, skip signal handlers (SIGINT/SIGTERM won't stop daemon)"
-            )
-
-        logger.info("fusion-artifacts-engine starting...")
-        server.start_async()
-        try:
-            stop_event.wait()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.stop()
-            engine.close()
-            logger.info("fusion-artifacts-engine stopped")
+        # P0-8: watch loop 包裹单次 run。--watch 时 engine 退出码非 0 则 backoff 后重启。
+        # 退出码 0（优雅 stop）跳出循环。单次 run 内含信号注册与 stop_event 逻辑。
+        while True:
+            code = _run_once(config, host, port)
+            if not getattr(args, "watch", False):
+                sys.exit(code)
+            if code == 0:
+                logger.info("watch: engine exited 0 (graceful), watcher exiting")
+                sys.exit(0)
+            backoff = getattr(args, "restart_backoff", 3.0)
+            logger.warning("watch: engine crashed (code=%s), restart in %ss", code, backoff)
+            time.sleep(backoff)
 
     elif args.command == "status":
         import os

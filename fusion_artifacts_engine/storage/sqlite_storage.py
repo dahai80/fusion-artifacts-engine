@@ -1,3 +1,4 @@
+import errno
 import json
 import logging
 import queue
@@ -50,7 +51,51 @@ from fusion_artifacts_engine.models import (
     ArtifactTag,
     ArtifactVersion,
 )
-from fusion_artifacts_engine.rpc.errors import ResourceLimitError
+from fusion_artifacts_engine.rpc.errors import (
+    ConflictError,
+    NotFoundError,
+    ResourceLimitError,
+)
+
+
+def _translate_sqlite_error(e: sqlite3.Error):
+    # P0-3/H8: SQLite 写路径 OperationalError 按消息映射——
+    # "database is locked"/"database table is locked"→ConflictError(-32002, 可重试)；
+    # "disk I/O error"/"database disk image is malformed"/"disk full"→ResourceLimitError(-32003)；
+    # 其余 OperationalError 原样上抛（连接损坏等由上层兜底）。
+    if isinstance(e, sqlite3.OperationalError):
+        msg = str(e).lower()
+        if "locked" in msg:
+            logger.warning("SQLite write locked, mapped to ConflictError: %s", e)
+            return ConflictError(f"Database busy, retry: {e}")
+        if "disk" in msg or "i/o" in msg or "full" in msg:
+            logger.error("SQLite disk/I/O error, mapped to ResourceLimitError: %s", e)
+            return ResourceLimitError(f"Storage I/O failure: {e}")
+    return e
+
+
+def _enforce_content_limit(content: str, limit: int) -> None:
+    # P0-5/H9: 内容字节超 max_content_bytes 拒绝写入（0=不限）
+    if limit <= 0:
+        return
+    size = len(content.encode("utf-8"))
+    if size > limit:
+        logger.warning("Content rejected: %d bytes > max_content_bytes %d", size, limit)
+        raise ResourceLimitError(
+            f"Content too large: {size} bytes exceeds max_content_bytes {limit}"
+        )
+
+
+def _enforce_metadata_limit(metadata: dict | None, limit: int) -> None:
+    # P0-5/H9: metadata JSON 字节超 max_metadata_bytes 拒绝写入（0=不限）
+    if limit <= 0 or not metadata:
+        return
+    size = len(json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
+    if size > limit:
+        logger.warning("Metadata rejected: %d bytes > max_metadata_bytes %d", size, limit)
+        raise ResourceLimitError(
+            f"Metadata too large: {size} bytes exceeds max_metadata_bytes {limit}"
+        )
 from fusion_artifacts_engine.storage.base import StorageDriver
 
 _SCHEMA_SQL = """
@@ -287,6 +332,7 @@ class SQLiteStorage(StorageDriver):
     def __init__(
         self, db_path: Path, content_dir: Path, small_content_limit: int = 10240,
         max_versions_per_artifact: int = 0, disk_space_warning_pct: int = 0,
+        max_content_bytes: int = 0, max_metadata_bytes: int = 0,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
@@ -295,6 +341,10 @@ class SQLiteStorage(StorageDriver):
         self.max_versions_per_artifact = max_versions_per_artifact
         # 运维4: 磁盘水位告警百分比（0-100），0=禁用预检。写前预检，超阈拒绝写
         self.disk_space_warning_pct = max(0, int(disk_space_warning_pct))
+        # P0-5/H9: 单版本内容字节上限，0=不限。超限拒绝写入防 OOM/磁盘耗尽
+        self.max_content_bytes = max(0, int(max_content_bytes))
+        # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限。超限拒绝写入
+        self.max_metadata_bytes = max(0, int(max_metadata_bytes))
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
         # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
@@ -353,7 +403,14 @@ class SQLiteStorage(StorageDriver):
                 "Refusing content write outside content_dir: %s (ext=%s)", path, ext
             )
             raise ValueError(f"Unsafe content path: {path}")
-        path.write_text(content, encoding="utf-8")
+        try:
+            path.write_text(content, encoding="utf-8")
+        except OSError as e:
+            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级），而非 -32603。
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                logger.error("disk full writing content file %s: %s", path, e)
+                raise ResourceLimitError(f"disk full writing content: {e}") from e
+            raise
         logger.debug("Wrote content file: %s", path)
         return str(path)
 
@@ -369,7 +426,14 @@ class SQLiteStorage(StorageDriver):
         if not tmp_path.resolve().is_relative_to(d.resolve()):
             logger.error("Refusing tmp content write outside content_dir: %s", tmp_path)
             raise ValueError(f"Unsafe content path: {tmp_path}")
-        tmp_path.write_text(content, encoding="utf-8")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+        except OSError as e:
+            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                logger.error("disk full writing tmp content file %s: %s", tmp_path, e)
+                raise ResourceLimitError(f"disk full writing content: {e}") from e
+            raise
         logger.debug("Wrote tmp content file: %s", tmp_path)
         return str(tmp_path), f"v{{version_num}}.{ext}", ext
 
@@ -417,70 +481,75 @@ class SQLiteStorage(StorageDriver):
     def save_artifact(self, artifact: Artifact) -> None:
         # 运维4: 写前磁盘预检，超阈值拒绝写
         self.ensure_disk_available()
+        # P0-5/H9: metadata 字节上限校验
+        _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
-            self._conn.execute(
-                """INSERT INTO artifacts
-                   (id, session_id, name, type, kind, project_id, metadata,
-                    current_version, summary, created_at, updated_at, is_deleted,
-                    owner_user_id, ownership_type, is_starred, is_pinned,
-                    pinned_chat_id, share_id, in_project_kb, folder_id,
-                    deleted_at, content_hash, active_in_session,
-                    source_module, workspace_id, workflow_run_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     session_id=excluded.session_id,
-                     name=excluded.name,
-                     type=excluded.type,
-                     kind=excluded.kind,
-                     project_id=excluded.project_id,
-                     metadata=excluded.metadata,
-                     current_version=excluded.current_version,
-                     summary=excluded.summary,
-                     updated_at=excluded.updated_at,
-                     owner_user_id=excluded.owner_user_id,
-                     ownership_type=excluded.ownership_type,
-                     is_starred=excluded.is_starred,
-                     is_pinned=excluded.is_pinned,
-                     pinned_chat_id=excluded.pinned_chat_id,
-                     share_id=excluded.share_id,
-                     in_project_kb=excluded.in_project_kb,
-                     folder_id=excluded.folder_id,
-                     content_hash=excluded.content_hash,
-                     active_in_session=excluded.active_in_session,
-                     source_module=excluded.source_module,
-                     workspace_id=excluded.workspace_id,
-                     workflow_run_id=excluded.workflow_run_id""",
-                (
-                    artifact.id,
-                    artifact.session_id,
-                    artifact.name,
-                    artifact.type,
-                    artifact.kind,
-                    artifact.project_id,
-                    meta_json,
-                    artifact.current_version,
-                    artifact.summary,
-                    artifact.created_at,
-                    artifact.updated_at,
-                    int(artifact.is_deleted),
-                    artifact.owner_user_id,
-                    artifact.ownership_type,
-                    int(artifact.is_starred),
-                    int(artifact.is_pinned),
-                    artifact.pinned_chat_id,
-                    artifact.share_id,
-                    int(artifact.in_project_kb),
-                    artifact.folder_id,
-                    artifact.deleted_at,
-                    artifact.content_hash,
-                    artifact.active_in_session,
-                    artifact.source_module,
-                    artifact.workspace_id,
-                    artifact.workflow_run_id,
-                ),
-            )
-            self._conn.commit()
+            try:
+                self._conn.execute(
+                    """INSERT INTO artifacts
+                       (id, session_id, name, type, kind, project_id, metadata,
+                        current_version, summary, created_at, updated_at, is_deleted,
+                        owner_user_id, ownership_type, is_starred, is_pinned,
+                        pinned_chat_id, share_id, in_project_kb, folder_id,
+                        deleted_at, content_hash, active_in_session,
+                        source_module, workspace_id, workflow_run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         session_id=excluded.session_id,
+                         name=excluded.name,
+                         type=excluded.type,
+                         kind=excluded.kind,
+                         project_id=excluded.project_id,
+                         metadata=excluded.metadata,
+                         current_version=excluded.current_version,
+                         summary=excluded.summary,
+                         updated_at=excluded.updated_at,
+                         owner_user_id=excluded.owner_user_id,
+                         ownership_type=excluded.ownership_type,
+                         is_starred=excluded.is_starred,
+                         is_pinned=excluded.is_pinned,
+                         pinned_chat_id=excluded.pinned_chat_id,
+                         share_id=excluded.share_id,
+                         in_project_kb=excluded.in_project_kb,
+                         folder_id=excluded.folder_id,
+                         content_hash=excluded.content_hash,
+                         active_in_session=excluded.active_in_session,
+                         source_module=excluded.source_module,
+                         workspace_id=excluded.workspace_id,
+                         workflow_run_id=excluded.workflow_run_id""",
+                    (
+                        artifact.id,
+                        artifact.session_id,
+                        artifact.name,
+                        artifact.type,
+                        artifact.kind,
+                        artifact.project_id,
+                        meta_json,
+                        artifact.current_version,
+                        artifact.summary,
+                        artifact.created_at,
+                        artifact.updated_at,
+                        int(artifact.is_deleted),
+                        artifact.owner_user_id,
+                        artifact.ownership_type,
+                        int(artifact.is_starred),
+                        int(artifact.is_pinned),
+                        artifact.pinned_chat_id,
+                        artifact.share_id,
+                        int(artifact.in_project_kb),
+                        artifact.folder_id,
+                        artifact.deleted_at,
+                        artifact.content_hash,
+                        artifact.active_in_session,
+                        artifact.source_module,
+                        artifact.workspace_id,
+                        artifact.workflow_run_id,
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.Error as e:
+                raise _translate_sqlite_error(e) from e
         logger.info(
             "Saved artifact: %s name=%s kind=%s",
             artifact.id,
@@ -493,102 +562,108 @@ class SQLiteStorage(StorageDriver):
     ) -> None:
         # 运维4: 写前磁盘预检，超阈值拒绝写
         self.ensure_disk_available()
+        # P0-5/H9: metadata + 内容字节上限校验
+        _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
+        _enforce_content_limit(version.content, self.max_content_bytes)
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
-            self._conn.execute(
-                """INSERT INTO artifacts
-                   (id, session_id, name, type, kind, project_id, metadata,
-                    current_version, summary, created_at, updated_at, is_deleted,
-                    owner_user_id, ownership_type, is_starred, is_pinned,
-                    pinned_chat_id, share_id, in_project_kb, folder_id,
-                    deleted_at, content_hash, active_in_session,
-                    source_module, workspace_id, workflow_run_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     session_id=excluded.session_id,
-                     name=excluded.name,
-                     type=excluded.type,
-                     kind=excluded.kind,
-                     project_id=excluded.project_id,
-                     metadata=excluded.metadata,
-                     current_version=excluded.current_version,
-                     summary=excluded.summary,
-                     updated_at=excluded.updated_at,
-                     owner_user_id=excluded.owner_user_id,
-                     ownership_type=excluded.ownership_type,
-                     is_starred=excluded.is_starred,
-                     is_pinned=excluded.is_pinned,
-                     pinned_chat_id=excluded.pinned_chat_id,
-                     share_id=excluded.share_id,
-                     in_project_kb=excluded.in_project_kb,
-                     folder_id=excluded.folder_id,
-                     content_hash=excluded.content_hash,
-                     active_in_session=excluded.active_in_session,
-                     source_module=excluded.source_module,
-                     workspace_id=excluded.workspace_id,
-                     workflow_run_id=excluded.workflow_run_id""",
-                (
-                    artifact.id,
-                    artifact.session_id,
-                    artifact.name,
-                    artifact.type,
-                    artifact.kind,
-                    artifact.project_id,
-                    meta_json,
-                    artifact.current_version,
-                    artifact.summary,
-                    artifact.created_at,
-                    artifact.updated_at,
-                    int(artifact.is_deleted),
-                    artifact.owner_user_id,
-                    artifact.ownership_type,
-                    int(artifact.is_starred),
-                    int(artifact.is_pinned),
-                    artifact.pinned_chat_id,
-                    artifact.share_id,
-                    int(artifact.in_project_kb),
-                    artifact.folder_id,
-                    artifact.deleted_at,
-                    artifact.content_hash,
-                    artifact.active_in_session,
-                    artifact.source_module,
-                    artifact.workspace_id,
-                    artifact.workflow_run_id,
-                ),
-            )
-            content = version.content
-            content_path = None
-            if len(content.encode("utf-8")) > self.small_content_limit:
-                ext = self._guess_ext(version.artifact_id, version.content)
-                content_path = self._write_content_file(
-                    version.artifact_id, version.version_num, content, ext
+            try:
+                self._conn.execute(
+                    """INSERT INTO artifacts
+                       (id, session_id, name, type, kind, project_id, metadata,
+                        current_version, summary, created_at, updated_at, is_deleted,
+                        owner_user_id, ownership_type, is_starred, is_pinned,
+                        pinned_chat_id, share_id, in_project_kb, folder_id,
+                        deleted_at, content_hash, active_in_session,
+                        source_module, workspace_id, workflow_run_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         session_id=excluded.session_id,
+                         name=excluded.name,
+                         type=excluded.type,
+                         kind=excluded.kind,
+                         project_id=excluded.project_id,
+                         metadata=excluded.metadata,
+                         current_version=excluded.current_version,
+                         summary=excluded.summary,
+                         updated_at=excluded.updated_at,
+                         owner_user_id=excluded.owner_user_id,
+                         ownership_type=excluded.ownership_type,
+                         is_starred=excluded.is_starred,
+                         is_pinned=excluded.is_pinned,
+                         pinned_chat_id=excluded.pinned_chat_id,
+                         share_id=excluded.share_id,
+                         in_project_kb=excluded.in_project_kb,
+                         folder_id=excluded.folder_id,
+                         content_hash=excluded.content_hash,
+                         active_in_session=excluded.active_in_session,
+                         source_module=excluded.source_module,
+                         workspace_id=excluded.workspace_id,
+                         workflow_run_id=excluded.workflow_run_id""",
+                    (
+                        artifact.id,
+                        artifact.session_id,
+                        artifact.name,
+                        artifact.type,
+                        artifact.kind,
+                        artifact.project_id,
+                        meta_json,
+                        artifact.current_version,
+                        artifact.summary,
+                        artifact.created_at,
+                        artifact.updated_at,
+                        int(artifact.is_deleted),
+                        artifact.owner_user_id,
+                        artifact.ownership_type,
+                        int(artifact.is_starred),
+                        int(artifact.is_pinned),
+                        artifact.pinned_chat_id,
+                        artifact.share_id,
+                        int(artifact.in_project_kb),
+                        artifact.folder_id,
+                        artifact.deleted_at,
+                        artifact.content_hash,
+                        artifact.active_in_session,
+                        artifact.source_module,
+                        artifact.workspace_id,
+                        artifact.workflow_run_id,
+                    ),
                 )
-                content = ""
-            self._conn.execute(
-                """INSERT INTO artifact_versions
-                   (artifact_id, version_num, content, content_path, size_bytes,
-                    token_count, section_index,
-                    change_log, source, created_at, snapshot_type, snapshot_label,
-                    author, parent_version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    version.artifact_id,
-                    version.version_num,
-                    content,
-                    content_path,
-                    version.size_bytes,
-                    version.token_count,
-                    version.section_index,
-                    version.change_log,
-                    version.source,
-                    version.created_at,
-                    version.snapshot_type,
-                    version.snapshot_label,
-                    version.author,
-                    version.parent_version,
-                ),
-            )
-            self._conn.commit()
+                content = version.content
+                content_path = None
+                if len(content.encode("utf-8")) > self.small_content_limit:
+                    ext = self._guess_ext(version.artifact_id, version.content)
+                    content_path = self._write_content_file(
+                        version.artifact_id, version.version_num, content, ext
+                    )
+                    content = ""
+                self._conn.execute(
+                    """INSERT INTO artifact_versions
+                       (artifact_id, version_num, content, content_path, size_bytes,
+                        token_count, section_index,
+                        change_log, source, created_at, snapshot_type, snapshot_label,
+                        author, parent_version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        version.artifact_id,
+                        version.version_num,
+                        content,
+                        content_path,
+                        version.size_bytes,
+                        version.token_count,
+                        version.section_index,
+                        version.change_log,
+                        version.source,
+                        version.created_at,
+                        version.snapshot_type,
+                        version.snapshot_label,
+                        version.author,
+                        version.parent_version,
+                    ),
+                )
+                self._conn.commit()
+            except sqlite3.Error as e:
+                raise _translate_sqlite_error(e) from e
         logger.info(
             "Saved artifact+version: %s v%d size=%d tokens=%d",
             artifact.id,
@@ -1220,6 +1295,8 @@ class SQLiteStorage(StorageDriver):
     ) -> int:
         # 运维4: 写前磁盘预检，超阈值拒绝写
         self.ensure_disk_available()
+        # P0-5/H9: 内容字节上限校验
+        _enforce_content_limit(version.content, self.max_content_bytes)
         # C-8: 乐观锁校验+写入收进单事务，BEGIN IMMEDIATE 序列化并发写，
         # 事务内重读 current_version/content_hash 校验，分配 version_num，
         # 写 version 行并更新 artifact.current_version/content_hash，原子提交。
@@ -1243,11 +1320,12 @@ class SQLiteStorage(StorageDriver):
                     (artifact.id,),
                 ).fetchone()
                 if row is None:
-                    raise ValueError(f"Artifact not found: {artifact.id}")
+                    raise NotFoundError(f"Artifact not found: {artifact.id}")
                 db_content_hash = row["content_hash"]
                 db_summary = row["summary"]
                 if expected_content_hash is not None and db_content_hash != expected_content_hash:
-                    raise ValueError(
+                    # P0-2: 乐观锁冲突映射 ConflictError(-32002, 可重试)，而非 -32602。
+                    raise ConflictError(
                         f"Optimistic lock failed: expected hash {expected_content_hash},"
                         f" got {db_content_hash}"
                     )
@@ -1327,7 +1405,7 @@ class SQLiteStorage(StorageDriver):
                     artifact.id, new_version_num, version.size_bytes, content_hash,
                 )
                 return new_version_num
-            except Exception:
+            except Exception as exc:
                 try:
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
@@ -1338,6 +1416,9 @@ class SQLiteStorage(StorageDriver):
                         Path(tmp_path).unlink(missing_ok=True)
                     except OSError as e:
                         logger.warning("Failed to clean tmp content %s: %s", tmp_path, e)
+                # P0-3/H8: SQLite OperationalError 按消息映射为可重试 ConflictError / ResourceLimitError
+                if isinstance(exc, sqlite3.Error):
+                    raise _translate_sqlite_error(exc) from exc
                 raise
 
     def _hydrate_version_content(self, artifact_id: str, ver: ArtifactVersion) -> None:

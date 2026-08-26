@@ -58,7 +58,7 @@ curl -X POST http://127.0.0.1:11451 \
 
 | 方法 | 参数 | 说明 |
 |---|---|---|
-| `artifact.create` | session_id, name, type, content, summary?, kind?, project_id?, metadata?, owner_user_id?, ownership_type? | 创建产物 + v1 |
+| `artifact.create` | session_id, name, type, content, summary?, change_log?, kind?, project_id?, metadata? | 创建产物 + v1 |
 | `artifact.get` | artifact_id, project_id? | 获取元数据 |
 | `artifact.get_content` | artifact_id, version? | 获取版本内容 |
 | `artifact.list` | session_id, include_deleted?, project_id?, metadata_filter? | 列出会话产物 |
@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | 收藏/取消收藏 |
 | `artifact.pin` | artifact_id, pinned, chat_id? | 固定/取消固定到聊天 |
 | `artifact.duplicate` | artifact_id | 复制产物（新 ID） |
-| `artifact.list_all` | owner_user_id?, ownership_type?, folder_id?, is_starred? | 列出所有产物（跨会话） |
+| `artifact.list_all` | filters?, sort?, page?, page_size? | 列出所有产物（跨会话） |
 
 ### 回收站方法 (P1)
 
@@ -108,7 +108,7 @@ curl -X POST http://127.0.0.1:11451 \
 |---|---|---|
 | `artifact.create_share` | artifact_id, max_accesses?, expires_at? | 创建分享链接 |
 | `artifact.get_shared` | share_id | 获取分享的产物（公开） |
-| `artifact.revoke_share` | artifact_id | 撤销分享链接 |
+| `artifact.revoke_share` | share_id | 撤销分享链接 |
 
 ### 快照方法 (P2)
 
@@ -141,13 +141,13 @@ curl -X POST http://127.0.0.1:11451 \
 | 方法 | 参数 | 说明 |
 |---|---|---|
 | `artifact.emit_event` | artifact_id, event_type, payload? | 发射事件 |
-| `artifact.list_events` | artifact_id?, event_type?, limit? | 列出事件 |
+| `artifact.list_events` | artifact_id?, session_id?, since_ts?, page?, page_size? | 列出事件 |
 
 ### 项目知识库方法 (P3)
 
 | 方法 | 参数 | 说明 |
 |---|---|---|
-| `artifact.move_to_project_kb` | artifact_id | 移动产物到项目知识库 |
+| `artifact.move_to_project_kb` | artifact_id, project_id | 移动产物到项目知识库 |
 
 ### 外部模块方法
 

@@ -65,6 +65,8 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         "artifact": {
             "id_prefix": ("artifact_id_prefix", None),
             "max_versions_per_artifact": ("max_versions_per_artifact", None),
+            "max_content_bytes": ("max_content_bytes", None),
+            "max_metadata_bytes": ("max_metadata_bytes", None),
         },
         "security": {
             "api_key": ("api_key", None),
@@ -171,6 +173,10 @@ class ArtifactEngineConfig(BaseModel):
     sync_root: Path | None = Field(default=None)
     # R9: 单 artifact 版本上限，0=不限；超限淘汰最旧非快照版本（防磁盘无限增长）
     max_versions_per_artifact: int = Field(default=100)
+    # P0-5/H9: 单版本内容字节上限，0=不限；超限拒绝写入防 OOM/磁盘耗尽
+    max_content_bytes: int = Field(default=0)
+    # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限；超限拒绝写入
+    max_metadata_bytes: int = Field(default=0)
     # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning。
     # 字段默认 0（禁用，单元测试不依赖宿主机磁盘状态）；生产经 default_config.yaml 设 90。
     disk_space_warning_pct: int = Field(default=0)

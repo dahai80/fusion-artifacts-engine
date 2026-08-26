@@ -78,8 +78,19 @@ start() {
     mkdir -p "$LOG_DIR"
     ensure_venv
 
-    log_info "starting artifacts-engine on ${HOST}:${PORT}..."
-    nohup fusion-artifacts-engine start --host "$HOST" --port "$PORT" \
+    # P0-8: 崩溃自动重启。FUSION_ARTIFACTS_AUTO_RESTART=1（默认）时传 --watch 给 CLI，
+    # CLI 内置 watch loop：engine 异常退出后在 backoff 秒后重启，SIGTERM 优雅退出不重启。
+    local auto_restart="${FUSION_ARTIFACTS_AUTO_RESTART:-1}"
+    local watch_flag=""
+    if [[ "$auto_restart" == "1" ]]; then
+        watch_flag="--watch"
+        log_info "starting artifacts-engine on ${HOST}:${PORT} (auto-restart enabled)..."
+    else
+        log_info "starting artifacts-engine on ${HOST}:${PORT}..."
+    fi
+
+    # shellcheck disable=SC2086
+    nohup fusion-artifacts-engine start --host "$HOST" --port "$PORT" $watch_flag \
         >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
     local pid=$!
     echo "$pid" > "$PID_FILE"
@@ -113,6 +124,8 @@ stop() {
         return 0
     fi
     log_info "stopping artifacts-engine (PID ${pid})..."
+    # P0-8: --watch 模式下 PID 文件记的是 watcher 进程；SIGTERM 让 watcher 优雅退出
+    # （watcher 转发信号给 engine 子进程，engine 退出码 0 后 watcher 也不再重启）。
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 20); do
         kill -0 "$pid" 2>/dev/null || break
