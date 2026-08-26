@@ -598,3 +598,42 @@ def test_rest_list_huge_page_size_ok(rpc_server):
         timeout=5.0,
     )
     assert resp.status_code == 200
+
+
+def test_jsonrpc_response_has_request_id_header(rpc_server):
+    # P1-3: JSON-RPC 响应必须回写 X-Request-ID，客户端可凭此查服务端日志。
+    resp = httpx.post(
+        f"http://127.0.0.1:{PORT}",
+        json={"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 1},
+        timeout=5.0,
+    )
+    rid = resp.headers.get("X-Request-ID")
+    assert rid is not None
+    assert len(rid) == 32  # uuid4().hex
+
+
+def test_rest_response_has_request_id_header(rpc_server):
+    # P1-3: REST 响应同样回写 X-Request-ID。
+    resp = httpx.get(
+        f"http://127.0.0.1:{PORT}/api/v1/artifacts",
+        params={"page": "1", "page_size": "20"},
+        timeout=5.0,
+    )
+    rid = resp.headers.get("X-Request-ID")
+    assert rid is not None
+    assert len(rid) == 32
+
+
+def test_request_id_unique_per_request(rpc_server):
+    # P1-3: 每请求独立 uuid4，两次请求 ID 不同。
+    r1 = httpx.post(
+        f"http://127.0.0.1:{PORT}",
+        json={"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 1},
+        timeout=5.0,
+    )
+    r2 = httpx.post(
+        f"http://127.0.0.1:{PORT}",
+        json={"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 2},
+        timeout=5.0,
+    )
+    assert r1.headers.get("X-Request-ID") != r2.headers.get("X-Request-ID")

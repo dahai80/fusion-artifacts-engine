@@ -552,7 +552,7 @@ class ArtifactEngine:
         artifacts, total = self.storage.list_all_artifacts(
             filters, sort, page, page_size
         )
-        logger.info("list_all_artifacts: %d/%d page=%d", len(artifacts), total, page)
+        logger.info("list_all_artifacts: %d/%d page=%s", len(artifacts), total, page)
         return artifacts, total
 
     # ── P1: recycle bin ────────────────────────────────────────
@@ -561,7 +561,7 @@ class ArtifactEngine:
         self, page: int = 1, page_size: int = 20
     ) -> tuple[list[Artifact], int]:
         artifacts, total = self.storage.list_recycle(page, page_size)
-        logger.info("list_recycle: %d/%d page=%d", len(artifacts), total, page)
+        logger.info("list_recycle: %d/%d page=%s", len(artifacts), total, page)
         return artifacts, total
 
     def restore_artifact(self, artifact_id: str) -> bool:
@@ -884,7 +884,7 @@ class ArtifactEngine:
         events, total = self.storage.list_events(
             artifact_id, session_id, since_ts, page, page_size
         )
-        logger.info("list_events: %d/%d page=%d", len(events), total, page)
+        logger.info("list_events: %d/%d page=%s", len(events), total, page)
         return events, total
 
     # ── P3: project KB ─────────────────────────────────────────

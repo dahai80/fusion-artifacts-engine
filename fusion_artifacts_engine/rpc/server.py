@@ -6,6 +6,7 @@ import os
 import queue
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
@@ -24,6 +25,22 @@ from fusion_artifacts_engine.rpc.errors import (
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
+
+# P1-3/H12: 每请求生成 uuid4 request ID，回写 X-Request-ID 响应头 + 绑入日志 extra，
+# 让运维从客户端回溯到服务端日志行。BaseHTTPRequestHandler 每请求新建 handler 实例，
+# 故 _request_id 天然 per-request，无需清理。
+_REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class _RequestIdLogger(logging.LoggerAdapter):
+    # P1-3: 注入 request_id 到每条日志的 extra，格式器可引用 %(request_id)s。
+    def process(self, msg, kwargs):
+        rid = self.extra.get("request_id", "-") if self.extra else "-"
+        kwargs.setdefault("extra", {})
+        if "request_id" not in kwargs["extra"]:
+            kwargs["extra"]["request_id"] = rid
+        return msg, kwargs
+
 
 _MAX_BODY_SIZE = 10 * 1024 * 1024
 
@@ -158,6 +175,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self):
+        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        self._request_id = uuid.uuid4().hex
+        self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_post()
             return
@@ -210,12 +230,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            logger.debug("RPC request: %s", request.get("method"))
+            self._log.debug("RPC request: %s", request.get("method"))
             method_name = request.get("method", "")
             timeout = self._timeout_for(method_name, length)
             if length >= _LARGE_BODY_THRESHOLD:
                 # R4: 大请求体重写入占写锁时间长，记日志便于运维定位全站写停摆窗口。
-                logger.warning(
+                self._log.warning(
                     "Large RPC body %d bytes for %s, timeout tier=%ds",
                     length,
                     method_name,
@@ -229,7 +249,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # H5: 协程排队超时（慢操作拖累全站）。返回 -32603 并标记 retryable，
             # 调用方可退避重试而非当致命错误。区分 R8 的业务错误码。
             errored = True
-            logger.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
+            self._log.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
             self._send_response(
                 200,
                 {
@@ -244,7 +264,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
         except Exception:
             errored = True
-            logger.exception("RPC error")
+            self._log.exception("RPC error")
             self._send_response(
                 200,
                 {
@@ -260,6 +280,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             metrics.dec_gauge("rpc_active_conns")
 
     def do_GET(self):
+        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        self._request_id = uuid.uuid4().hex
+        self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
         # 运维5: /healthz（liveness）+ /readyz（readiness）分离，无鉴权（K8s probe 标配）
         if self.path == "/healthz":
             self._handle_healthz()
@@ -317,6 +340,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         body = get_metrics().expose().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        # P1-3: 回写 request ID
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -510,6 +537,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
+        # P1-3: 回写 request ID，SSE 客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.end_headers()
 
         watcher_id = f"sse_{id(self)}"
@@ -518,7 +549,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         sub = engine.event_bus.subscribe()
         heartbeat_interval = engine.config.sse_heartbeat_interval
 
-        logger.info(
+        self._log.info(
             "SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter
         )
         try:
@@ -546,7 +577,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                         # E10: kind 缺失或被过滤时记日志，避免静默丢事件难排查。
                         # kind None 通常因 publish 时未传 kind 且 artifact 已删（回查取不到）。
                         if event.get("kind") is None:
-                            logger.warning(
+                            self._log.warning(
                                 "SSE event %s has no kind, dropped by filter=%s (watcher=%s)",
                                 etype, kind_filter, watcher_id,
                             )
@@ -564,17 +595,21 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 except Exception:
-                    logger.exception("SSE loop error")
+                    self._log.exception("SSE loop error")
                     break
         finally:
             engine.event_bus.unsubscribe(sub)
-            logger.info("SSE disconnected: watcher=%s", watcher_id)
+            self._log.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _send_rest_response(self, code: int, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
+        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -692,6 +727,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
+        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
