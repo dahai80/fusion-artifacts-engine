@@ -601,6 +601,22 @@ sse:
 
 **RPC handler thread offload (v0.5.0)** — async RPC handlers previously called synchronous `engine`/`storage` methods directly (`self.engine.get_artifact`, `self.engine.storage.list_artifacts`, …). Each call ran on the single event loop and blocked every other request while it hit SQLite or the filesystem. Every synchronous storage/engine call in `rpc/methods.py` now runs via `await asyncio.to_thread(...)` on the default ThreadPoolExecutor, so the event loop only schedules — sqlite/file I/O no longer stalls it. `_publish` is async (its kind look-up read is offloaded too), so SSE event emission never blocks the loop. Async engine methods (`create_artifact`, `update_artifact`, …) were already non-blocking and are awaited directly. Verified by `tests/test_p2_2_to_thread_offload.py` (read/write offload + worker-thread execution + async publish).
 
+**OTel tracing (v0.5.0)** — optional OpenTelemetry integration emitting `rpc.server.duration` (per dispatch, attribute `rpc_method`) and `db.storage.duration` (per storage op, attribute `db_operation`) spans, so the causal chain RPC → SQLite is observable end-to-end. **Off by default** — this is a local-first single-tenant daemon, and OTel is an optional dependency, not a hard one. Three states:
+
+- `opentelemetry-api`/`opentelemetry-sdk` **not installed** → `tracing.span`/`traced` are pure no-ops (zero overhead, zero import error). Install via `pip install 'fusion-artifacts-engine[otel]'`.
+- installed + `tracing.enabled: false` (default) → no-op tracer.
+- installed + `tracing.enabled: true` → real tracer. Default exporter is `ConsoleSpanExporter` (sufficient for local single-node). For a collector backend, set `OTEL_EXPORTER_OTLP_ENDPOINT` and the OTel SDK auto-switches to OTLP — no code change needed.
+
+Config (in `default_config.yaml`, overridable via `~/.fusion/artifacts/config.yaml` or env `FUSION_ARTIFACTS_TRACING_ENABLED` / `FUSION_ARTIFACTS_TRACING_SERVICE_NAME`):
+
+```yaml
+tracing:
+  enabled: false                 # default off; set true to emit spans
+  service_name: "fusion-artifacts-engine"
+```
+
+`configure_tracing()` runs once at startup; `shutdown()` flushes the span processor on graceful exit. OTel context propagates across `asyncio.to_thread` via contextvars, so spans nest correctly even when storage calls are offloaded (P2-2). Verified by `tests/test_p2_5_otel_tracing.py` (no-op path + enabled rpc/db spans + error-span status + exception propagation + decorated write-path span).
+
 ## Architecture
 
 ```

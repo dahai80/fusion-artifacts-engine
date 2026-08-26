@@ -818,6 +818,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = request.get("id")
         try:
             rpc_handler = self.server._rpc_handler
+            # P2-5/H12(trace): rpc.server.duration span 由 RPCHandler.dispatch 内部发出，
+            # 覆盖所有调用路径（server / REST / 直接调用）。此处不再重复包 span。
             result = await rpc_handler.dispatch(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except RpcError as e:

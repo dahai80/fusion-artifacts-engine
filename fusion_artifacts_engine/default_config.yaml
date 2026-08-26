@@ -72,3 +72,11 @@ metrics:
   # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配。
   # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 / 公网时必须设值。
   token: ""
+tracing:
+  # P2-5/H12(trace)/M20: OTel 分布式追踪开关。默认 false——local-first 单租户场景
+  # 无需分布式追踪，且 opentelemetry-sdk 为可选依赖（pip install -e ".[otel]"）。
+  # enabled=true 时记录 rpc.server.duration + db.storage.duration span，
+  # 默认 ConsoleSpanExporter；生产经 OTEL_EXPORTER_OTLP_ENDPOINT 外接 OTLP collector。
+  enabled: false
+  service_name: "fusion-artifacts-engine"
+

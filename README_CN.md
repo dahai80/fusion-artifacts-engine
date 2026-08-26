@@ -511,6 +511,22 @@ sse:
 
 **RPC handler 线程卸载 (v0.5.0)** —— 此前异步 RPC handler 直接调用同步 `engine`/`storage` 方法（`self.engine.get_artifact`、`self.engine.storage.list_artifacts` …），每次调用都在单事件循环上执行，命中 SQLite 或文件系统时阻塞所有其他请求。现在 `rpc/methods.py` 中每个同步 storage/engine 调用都经 `await asyncio.to_thread(...)` 在默认 ThreadPoolExecutor 上运行，事件循环只做调度——sqlite/文件 I/O 不再阻塞它。`_publish` 改为 async（其 kind 回查读也卸载），SSE 事件发射不再阻塞循环。异步 engine 方法（`create_artifact`、`update_artifact` …）本就非阻塞，直接 await。由 `tests/test_p2_2_to_thread_offload.py` 验证（读/写卸载 + worker 线程执行 + 异步 publish）。
 
+**OTel 分布式追踪 (v0.5.0)** —— 可选 OpenTelemetry 集成，发出 `rpc.server.duration`（每次 dispatch，属性 `rpc_method`）与 `db.storage.duration`（每次 storage 操作，属性 `db_operation`）span，使 RPC → SQLite 的因果链端到端可观测。**默认关闭** —— 本中间件是 local-first 单租户守护进程，OTel 是可选依赖而非硬依赖。三种状态：
+
+- 未安装 `opentelemetry-api`/`opentelemetry-sdk` → `tracing.span`/`traced` 纯 no-op（零开销、零 import 错误）。安装：`pip install 'fusion-artifacts-engine[otel]'`。
+- 已装但 `tracing.enabled: false`（默认）→ no-op tracer。
+- 已装且 `tracing.enabled: true` → 真 tracer。默认导出器 `ConsoleSpanExporter`（本地单节点足够）。接 collector 后端时设 `OTEL_EXPORTER_OTLP_ENDPOINT`，OTel SDK 自动切 OTLP——无需改代码。
+
+配置（`default_config.yaml`，可经 `~/.fusion/artifacts/config.yaml` 或 env `FUSION_ARTIFACTS_TRACING_ENABLED` / `FUSION_ARTIFACTS_TRACING_SERVICE_NAME` 覆盖）：
+
+```yaml
+tracing:
+  enabled: false                 # 默认关；置 true 发 span
+  service_name: "fusion-artifacts-engine"
+```
+
+`configure_tracing()` 启动时调一次；`shutdown()` 在优雅退出时 flush span processor。OTel context 经 contextvars 跨 `asyncio.to_thread` 传播，故即便 storage 调用被卸载（P2-2），span 仍正确嵌套。由 `tests/test_p2_5_otel_tracing.py` 验证（no-op 路径 + 启用后 rpc/db span + 错误 span 状态 + 异常传播 + 装饰器写路径 span）。
+
 ## 架构
 
 ```

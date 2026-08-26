@@ -21,10 +21,17 @@ class RPCHandler:
         self._method_map = self._build_methods()
 
     async def dispatch(self, method: str, params: dict) -> Any:
-        handler = self._method_map.get(method)
-        if handler is None:
-            raise RpcError(-32601, f"Method not found: {method}")
-        return await handler(params)
+        # P2-5/H12(trace): rpc.server.duration span 覆盖整个方法执行（含 storage I/O）。
+        # dispatch 是所有 RPC 的唯一路由入口（server _handle / REST / 直接调用皆经此），
+        # 故 span 放这里而非 server 层——任何调用路径都能采到因果链。
+        # tracing.span 未启用时为 no-op，零开销。
+        from fusion_artifacts_engine import tracing
+
+        with tracing.span("rpc.server.duration", rpc_method=method):
+            handler = self._method_map.get(method)
+            if handler is None:
+                raise RpcError(-32601, f"Method not found: {method}")
+            return await handler(params)
 
     async def _publish(self, event_type: str, aid: str | None, **extra) -> None:
         # SSE ?kind= 过滤按 artifact kind (app/code/...) 而非事件名。

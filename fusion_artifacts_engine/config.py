@@ -103,6 +103,10 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "enabled": ("metrics_enabled", None),
             "token": ("metrics_token", None),
         },
+        "tracing": {
+            "enabled": ("tracing_enabled", None),
+            "service_name": ("tracing_service_name", None),
+        },
     }
     flat: dict[str, Any] = {}
     for section, field_map in section_map.items():
@@ -151,6 +155,9 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_SSE_MAX_LIFETIME": ("sse_max_lifetime", int),
         "FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES": ("sse_max_event_bytes", int),
         "FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS": ("sse_max_connections", int),
+        # P2-5: OTel tracing env 覆盖
+        "FUSION_ARTIFACTS_TRACING_ENABLED": ("tracing_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_TRACING_SERVICE_NAME": ("tracing_service_name", str),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -232,6 +239,10 @@ class ArtifactEngineConfig(BaseModel):
     # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配（常量时间比较）。
     # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 时必须设值，否则运维指标泄露。
     metrics_token: str | None = Field(default=None)
+    # P2-5/H12(trace)/M20: OTel 分布式追踪开关。默认 false——local-first 单租户无需追踪，
+    # 且 opentelemetry-sdk 为可选依赖（[otel] extra）。enabled=true 时若未装 SDK 则 no-op + WARN。
+    tracing_enabled: bool = Field(default=False)
+    tracing_service_name: str = Field(default="fusion-artifacts-engine")
     # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
     # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
     metadata_indexed_keys: list[str] = Field(default_factory=list)

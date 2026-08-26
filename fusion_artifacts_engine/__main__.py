@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 def _run_once(config, host, port) -> int:
     # P0-8: 单次 engine 运行，返回退出码。0=优雅退出，非 0=崩溃（watch loop 据此重启）。
+    # P2-5: 启动时按 config 配置 OTel tracing（可选；未装 SDK 或 enabled=false → no-op）。
+    import fusion_artifacts_engine.tracing as tracing
+
+    tracing.configure_tracing(config.tracing_enabled, config.tracing_service_name)
     engine = ArtifactEngine(config)
     server = ArtifactRPCServer(engine, host=host, port=port)
 
@@ -60,6 +64,10 @@ def _run_once(config, host, port) -> int:
         except Exception as e:  # noqa: BLE001
             logger.exception("error during shutdown: %s", e)
             code = 1
+        try:
+            tracing.shutdown()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("tracing shutdown: %s", e)
         logger.info("fusion-artifacts-engine stopped")
     if not graceful["yes"]:
         code = 1

@@ -15,6 +15,10 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# P2-5/H12(trace): 可选 OTel tracing。模块顶层别名供 @tracing.traced 装饰器引用。
+# tracing 模块内部对 OTel 缺失/未启用均 no-op，故顶层导入安全。
+from fusion_artifacts_engine import tracing as _tracing  # noqa: E402
+
 _EXT_SAFE_RE = re.compile(r"[^A-Za-z0-9]")
 _META_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -660,6 +664,7 @@ class SQLiteStorage(StorageDriver):
             artifact.kind,
         )
 
+    @_tracing.traced("db.storage.duration", db_operation="save_artifact_and_version")
     def save_artifact_and_version(
         self, artifact: Artifact, version: ArtifactVersion
     ) -> None:
@@ -804,20 +809,27 @@ class SQLiteStorage(StorageDriver):
     def get_artifact(
         self, artifact_id: str, project_id: str | None = None
     ) -> Artifact | None:
-        with self._read_conn() as conn:
-            if project_id is not None:
-                cur = conn.execute(
-                    "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
-                    (artifact_id, project_id),
-                )
-            else:
-                cur = conn.execute(
-                    "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
-                )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            return _artifact_from_row(row)
+        # P2-5/H12(trace): db.storage.duration 标记读路径。tracing.span 未启用时 no-op。
+        from fusion_artifacts_engine import tracing
+
+        with tracing.span(
+            "db.storage.duration", db_operation="get_artifact",
+            db_artifact_id=artifact_id,
+        ):
+            with self._read_conn() as conn:
+                if project_id is not None:
+                    cur = conn.execute(
+                        "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
+                        (artifact_id, project_id),
+                    )
+                else:
+                    cur = conn.execute(
+                        "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
+                    )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return _artifact_from_row(row)
 
     def list_artifacts(
         self,
@@ -826,31 +838,38 @@ class SQLiteStorage(StorageDriver):
         project_id: str | None = None,
         metadata_filter: dict | None = None,
     ) -> list[Artifact]:
-        conditions = ["session_id = ?"]
-        params: list = [session_id]
-        if not include_deleted:
-            conditions.append("is_deleted = 0")
-        if project_id is not None:
-            conditions.append("project_id = ?")
-            params.append(project_id)
-        if metadata_filter:
-            for key, value in metadata_filter.items():
-                # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
-                if not _META_KEY_RE.fullmatch(key):
-                    logger.warning("Reject metadata filter key (unsafe): %s", key)
-                    continue
-                json_path = f"$.{key}"
-                conditions.append("json_extract(metadata, ?) = ?")
-                # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
-                bind_val = int(value) if isinstance(value, bool) else value
-                params.extend([json_path, bind_val])
-        where = " AND ".join(conditions)
-        with self._read_conn() as conn:
-            cur = conn.execute(
-                f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC",
-                params,
-            )
-            return [_artifact_from_row(r) for r in cur.fetchall()]
+        # P2-5/H12(trace): db.storage.duration 标记读路径。
+        from fusion_artifacts_engine import tracing
+
+        with tracing.span(
+            "db.storage.duration", db_operation="list_artifacts",
+            db_session_id=session_id,
+        ):
+            conditions = ["session_id = ?"]
+            params: list = [session_id]
+            if not include_deleted:
+                conditions.append("is_deleted = 0")
+            if project_id is not None:
+                conditions.append("project_id = ?")
+                params.append(project_id)
+            if metadata_filter:
+                for key, value in metadata_filter.items():
+                    # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
+                    if not _META_KEY_RE.fullmatch(key):
+                        logger.warning("Reject metadata filter key (unsafe): %s", key)
+                        continue
+                    json_path = f"$.{key}"
+                    conditions.append("json_extract(metadata, ?) = ?")
+                    # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
+                    bind_val = int(value) if isinstance(value, bool) else value
+                    params.extend([json_path, bind_val])
+            where = " AND ".join(conditions)
+            with self._read_conn() as conn:
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC",
+                    params,
+                )
+                return [_artifact_from_row(r) for r in cur.fetchall()]
 
     def list_all_artifacts(
         self,
@@ -1016,50 +1035,57 @@ class SQLiteStorage(StorageDriver):
         soft_delete: bool = True,
         project_id: str | None = None,
     ) -> bool:
-        if project_id is not None:
-            art = self.get_artifact(artifact_id, project_id=project_id)
-            if art is None:
-                logger.warning(
-                    "Delete denied: artifact %s not found in project %s",
-                    artifact_id,
-                    project_id,
-                )
-                return False
-        if soft_delete:
-            from datetime import datetime
+        # P2-5/H12(trace): db.storage.duration 标记写路径。
+        from fusion_artifacts_engine import tracing
 
-            now_iso = datetime.now(UTC).isoformat()
-            with self._write_lock:
-                cur = self._conn.execute(
-                    "UPDATE artifacts SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?",
-                    (now_iso, time.time(), artifact_id),
-                )
-                self._conn.commit()
-            ok = cur.rowcount > 0
-        else:
-            with self._write_lock:
-                # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
-                self._conn.execute(
-                    "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
-                )
-                self._conn.execute(
-                    "DELETE FROM artifact_events WHERE artifact_id = ?", (artifact_id,)
-                )
-                self._conn.execute(
-                    "DELETE FROM artifact_shares WHERE artifact_id = ?", (artifact_id,)
-                )
-                cur = self._conn.execute(
-                    "DELETE FROM artifacts WHERE id = ?", (artifact_id,)
-                )
-                self._conn.commit()
-            ok = cur.rowcount > 0
-            if ok:
-                content_dir = self.content_dir / artifact_id
-                if content_dir.exists():
-                    shutil.rmtree(content_dir, onerror=_log_rmtree_error)
-                    logger.debug("Cleaned up content dir: %s", content_dir)
-        logger.info("Deleted artifact %s soft=%s ok=%s", artifact_id, soft_delete, ok)
-        return ok
+        with tracing.span(
+            "db.storage.duration", db_operation="delete_artifact",
+            db_artifact_id=artifact_id, db_soft_delete=soft_delete,
+        ):
+            if project_id is not None:
+                art = self.get_artifact(artifact_id, project_id=project_id)
+                if art is None:
+                    logger.warning(
+                        "Delete denied: artifact %s not found in project %s",
+                        artifact_id,
+                        project_id,
+                    )
+                    return False
+            if soft_delete:
+                from datetime import datetime
+
+                now_iso = datetime.now(UTC).isoformat()
+                with self._write_lock:
+                    cur = self._conn.execute(
+                        "UPDATE artifacts SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?",
+                        (now_iso, time.time(), artifact_id),
+                    )
+                    self._conn.commit()
+                ok = cur.rowcount > 0
+            else:
+                with self._write_lock:
+                    # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
+                    self._conn.execute(
+                        "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM artifact_events WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM artifact_shares WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    cur = self._conn.execute(
+                        "DELETE FROM artifacts WHERE id = ?", (artifact_id,)
+                    )
+                    self._conn.commit()
+                ok = cur.rowcount > 0
+                if ok:
+                    content_dir = self.content_dir / artifact_id
+                    if content_dir.exists():
+                        shutil.rmtree(content_dir, onerror=_log_rmtree_error)
+                        logger.debug("Cleaned up content dir: %s", content_dir)
+            logger.info("Deleted artifact %s soft=%s ok=%s", artifact_id, soft_delete, ok)
+            return ok
 
     def rename_artifact(self, artifact_id: str, new_name: str) -> bool:
         with self._write_lock:
@@ -1249,6 +1275,7 @@ class SQLiteStorage(StorageDriver):
 
     # ── versions ───────────────────────────────────────────────
 
+    @_tracing.traced("db.storage.duration", db_operation="save_version")
     def save_version(self, version: ArtifactVersion) -> None:
         # 运维4: 写前磁盘预检，超阈值拒绝写
         self.ensure_disk_available()
@@ -1442,6 +1469,7 @@ class SQLiteStorage(StorageDriver):
             logger.info("GC orphan files: removed %d", removed)
         return removed
 
+    @_tracing.traced("db.storage.duration", db_operation="create_version_atomic")
     def create_version_atomic(
         self,
         artifact: Artifact,
