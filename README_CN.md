@@ -28,6 +28,24 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
+## v0.5.0 — 企业级生产发布
+
+**v0.5.0** 是企业级商用生产版本。完整关闭审计报告（2026-08-26 审计报告 §9）的全部发现——
+10 条 P0（作为 v0.4.2-rc 发布）、12 条 P1、8 条 P2、及全部 MEDIUM/LOW。无领域行为回归；
+538 测试全绿，ruff 干净。v0.5.0 主要修复：
+
+- **P1（12 条）**：限流生产默认值 + `rps=0` 启动告警；share `max_accesses` 原子 CAS；
+  每请求 `X-Request-ID`（uuid4）+ `LoggerAdapter`；周期 WAL checkpoint + 在线备份脚本；
+  列表分页边界（`page_size≤500`）；`allow_no_auth` 文档/实现对齐（默认 fail-closed）；
+  SSE 最大生命周期 + `kind_filter` 校验；`save_artifact_and_version` 两阶段写（tmp+rename）；
+  请求超时后 `future.cancel()`；`export_session` 错误信息脱敏；删除 `cluster_node_id` 伪字段 + 补全 env 覆盖。
+- **P2（8 条）**：SSE 线程隔离（SSE 并发与 RPC worker 池分离）；RPC handler 线程卸载
+  （所有同步 storage/engine 调用经 `asyncio.to_thread`）；IDOR owner 校验（`caller_user_id` 强制）；
+  内容分块 I/O + SSE 事件体积上限；可选 OTel 追踪（`rpc.server.duration` + `db.storage.duration`）；
+  增量 token 计数（前缀和截断、patch 复用）；metadata 函数索引 + 游标分页；render.py 覆盖率 63%→88%。
+- **LOW（1..5）**：share_id 格式预校验；日志注入净化（CWE-117）；`/metrics` token 鉴权；
+  CSP nonce（CWE-79）；LOW-2 文档化跳过（运行时 key 轮换）。
+
 ## 认证
 
 引擎通过 `X-API-Key` 请求头进行 API Key 认证。

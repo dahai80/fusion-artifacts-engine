@@ -30,6 +30,29 @@ fusion-artifacts-engine status
 
 ## Security (v0.3.11 audit hardening)
 
+**v0.5.0** is the enterprise-grade production release. It closes the full audit
+(§9 of the 2026-08-26 audit report) — all 10 P0 (released as v0.4.2-rc), 12 P1,
+8 P2, and all MEDIUM/LOW findings. No domain-behavior regression; 538 tests green,
+ruff clean. v0.5.0 headline remediation:
+
+- **P1 (12)**: rate-limit production defaults + `rps=0` startup WARN; share
+  `max_accesses` atomic CAS; per-request `X-Request-ID` (uuid4) + `LoggerAdapter`;
+  periodic WAL checkpoint + online backup script; list pagination bounds
+  (`page_size≤500`); `allow_no_auth` doc/impl alignment (fail-closed default);
+  SSE max-lifetime + `kind_filter` validation; `save_artifact_and_version`
+  two-phase write (tmp+rename); `future.cancel()` after request timeout;
+  `export_session` error message sanitization; `cluster_node_id` field deletion
+  + env-var override completion.
+- **P2 (8)**: SSE thread isolation (separate SSE concurrency from RPC worker pool);
+  RPC handler thread offload (all sync storage/engine calls via `asyncio.to_thread`);
+  IDOR owner-check (`caller_user_id` enforcement); chunked content I/O + SSE event
+  size cap; optional OTel tracing (`rpc.server.duration` + `db.storage.duration`);
+  incremental token counting (prefix-sum truncation, patch reuse); metadata function
+  indexes + keyset pagination; render.py coverage 63% → 88%.
+- **LOW (1..5)**: share_id format precheck; log-injection sanitization (CWE-117);
+  `/metrics` token auth; CSP nonce (CWE-79); LOW-2 documented-skip (runtime key
+  rotation).
+
 **v0.4.1** adds ops-integration test coverage on top of v0.4.0 — `tests/test_ops_integration.py`
 (9 live-server tests) covers the do_POST/do_GET paths the v0.4.0 unit tests exercised only at the
 handler level: JSON-RPC rate-limit `429` / `-32003` trigger, public-share rate-limit `429`,
