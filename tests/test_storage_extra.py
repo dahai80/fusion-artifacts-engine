@@ -640,3 +640,63 @@ def test_content_file_missing(storage):
     # L-16: 内容文件缺失是数据损坏，storage 上抛而非伪造空版本
     with pytest.raises(FileNotFoundError):
         storage.get_version("art1", 1)
+
+
+def test_p14_close_runs_truncate_checkpoint_clears_wal(storage):
+    # P1-4: 写入产生 WAL 帧，close() 跑 TRUNCATE checkpoint 后 -wal 文件应清空（不存在或 0 字节）。
+    # 验证停机后备份只拷 meta.db 即可，无需 -wal/-shm（scripts/backup.sh 依赖此前提）。
+    art = _make_artifact()
+    ver = _make_version(content="content for wal checkpoint test")
+    storage.save_artifact_and_version(art, ver)
+    wal_file = storage.db_path.parent / f"{storage.db_path.name}-wal"
+    # 写入后 -wal 可能存在且非空（WAL 模式未 checkpoint）
+    assert storage.db_path.exists()
+    storage.close()
+    # TRUNCATE 后 -wal 应为 0 字节或不存在
+    if wal_file.exists():
+        assert wal_file.stat().st_size == 0
+    storage._conn = None  # 防止 fixture teardown 二次 close
+
+
+def test_p14_disabled_checkpoint_no_thread():
+    # P1-4: wal_checkpoint_interval=0 禁用后台线程，_checkpoint_thread 应为 None。
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        s = SQLiteStorage(tmp / "test.db", tmp / "content", wal_checkpoint_interval=0)
+        assert s._checkpoint_thread is None
+        assert s._wal_checkpoint_interval == 0
+        s.close()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_p18_save_artifact_and_version_two_phase_no_tmp_residue(storage):
+    # P1-8/H10: 大内容两阶段写——提交成功后 tmp rename 到最终路径，无 .tmp_ 残留。
+    art = _make_artifact()
+    big_content = "line\n" * 4000  # > small_content_limit (10KB)
+    ver = _make_version(content=big_content)
+    storage.save_artifact_and_version(art, ver)
+    art_dir = storage.content_dir / art.id
+    assert art_dir.exists()
+    files = [p.name for p in art_dir.iterdir()] if art_dir.exists() else []
+    # 最终版本文件存在，无临时残留
+    assert any(f.startswith("v1.") for f in files), f"final content file missing: {files}"
+    assert not any(".tmp_" in f for f in files), f"tmp residue left: {files}"
+
+
+def test_p18_save_artifact_and_version_rollback_cleans_tmp(storage):
+    # P1-8/H10: 事务失败时清理 tmp 文件，不留孤儿。
+    art = _make_artifact()
+    ver = _make_version(content="big" * 5000)  # > 10KB 触发文件写
+    storage.save_artifact_and_version(art, ver)
+    # 再次用相同 version_num=1 写入——UNIQUE(artifact_id, version_num) 冲突，
+    # _translate_sqlite_error 映射 IntegrityError，事务失败路径应清理 tmp。
+    dup_ver = _make_version(content="also big" * 5000)  # 同 artifact_id, version_num=1
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.save_artifact_and_version(art, dup_ver)
+    art_dir = storage.content_dir / art.id
+    files = [p.name for p in art_dir.iterdir()] if art_dir.exists() else []
+    # 失败的 tmp 已清理，只留成功的 v1 文件
+    assert not any(".tmp_" in f for f in files), f"orphan tmp after rollback: {files}"
+    assert sum(1 for f in files if f.startswith("v1.")) == 1

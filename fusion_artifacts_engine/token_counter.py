@@ -62,6 +62,18 @@ def count_tokens(text: str) -> int:
     return n
 
 
+def estimate_tokens(text: str) -> int:
+    # F3: 廉价估算，仅用于 compactor 跳过明显超预算的全量 tiktoken 编码。
+    # 不保证上下界——最终是否 ≤budget 由 count_tokens 精确校验。
+    if not text:
+        return 0
+    char_len = len(text)
+    byte_len = len(text.encode("utf-8"))
+    if byte_len > char_len * 1.5:
+        return max(1, byte_len // 3)
+    return max(1, char_len // 4)
+
+
 def clear_token_cache() -> None:
     # H6: 测试/运维可清缓存
     with _TOKEN_CACHE_LOCK:

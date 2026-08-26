@@ -42,6 +42,16 @@ def _expanduser_path(v: str) -> Path:
     return Path(os.path.expanduser(v))
 
 
+def _parse_bool(v: str) -> bool:
+    # P1-12: env bool 解析——接受 true/false/1/0/yes/no（大小写不敏感），非法值 raise 触发 env_map 警告
+    s = v.strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"invalid bool: {v}")
+
+
 def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     # A-9: yaml section.key -> model field 的映射集中在此表，新增字段只改一处。
     # 路径类值经 _expanduser_path 展开 ~；空字符串 sync_root 归一为 None。
@@ -57,6 +67,8 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "small_content_limit": ("small_content_limit", None),
             "sync_root": ("sync_root", _expanduser_path),
             "disk_space_warning_pct": ("disk_space_warning_pct", None),
+            "wal_checkpoint_interval": ("wal_checkpoint_interval", None),
+            "metadata_indexed_keys": ("metadata_indexed_keys", None),
         },
         "thresholds": {
             "auto_create_lines": ("auto_create_threshold_lines", None),
@@ -67,6 +79,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "max_versions_per_artifact": ("max_versions_per_artifact", None),
             "max_content_bytes": ("max_content_bytes", None),
             "max_metadata_bytes": ("max_metadata_bytes", None),
+            "max_event_payload_bytes": ("max_event_payload_bytes", None),
         },
         "security": {
             "api_key": ("api_key", None),
@@ -76,9 +89,9 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         },
         "sse": {
             "heartbeat_interval": ("sse_heartbeat_interval", None),
-        },
-        "cluster": {
-            "node_id": ("cluster_node_id", None),
+            "max_lifetime": ("sse_max_lifetime", None),
+            "max_event_bytes": ("sse_max_event_bytes", None),
+            "max_connections": ("sse_max_connections", None),
         },
         "rate_limit": {
             "rps": ("rate_limit_rps", None),
@@ -88,6 +101,11 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         },
         "metrics": {
             "enabled": ("metrics_enabled", None),
+            "token": ("metrics_token", None),
+        },
+        "tracing": {
+            "enabled": ("tracing_enabled", None),
+            "service_name": ("tracing_service_name", None),
         },
     }
     flat: dict[str, Any] = {}
@@ -100,8 +118,8 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             if yaml_key not in section_data:
                 continue
             val = section_data[yaml_key]
-            # 空字符串归一为 None：sync_root（禁用 sync）/ cluster_node_id（单机）
-            if field_name in ("sync_root", "cluster_node_id") and not val:
+            # 空字符串归一为 None：sync_root（禁用 sync）
+            if field_name == "sync_root" and not val:
                 flat[field_name] = None
                 continue
             if converter is not None:
@@ -123,8 +141,23 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         # L-23: env STORAGE_ROOT 也展开 ~
         "FUSION_ARTIFACTS_STORAGE_ROOT": ("storage_root", _expanduser_path),
         "FUSION_ARTIFACTS_API_KEY": ("api_key", str),
-        # H8: 多节点 ID——多节点部署时区分本节点
-        "FUSION_ARTIFACTS_NODE_ID": ("cluster_node_id", str),
+        # P1-12/M22: 运维可调项 env 覆盖补全——容器/多节点部署不依赖改 YAML 即可调参
+        "FUSION_ARTIFACTS_MAX_WORKERS": ("server_max_workers", int),
+        "FUSION_ARTIFACTS_RATE_LIMIT_RPS": ("rate_limit_rps", float),
+        "FUSION_ARTIFACTS_RATE_LIMIT_BURST": ("rate_limit_burst", int),
+        "FUSION_ARTIFACTS_PUBLIC_RPS": ("public_rate_limit_rps", float),
+        "FUSION_ARTIFACTS_PUBLIC_BURST": ("public_rate_limit_burst", int),
+        "FUSION_ARTIFACTS_METRICS_ENABLED": ("metrics_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_METRICS_TOKEN": ("metrics_token", str),
+        "FUSION_ARTIFACTS_DISK_WARNING_PCT": ("disk_space_warning_pct", int),
+        # P1-4: WAL checkpoint 间隔 env 覆盖
+        "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
+        "FUSION_ARTIFACTS_SSE_MAX_LIFETIME": ("sse_max_lifetime", int),
+        "FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES": ("sse_max_event_bytes", int),
+        "FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS": ("sse_max_connections", int),
+        # P2-5: OTel tracing env 覆盖
+        "FUSION_ARTIFACTS_TRACING_ENABLED": ("tracing_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_TRACING_SERVICE_NAME": ("tracing_service_name", str),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -168,6 +201,16 @@ class ArtifactEngineConfig(BaseModel):
     allow_no_auth: bool = Field(default=False)
     api_key: str | None = Field(default=None)
     sse_heartbeat_interval: int = Field(default=30)
+    # P1-7/M7: SSE 单连接最大存活秒。0=不限。超时后服务端主动关流促客户端重连，
+    # 防僵尸长连接占线程。生产建议 3600（1h），客户端应实现自动重连。
+    sse_max_lifetime: int = Field(default=3600)
+    # F5: SSE 单事件序列化后字节上限。超限事件被丢弃（仅记日志），防大 payload
+    # 长时间阻塞单连接线程 + 客户端缓冲爆炸。0=不限（向后兼容）。
+    sse_max_event_bytes: int = Field(default=262144)
+    # P2-1/F1/H3: SSE 独立并发上限。SSE 握手后释放 RPC worker 信号量、占用此专用信号量，
+    # 使长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
+    # 默认 16：本地单机足够（fusion-studio 通常 1-2 个 SSE）；0=不设独立上限（回退旧行为，不推荐）。
+    sse_max_connections: int = Field(default=16)
     context_budget_default: int = Field(default=200000)
     # C-1: sync_artifact_file 文件读写根目录，路径必须在其下
     sync_root: Path | None = Field(default=None)
@@ -177,11 +220,14 @@ class ArtifactEngineConfig(BaseModel):
     max_content_bytes: int = Field(default=0)
     # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限；超限拒绝写入
     max_metadata_bytes: int = Field(default=0)
+    # P0-5/H6: emit_event payload JSON 字节上限，默认 64KB；超限拒绝写入防事件总线放大
+    max_event_payload_bytes: int = Field(default=65536)
     # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning。
     # 字段默认 0（禁用，单元测试不依赖宿主机磁盘状态）；生产经 default_config.yaml 设 90。
     disk_space_warning_pct: int = Field(default=0)
-    # H8: 多节点 ID。单机默认 None；多节点部署经 FUSION_ARTIFACTS_NODE_ID 或 cluster.node_id 配置
-    cluster_node_id: str | None = Field(default=None)
+    # P1-4: WAL 周期 checkpoint 间隔秒。0=禁用后台 checkpoint（依赖 SQLite 默认 1000 页自动）。
+    # 生产建议 300——后台 PASSIVE checkpoint 控制 -wal 文件增长，配合 backup.sh 在线备份。
+    wal_checkpoint_interval: int = Field(default=300)
     # 运维1: 令牌桶限流。rps=0 表示不限流（默认）。default 桶覆盖 JSON-RPC + 鉴权 REST
     rate_limit_rps: float = Field(default=0)
     rate_limit_burst: int = Field(default=0)
@@ -190,6 +236,16 @@ class ArtifactEngineConfig(BaseModel):
     public_rate_limit_burst: int = Field(default=0)
     # 运维2: Prometheus /metrics 端点开关
     metrics_enabled: bool = Field(default=True)
+    # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配（常量时间比较）。
+    # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 时必须设值，否则运维指标泄露。
+    metrics_token: str | None = Field(default=None)
+    # P2-5/H12(trace)/M20: OTel 分布式追踪开关。默认 false——local-first 单租户无需追踪，
+    # 且 opentelemetry-sdk 为可选依赖（[otel] extra）。enabled=true 时若未装 SDK 则 no-op + WARN。
+    tracing_enabled: bool = Field(default=False)
+    tracing_service_name: str = Field(default="fusion-artifacts-engine")
+    # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
+    # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
+    metadata_indexed_keys: list[str] = Field(default_factory=list)
 
     @property
     def db_path(self) -> Path:

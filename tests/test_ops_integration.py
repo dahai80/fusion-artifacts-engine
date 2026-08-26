@@ -75,10 +75,11 @@ def test_jsonrpc_rate_limit_rps_zero_unlimited(tmp_path):
 def test_public_share_rate_limit_returns_429(tmp_path):
     server, eng, port = _server(tmp_path, public_rate_limit_rps=1, public_rate_limit_burst=1)
     try:
-        url = f"http://127.0.0.1:{port}/api/v1/share/shr_nonexistent"
+        # LOW-1: 合法格式 share_id（12 hex）过格式校验进 DB 查不到 → 404，且消耗 public 桶
+        url = f"http://127.0.0.1:{port}/api/v1/share/shr_000000000000"
         # 第一个请求消耗桶（404 但过了限流），第二个应 429
         r1 = httpx.get(url, timeout=5)
-        assert r1.status_code in (404, 410)  # share 不存在，但未被限流
+        assert r1.status_code in (400, 404, 410)  # share 不存在，但未被限流
         r2 = httpx.get(url, timeout=5)
         assert r2.status_code == 429
         assert r2.json()["code"] == -32003

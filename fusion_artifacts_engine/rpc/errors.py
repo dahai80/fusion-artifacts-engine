@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 #   -32003 rate/资源受限（可重试/降级）
 #   -32004 业务规则拒绝（不可重试）
 #   -32005 未实现（占位方法已下线，不可重试，调用方应改用替代能力）
+#   -32006 权限拒绝 / IDOR（不可重试，调用方越权访问他人资源）
 
 
 class RpcError(Exception):
@@ -48,3 +49,11 @@ class NotImplementedError(RpcError):
     # 保留 RPC 方法名注册（向后兼容旧客户端不报 method not found），但执行即拒。
     def __init__(self, message: str = "Method not implemented"):
         super().__init__(-32005, message)
+
+
+class PermissionError(RpcError):
+    # P2-3/MEDIUM-4: IDOR 防护——调用方 caller_user_id 与产物 owner_user_id 不符即拒。
+    # 本地单租户默认不传 caller_user_id（跳过校验）；多租户部署按请求注入身份强制归属校验。
+    # 不可重试：越权是确定性拒绝，重试无意义。
+    def __init__(self, message: str = "Permission denied: not artifact owner"):
+        super().__init__(-32006, message)

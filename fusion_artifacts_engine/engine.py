@@ -95,6 +95,7 @@ class ArtifactEngine:
             disk_space_warning_pct=self.config.disk_space_warning_pct,
             max_content_bytes=self.config.max_content_bytes,
             max_metadata_bytes=self.config.max_metadata_bytes,
+            wal_checkpoint_interval=self.config.wal_checkpoint_interval, metadata_indexed_keys=self.config.metadata_indexed_keys,
         )
         # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
         # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
@@ -138,6 +139,7 @@ class ArtifactEngine:
         kind: str | None = None,
         project_id: str | None = None,
         metadata: dict | None = None,
+        owner_user_id: str | None = None, ownership_type: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
@@ -152,11 +154,10 @@ class ArtifactEngine:
             type=artifact_type,
             kind=kind,
             project_id=project_id,
-            metadata=metadata,
-            current_version=1,
+            metadata=metadata, current_version=1,
             summary=summary,
-            created_at=now,
-            updated_at=now,
+            created_at=now, updated_at=now,
+            owner_user_id=owner_user_id, ownership_type=ownership_type if ownership_type is not None else "free",
         )
         size = _size_bytes(content)
         sections = extract_sections(content, artifact_type)
@@ -547,12 +548,12 @@ class ArtifactEngine:
         filters: dict | None = None,
         sort: str = "updated_at",
         page: int = 1,
-        page_size: int = 20,
+        page_size: int = 20, cursor: str | None = None,
     ) -> tuple[list[Artifact], int]:
         artifacts, total = self.storage.list_all_artifacts(
-            filters, sort, page, page_size
+            filters, sort, page, page_size, cursor
         )
-        logger.info("list_all_artifacts: %d/%d page=%d", len(artifacts), total, page)
+        logger.info("list_all_artifacts: %d/%d page=%s", len(artifacts), total, page)
         return artifacts, total
 
     # ── P1: recycle bin ────────────────────────────────────────
@@ -561,7 +562,7 @@ class ArtifactEngine:
         self, page: int = 1, page_size: int = 20
     ) -> tuple[list[Artifact], int]:
         artifacts, total = self.storage.list_recycle(page, page_size)
-        logger.info("list_recycle: %d/%d page=%d", len(artifacts), total, page)
+        logger.info("list_recycle: %d/%d page=%s", len(artifacts), total, page)
         return artifacts, total
 
     def restore_artifact(self, artifact_id: str) -> bool:
@@ -844,6 +845,21 @@ class ArtifactEngine:
 
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         now_ts = _time.time()
+        # P0-5/H6: emit_event payload 字节上限校验，超限拒绝写入防事件总线放大
+        if payload is not None:
+            import json as _json
+
+            payload_size = len(_json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            limit = self.config.max_event_payload_bytes
+            if limit > 0 and payload_size > limit:
+                logger.warning(
+                    "Event payload rejected: %d bytes > max_event_payload_bytes %d (type=%s)",
+                    payload_size, limit, event_type,
+                )
+                raise ResourceLimitError(
+                    f"Event payload too large: {payload_size} bytes exceeds "
+                    f"max_event_payload_bytes {limit}"
+                )
         event = ArtifactEvent(
             event_id=event_id,
             artifact_id=artifact_id,
@@ -869,7 +885,7 @@ class ArtifactEngine:
         events, total = self.storage.list_events(
             artifact_id, session_id, since_ts, page, page_size
         )
-        logger.info("list_events: %d/%d page=%d", len(events), total, page)
+        logger.info("list_events: %d/%d page=%s", len(events), total, page)
         return events, total
 
     # ── P3: project KB ─────────────────────────────────────────
@@ -916,7 +932,7 @@ class ArtifactEngine:
         if current is None:
             raise NotFoundError(f"No current version for artifact: {artifact_id}")
         old_content = current.content
-        old_tokens = count_tokens(old_content)
+        old_tokens = current.token_count
 
         if operation == "replace_section":
             if not anchor:
@@ -944,8 +960,9 @@ class ArtifactEngine:
         version, _ref_text = await self.create_version(
             artifact_id, new_content, f"patch:{operation} anchor={anchor}"
         )
+        # F3: 复用 version.token_count（create_version 已计数），避免对 new_content 二次编码
+        new_tokens = version.token_count
         replaced_tokens = count_tokens(replaced_content)
-        new_tokens = count_tokens(new_content)
         tokens_added = new_tokens - old_tokens + replaced_tokens
         tokens_removed = replaced_tokens
         tokens_net = tokens_added - tokens_removed
@@ -1042,7 +1059,7 @@ class ArtifactEngine:
     # ── AE-7: auto_compact ─────────────────────────────────────
 
     async def auto_compact(self, artifact_id: str, token_budget: int) -> dict:
-        from fusion_artifacts_engine.compactor import compact_content
+        from fusion_artifacts_engine.compactor import compact_and_count
 
         # H5: 阻塞 storage 读卸到线程池
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
@@ -1069,10 +1086,8 @@ class ArtifactEngine:
                 "reason": "already_within_budget",
             }
 
-        compacted_content = compact_content(
-            version.content, artifact.type, token_budget
-        )
-        compacted_tokens = count_tokens(compacted_content)
+        # F3: 大 content 压缩+计数卸线程池，避免阻塞事件循环
+        compacted_content, compacted_tokens = await asyncio.to_thread(compact_and_count, version.content, artifact.type, token_budget)
 
         if compacted_tokens < original_tokens:
             version, _ = await self.create_version(

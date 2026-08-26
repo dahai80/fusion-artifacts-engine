@@ -1,6 +1,7 @@
 import errno
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -13,6 +14,10 @@ from datetime import UTC
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# P2-5/H12(trace): 可选 OTel tracing。模块顶层别名供 @tracing.traced 装饰器引用。
+# tracing 模块内部对 OTel 缺失/未启用均 no-op，故顶层导入安全。
+from fusion_artifacts_engine import tracing as _tracing  # noqa: E402
 
 _EXT_SAFE_RE = re.compile(r"[^A-Za-z0-9]")
 _META_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -96,6 +101,80 @@ def _enforce_metadata_limit(metadata: dict | None, limit: int) -> None:
         raise ResourceLimitError(
             f"Metadata too large: {size} bytes exceeds max_metadata_bytes {limit}"
         )
+
+
+def _clamp_pagination(page, page_size, max_size: int = 500) -> tuple[int, int]:
+    # P1-5/M5: 分页入参硬化——page>=1、page_size<=max_size、非整数 try/except 回退默认。
+    # 防 page_size=10**9 拉全表 DoS、page<=0 负偏移、page="abc" TypeError。
+    try:
+        page = int(page) if page is not None else 1
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        page_size = int(page_size) if page_size is not None else 20
+    except (ValueError, TypeError):
+        page_size = 20
+    page = max(1, page)
+    page_size = max(1, min(page_size, max_size))
+    return page, page_size
+
+
+def _decode_cursor(cursor: str) -> tuple[float | None, str]:
+    # P2-7/F6: 解析 "<float>:<id>" 游标。非法返回 (None, "") 回退 OFFSET。
+    # id 段可能含 ':' 之外的任意字符，故只在第一个 ':' 处分割。
+    if not cursor or ":" not in cursor:
+        return None, ""
+    head, _, tail = cursor.partition(":")
+    try:
+        return float(head), tail
+    except (ValueError, TypeError):
+        return None, ""
+
+
+def _encode_cursor(col_val: float, row_id: str) -> str:
+    # P2-7/F6: 编码游标 "<float>:<id>"。RPC 层据结果末行构造，回传客户端做下次请求。
+    return f"{col_val}:{row_id}"
+
+
+# F5: 大 content 分块读写。write_text/read_text 一次性 encode/decode 全文字符串，
+# 10MB content 会在内存中再翻倍（str + bytes）。分块以 1MB 为单位 encode/decode +
+# 流式写盘，避免单次 I/O 占用 = content 大小的临时内存。
+_CHUNK_IO_BYTES = 1024 * 1024
+
+
+def _write_text_chunked(path, content: str) -> None:
+    encoded = content.encode("utf-8")
+    try:
+        with open(path, "wb") as f:
+            for off in range(0, len(encoded), _CHUNK_IO_BYTES):
+                f.write(encoded[off:off + _CHUNK_IO_BYTES])
+    except OSError as e:
+        # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):
+            logger.error("disk full writing content file %s: %s", path, e)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise ResourceLimitError(f"disk full writing content: {e}") from e
+        raise
+
+
+def _read_text_chunked(path) -> str:
+    chunks = []
+    try:
+        with open(path, "rb") as f:
+            while True:
+                block = f.read(_CHUNK_IO_BYTES)
+                if not block:
+                    break
+                chunks.append(block)
+    except OSError as e:
+        logger.error("Failed reading content file %s: %s", path, e)
+        raise
+    return b"".join(chunks).decode("utf-8")
+
+
 from fusion_artifacts_engine.storage.base import StorageDriver
 
 _SCHEMA_SQL = """
@@ -333,6 +412,8 @@ class SQLiteStorage(StorageDriver):
         self, db_path: Path, content_dir: Path, small_content_limit: int = 10240,
         max_versions_per_artifact: int = 0, disk_space_warning_pct: int = 0,
         max_content_bytes: int = 0, max_metadata_bytes: int = 0,
+        wal_checkpoint_interval: int = 300,
+        metadata_indexed_keys: list[str] | None = None,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
@@ -345,6 +426,11 @@ class SQLiteStorage(StorageDriver):
         self.max_content_bytes = max(0, int(max_content_bytes))
         # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限。超限拒绝写入
         self.max_metadata_bytes = max(0, int(max_metadata_bytes))
+        # P2-7/F6: metadata 高频过滤字段名。仅保留安全标识符（防 DDL 注入）。
+        # 对每个 key 建 json_extract 表达式索引，metadata_filter 走索引而非全表扫。
+        self.metadata_indexed_keys = [
+            k for k in (metadata_indexed_keys or []) if _META_KEY_RE.fullmatch(k)
+        ]
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
         # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
@@ -373,8 +459,25 @@ class SQLiteStorage(StorageDriver):
         # 迁移方法仍需幂等（兼容无 applied_migrations 记录的既有 DB 首次升级）。
         self._migrate_schema_meta()
         self._run_migrations_gated()
+        # P2-7/F6: 建配置的 metadata 表达式索引。幂等（IF NOT EXISTS），
+        # 配置改 key 后旧索引保留（无害），新 key 运行时即时建。
+        self._ensure_metadata_indexes()
+        # P1-4: WAL 周期 checkpoint 后台线程。PASSIVE 模式不阻塞读写，控制 -wal 文件增长，
+        # 让 scripts/backup.sh 的 sqlite3 .backup（需 WAL 已 checkpoint 才能完整快照）可靠。
+        # interval=0 禁用（依赖 SQLite 默认 1000 页自动 checkpoint）。daemon 线程，stop event 退出。
+        self._wal_checkpoint_interval = max(0, int(wal_checkpoint_interval))
+        self._checkpoint_stop = threading.Event()
+        self._checkpoint_thread: threading.Thread | None = None
+        if self._wal_checkpoint_interval > 0:
+            self._checkpoint_thread = threading.Thread(
+                target=self._checkpoint_loop,
+                name="wal-checkpoint",
+                daemon=True,
+            )
+            self._checkpoint_thread.start()
         logger.info(
-            "SQLiteStorage initialized: db=%s content_dir=%s", db_path, content_dir
+            "SQLiteStorage initialized: db=%s content_dir=%s wal_checkpoint=%ss",
+            db_path, content_dir, self._wal_checkpoint_interval or "disabled",
         )
 
     @contextmanager
@@ -386,6 +489,24 @@ class SQLiteStorage(StorageDriver):
             yield conn
         finally:
             self._read_pool.put(conn)
+
+    def _checkpoint_loop(self) -> None:
+        # P1-4: 后台周期 PASSIVE checkpoint。PASSIVE 不阻塞读写，把已提交的 WAL 帧合并回主库。
+        # 控制 -wal 文件无限增长（默认 1000 页才自动 checkpoint，长事务下会堆积）。
+        while not self._checkpoint_stop.wait(self._wal_checkpoint_interval):
+            try:
+                self._run_checkpoint("PASSIVE")
+            except Exception as e:
+                logger.warning("WAL PASSIVE checkpoint failed: %s", e)
+
+    def _run_checkpoint(self, mode: str = "PASSIVE") -> None:
+        # P1-4: 执行一次 wal_checkpoint。PASSIVE=非阻塞合并；TRUNCATE=合并后截断 -wal 文件。
+        # TRUNCATE 在 close 时用，确保停机后 -wal 文件清空（备份/迁移只拷 meta.db 即可）。
+        with self._write_lock:
+            cur = self._conn.execute(f"PRAGMA wal_checkpoint({mode})")
+            row = cur.fetchone()
+            # (busy, log, checkpointed)：busy=1 表示有读写未完成（PASSIVE 正常），不报错
+            logger.debug("WAL checkpoint(%s): busy=%s log=%s ckpt=%s", mode, row[0], row[1], row[2])
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
         d = self.content_dir / artifact_id
@@ -403,14 +524,7 @@ class SQLiteStorage(StorageDriver):
                 "Refusing content write outside content_dir: %s (ext=%s)", path, ext
             )
             raise ValueError(f"Unsafe content path: {path}")
-        try:
-            path.write_text(content, encoding="utf-8")
-        except OSError as e:
-            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级），而非 -32603。
-            if e.errno in (errno.ENOSPC, errno.EDQUOT):
-                logger.error("disk full writing content file %s: %s", path, e)
-                raise ResourceLimitError(f"disk full writing content: {e}") from e
-            raise
+        _write_text_chunked(path, content)
         logger.debug("Wrote content file: %s", path)
         return str(path)
 
@@ -426,14 +540,7 @@ class SQLiteStorage(StorageDriver):
         if not tmp_path.resolve().is_relative_to(d.resolve()):
             logger.error("Refusing tmp content write outside content_dir: %s", tmp_path)
             raise ValueError(f"Unsafe content path: {tmp_path}")
-        try:
-            tmp_path.write_text(content, encoding="utf-8")
-        except OSError as e:
-            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
-            if e.errno in (errno.ENOSPC, errno.EDQUOT):
-                logger.error("disk full writing tmp content file %s: %s", tmp_path, e)
-                raise ResourceLimitError(f"disk full writing content: {e}") from e
-            raise
+        _write_text_chunked(tmp_path, content)
         logger.debug("Wrote tmp content file: %s", tmp_path)
         return str(tmp_path), f"v{{version_num}}.{ext}", ext
 
@@ -441,7 +548,7 @@ class SQLiteStorage(StorageDriver):
     def _read_content_file(self, content_path: str) -> str:
         p = Path(content_path)
         if p.exists():
-            return p.read_text(encoding="utf-8")
+            return _read_text_chunked(p)
         logger.error("Content file missing: %s", content_path)
         raise FileNotFoundError(f"Content file missing: {content_path}")
 
@@ -557,6 +664,7 @@ class SQLiteStorage(StorageDriver):
             artifact.kind,
         )
 
+    @_tracing.traced("db.storage.duration", db_operation="save_artifact_and_version")
     def save_artifact_and_version(
         self, artifact: Artifact, version: ArtifactVersion
     ) -> None:
@@ -565,8 +673,19 @@ class SQLiteStorage(StorageDriver):
         # P0-5/H9: metadata + 内容字节上限校验
         _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
         _enforce_content_limit(version.content, self.max_content_bytes)
+        # P1-8/H10: 内容文件两阶段写——先写临时路径（事务外），提交成功后 rename 到最终。
+        # 回滚删临时文件，不留孤儿；文件 I/O 不在 BEGIN IMMEDIATE 内，缩短 _write_lock 持锁。
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
+            tmp_path = None
+            final_template = None
+            content = version.content
+            if len(content.encode("utf-8")) > self.small_content_limit:
+                ext = self._guess_ext(version.artifact_id, version.content)
+                tmp_path, final_template, _ext = self._write_content_file_tmp(
+                    version.artifact_id, content, ext
+                )
+                content = ""
             try:
                 self._conn.execute(
                     """INSERT INTO artifacts
@@ -629,14 +748,12 @@ class SQLiteStorage(StorageDriver):
                         artifact.workflow_run_id,
                     ),
                 )
-                content = version.content
                 content_path = None
-                if len(content.encode("utf-8")) > self.small_content_limit:
-                    ext = self._guess_ext(version.artifact_id, version.content)
-                    content_path = self._write_content_file(
-                        version.artifact_id, version.version_num, content, ext
+                if tmp_path is not None:
+                    content_path = str(
+                        self.content_dir / version.artifact_id
+                        / final_template.format(version_num=version.version_num)
                     )
-                    content = ""
                 self._conn.execute(
                     """INSERT INTO artifact_versions
                        (artifact_id, version_num, content, content_path, size_bytes,
@@ -662,7 +779,24 @@ class SQLiteStorage(StorageDriver):
                     ),
                 )
                 self._conn.commit()
+                # P1-8/H10: 提交成功后 rename 临时文件到最终路径
+                if tmp_path is not None and content_path is not None:
+                    try:
+                        Path(tmp_path).rename(content_path)
+                        tmp_path = None
+                    except OSError as e:
+                        logger.error(
+                            "save_artifact_and_version rename failed %s -> %s: %s; "
+                            "orphan/tmp left for GC", tmp_path, content_path, e,
+                        )
+                        tmp_path = None
             except sqlite3.Error as e:
+                # P1-8/H10: 事务失败——清理临时文件，不留孤儿
+                if tmp_path is not None:
+                    try:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 raise _translate_sqlite_error(e) from e
         logger.info(
             "Saved artifact+version: %s v%d size=%d tokens=%d",
@@ -675,20 +809,27 @@ class SQLiteStorage(StorageDriver):
     def get_artifact(
         self, artifact_id: str, project_id: str | None = None
     ) -> Artifact | None:
-        with self._read_conn() as conn:
-            if project_id is not None:
-                cur = conn.execute(
-                    "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
-                    (artifact_id, project_id),
-                )
-            else:
-                cur = conn.execute(
-                    "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
-                )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            return _artifact_from_row(row)
+        # P2-5/H12(trace): db.storage.duration 标记读路径。tracing.span 未启用时 no-op。
+        from fusion_artifacts_engine import tracing
+
+        with tracing.span(
+            "db.storage.duration", db_operation="get_artifact",
+            db_artifact_id=artifact_id,
+        ):
+            with self._read_conn() as conn:
+                if project_id is not None:
+                    cur = conn.execute(
+                        "SELECT * FROM artifacts WHERE id = ? AND project_id = ?",
+                        (artifact_id, project_id),
+                    )
+                else:
+                    cur = conn.execute(
+                        "SELECT * FROM artifacts WHERE id = ?", (artifact_id,)
+                    )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return _artifact_from_row(row)
 
     def list_artifacts(
         self,
@@ -697,31 +838,38 @@ class SQLiteStorage(StorageDriver):
         project_id: str | None = None,
         metadata_filter: dict | None = None,
     ) -> list[Artifact]:
-        conditions = ["session_id = ?"]
-        params: list = [session_id]
-        if not include_deleted:
-            conditions.append("is_deleted = 0")
-        if project_id is not None:
-            conditions.append("project_id = ?")
-            params.append(project_id)
-        if metadata_filter:
-            for key, value in metadata_filter.items():
-                # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
-                if not _META_KEY_RE.fullmatch(key):
-                    logger.warning("Reject metadata filter key (unsafe): %s", key)
-                    continue
-                json_path = f"$.{key}"
-                conditions.append("json_extract(metadata, ?) = ?")
-                # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
-                bind_val = int(value) if isinstance(value, bool) else value
-                params.extend([json_path, bind_val])
-        where = " AND ".join(conditions)
-        with self._read_conn() as conn:
-            cur = conn.execute(
-                f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC",
-                params,
-            )
-            return [_artifact_from_row(r) for r in cur.fetchall()]
+        # P2-5/H12(trace): db.storage.duration 标记读路径。
+        from fusion_artifacts_engine import tracing
+
+        with tracing.span(
+            "db.storage.duration", db_operation="list_artifacts",
+            db_session_id=session_id,
+        ):
+            conditions = ["session_id = ?"]
+            params: list = [session_id]
+            if not include_deleted:
+                conditions.append("is_deleted = 0")
+            if project_id is not None:
+                conditions.append("project_id = ?")
+                params.append(project_id)
+            if metadata_filter:
+                for key, value in metadata_filter.items():
+                    # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
+                    if not _META_KEY_RE.fullmatch(key):
+                        logger.warning("Reject metadata filter key (unsafe): %s", key)
+                        continue
+                    json_path = f"$.{key}"
+                    conditions.append("json_extract(metadata, ?) = ?")
+                    # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
+                    bind_val = int(value) if isinstance(value, bool) else value
+                    params.extend([json_path, bind_val])
+            where = " AND ".join(conditions)
+            with self._read_conn() as conn:
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where} ORDER BY updated_at DESC",
+                    params,
+                )
+                return [_artifact_from_row(r) for r in cur.fetchall()]
 
     def list_all_artifacts(
         self,
@@ -729,7 +877,10 @@ class SQLiteStorage(StorageDriver):
         sort: str = "updated_at",
         page: int = 1,
         page_size: int = 20,
+        cursor: str | None = None,
     ) -> tuple[list[Artifact], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0"]
         params: list = []
         if filters:
@@ -788,6 +939,20 @@ class SQLiteStorage(StorageDriver):
                 conditions.append("created_at <= ?")
                 params.append(_coerce_float("until", until))
         where = " AND ".join(conditions)
+        # P2-7/F6: keyset 分页——updated_at/created_at 单列 DESC 排序支持游标，
+        # WHERE (sort_col, id) < (cursor_val, cursor_id) 替代 OFFSET 深分页（避免扫+丢行）。
+        # cursor 格式 "<float>:<id>"；非法或排序不支持时回退 OFFSET（向后兼容）。
+        keyset_cols = {"updated_at": "updated_at", "created_at": "created_at"}
+        use_keyset = False
+        cursor_params: list = []
+        cursor_cond = ""
+        if cursor and sort in keyset_cols:
+            col_val, row_id = _decode_cursor(cursor)
+            if col_val is not None and row_id:
+                col = keyset_cols[sort]
+                cursor_cond = f" AND ({col}, id) < (?, ?)"
+                cursor_params = [col_val, row_id]
+                use_keyset = True
         with self._read_conn() as conn:
             count_cur = conn.execute(
                 f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
@@ -800,11 +965,20 @@ class SQLiteStorage(StorageDriver):
                 "starred": "is_starred DESC, updated_at DESC",
             }
             order = sort_map.get(sort, "updated_at DESC")
-            offset = (page - 1) * page_size
-            cur = conn.execute(
-                f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
-                params + [page_size, offset],
-            )
+            if use_keyset:
+                # keyset: 排序加 id DESC 做 tiebreaker（保证游标严格有序，不漏不重）。
+                keyset_order = f"{keyset_cols[sort]} DESC, id DESC"
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where}{cursor_cond} "
+                    f"ORDER BY {keyset_order} LIMIT ?",
+                    params + cursor_params + [page_size],
+                )
+            else:
+                offset = (page - 1) * page_size
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                    params + [page_size, offset],
+                )
             artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
         logger.info(
             "list_all_artifacts: %d/%d page=%d sort=%s",
@@ -861,50 +1035,57 @@ class SQLiteStorage(StorageDriver):
         soft_delete: bool = True,
         project_id: str | None = None,
     ) -> bool:
-        if project_id is not None:
-            art = self.get_artifact(artifact_id, project_id=project_id)
-            if art is None:
-                logger.warning(
-                    "Delete denied: artifact %s not found in project %s",
-                    artifact_id,
-                    project_id,
-                )
-                return False
-        if soft_delete:
-            from datetime import datetime
+        # P2-5/H12(trace): db.storage.duration 标记写路径。
+        from fusion_artifacts_engine import tracing
 
-            now_iso = datetime.now(UTC).isoformat()
-            with self._write_lock:
-                cur = self._conn.execute(
-                    "UPDATE artifacts SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?",
-                    (now_iso, time.time(), artifact_id),
-                )
-                self._conn.commit()
-            ok = cur.rowcount > 0
-        else:
-            with self._write_lock:
-                # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
-                self._conn.execute(
-                    "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
-                )
-                self._conn.execute(
-                    "DELETE FROM artifact_events WHERE artifact_id = ?", (artifact_id,)
-                )
-                self._conn.execute(
-                    "DELETE FROM artifact_shares WHERE artifact_id = ?", (artifact_id,)
-                )
-                cur = self._conn.execute(
-                    "DELETE FROM artifacts WHERE id = ?", (artifact_id,)
-                )
-                self._conn.commit()
-            ok = cur.rowcount > 0
-            if ok:
-                content_dir = self.content_dir / artifact_id
-                if content_dir.exists():
-                    shutil.rmtree(content_dir, onerror=_log_rmtree_error)
-                    logger.debug("Cleaned up content dir: %s", content_dir)
-        logger.info("Deleted artifact %s soft=%s ok=%s", artifact_id, soft_delete, ok)
-        return ok
+        with tracing.span(
+            "db.storage.duration", db_operation="delete_artifact",
+            db_artifact_id=artifact_id, db_soft_delete=soft_delete,
+        ):
+            if project_id is not None:
+                art = self.get_artifact(artifact_id, project_id=project_id)
+                if art is None:
+                    logger.warning(
+                        "Delete denied: artifact %s not found in project %s",
+                        artifact_id,
+                        project_id,
+                    )
+                    return False
+            if soft_delete:
+                from datetime import datetime
+
+                now_iso = datetime.now(UTC).isoformat()
+                with self._write_lock:
+                    cur = self._conn.execute(
+                        "UPDATE artifacts SET is_deleted = 1, deleted_at = ?, updated_at = ? WHERE id = ?",
+                        (now_iso, time.time(), artifact_id),
+                    )
+                    self._conn.commit()
+                ok = cur.rowcount > 0
+            else:
+                with self._write_lock:
+                    # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
+                    self._conn.execute(
+                        "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM artifact_events WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM artifact_shares WHERE artifact_id = ?", (artifact_id,)
+                    )
+                    cur = self._conn.execute(
+                        "DELETE FROM artifacts WHERE id = ?", (artifact_id,)
+                    )
+                    self._conn.commit()
+                ok = cur.rowcount > 0
+                if ok:
+                    content_dir = self.content_dir / artifact_id
+                    if content_dir.exists():
+                        shutil.rmtree(content_dir, onerror=_log_rmtree_error)
+                        logger.debug("Cleaned up content dir: %s", content_dir)
+            logger.info("Deleted artifact %s soft=%s ok=%s", artifact_id, soft_delete, ok)
+            return ok
 
     def rename_artifact(self, artifact_id: str, new_name: str) -> bool:
         with self._write_lock:
@@ -1020,6 +1201,8 @@ class SQLiteStorage(StorageDriver):
     def list_recycle(
         self, page: int = 1, page_size: int = 20
     ) -> tuple[list[Artifact], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 1"]
         params: list = []
         where = " AND ".join(conditions)
@@ -1092,6 +1275,7 @@ class SQLiteStorage(StorageDriver):
 
     # ── versions ───────────────────────────────────────────────
 
+    @_tracing.traced("db.storage.duration", db_operation="save_version")
     def save_version(self, version: ArtifactVersion) -> None:
         # 运维4: 写前磁盘预检，超阈值拒绝写
         self.ensure_disk_available()
@@ -1285,6 +1469,7 @@ class SQLiteStorage(StorageDriver):
             logger.info("GC orphan files: removed %d", removed)
         return removed
 
+    @_tracing.traced("db.storage.duration", db_operation="create_version_atomic")
     def create_version_atomic(
         self,
         artifact: Artifact,
@@ -1456,7 +1641,8 @@ class SQLiteStorage(StorageDriver):
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
         # P-3: 分页 + 可选跳过内容文件读，避免无界扫描全量入内存
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
             cur = conn.execute(
@@ -1485,7 +1671,8 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
             cur = conn.execute(
@@ -1585,6 +1772,21 @@ class SQLiteStorage(StorageDriver):
                 (delta, now_ts, share_id),
             )
             self._conn.commit()
+
+    def try_increment_share_access(self, share_id: str, max_accesses: int | None) -> bool:
+        # P1-2/H5: 原子 check-and-increment——单条条件 UPDATE 在 _write_lock 下原子完成
+        # "未达上限才 +1"，消除 get_shared_artifact 里先读 access_count 再 increment 的 TOCTOU。
+        # 返回 True=已增计数（允许），False=已达上限或 share 不存在（拒绝）。
+        now_ts = time.time()
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE artifact_shares SET access_count = access_count + 1, last_access_at = ? "
+                "WHERE share_id = ? "
+                "AND (max_accesses IS NULL OR access_count < max_accesses)",
+                (now_ts, share_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
 
     # ── folders ────────────────────────────────────────────────
 
@@ -1827,6 +2029,8 @@ class SQLiteStorage(StorageDriver):
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:
+        # P1-5/M5: 分页入参硬化
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = []
         params: list = []
         if artifact_id:
@@ -2084,7 +2288,8 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
     ) -> list[Artifact]:
         # P-3: 分页避免无界扫描
-        page_size = min(page_size, 500)
+        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0", "source_module = ?"]
         params: list = [source_module]
         if workspace_id:
@@ -2104,6 +2309,20 @@ class SQLiteStorage(StorageDriver):
         return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
+        # 幂等：重复 close（如测试显式 close 后 fixture teardown 再 close）不应崩溃。
+        # _conn 已为 None 说明此前已关闭，直接返回。
+        if self._conn is None:
+            logger.debug("SQLiteStorage.close() no-op: already closed")
+            return
+        # P1-4: 先停 checkpoint 后台线程，再做最终 TRUNCATE checkpoint，确保停机后 -wal 清空。
+        if self._checkpoint_thread is not None:
+            self._checkpoint_stop.set()
+            self._checkpoint_thread.join(timeout=5)
+            self._checkpoint_thread = None
+        try:
+            self._run_checkpoint("TRUNCATE")
+        except Exception as e:
+            logger.warning("WAL final TRUNCATE checkpoint failed: %s", e)
         # E7: 关连接池里的只读连接（非阻塞取出，取不到说明正被借出，跳过）
         while True:
             try:
@@ -2112,6 +2331,7 @@ class SQLiteStorage(StorageDriver):
             except queue.Empty:
                 break
         self._conn.close()
+        self._conn = None
         logger.info("SQLiteStorage closed")
 
     def health_check(self) -> bool:
@@ -2272,6 +2492,27 @@ class SQLiteStorage(StorageDriver):
                 )
                 self._conn.commit()
             logger.info("Migrated %d event timestamps ISO -> REAL", len(updates))
+
+    def _ensure_metadata_indexes(self) -> None:
+        # P2-7/F6: 对配置的 metadata 高频字段建 json_extract 表达式索引。
+        # metadata_filter 走索引而非全表扫。key 已在 __init__ 过 _META_KEY_RE 校验，
+        # 二次校验防内部误传。索引名 idx_meta_<key>，幂等建。
+        if not self.metadata_indexed_keys:
+            return
+        created = []
+        for key in self.metadata_indexed_keys:
+            if not _META_KEY_RE.fullmatch(key):
+                logger.warning("Skip metadata index, unsafe key: %s", key)
+                continue
+            idx_name = f"idx_meta_{key}"
+            expr = f"json_extract(metadata, '$.{key}')"
+            self._conn.execute(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON artifacts({expr})'
+            )
+            created.append(idx_name)
+        if created:
+            self._conn.commit()
+            logger.info("Ensured %d metadata indexes: %s", len(created), created)
 
     def _migrate_share_max_accesses_and_timestamps(self) -> None:
         # E1/E2: artifact_shares 加 max_accesses 列；created_at/last_access_at

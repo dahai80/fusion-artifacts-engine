@@ -93,18 +93,28 @@ class ShareManager:
         if flushed:
             logger.debug("share access flushed: %d share(s)", flushed)
 
-    def _buffer_access(self, share_id: str, share: ArtifactShare) -> None:
-        # R2: 内存增计数。max_accesses 校验用 access_count（已持久化）+ buffer（未刷）。
-        with self._lock:
-            self._buffer[share_id] = self._buffer.get(share_id, 0) + 1
-            buffered = self._buffer[share_id]
-        if buffered >= self._flush_threshold:
-            self._flush()
-
     def buffered_access_count(self, share_id: str, persisted: int) -> int:
         # R2: 含缓冲的总访问数，供 E2 max_accesses 上限校验
         with self._lock:
             return persisted + self._buffer.get(share_id, 0)
+
+    def try_consume_access(
+        self, share_id: str, persisted: int, max_accesses: int | None
+    ) -> int | None:
+        # P1-2/H5: 原子 check-and-increment。check 与 increment 合并到同一 _lock 持有段，
+        # 消除 get_public_share 里 buffered_access_count(检查) 与 _buffer_access(增计数)
+        # 之间的 TOCTOU 窗口——并发突发下 N 请求全过检查后才各自增计数 → 超出 max_accesses。
+        # 返回增计数后的 effective_count（允许）；None 表示已达上限（拒绝）。
+        with self._lock:
+            buffered = self._buffer.get(share_id, 0)
+            effective_count = persisted + buffered
+            if max_accesses is not None and effective_count >= max_accesses:
+                return None
+            self._buffer[share_id] = buffered + 1
+            new_count = effective_count + 1
+        if self._buffer.get(share_id, 0) >= self._flush_threshold:
+            self._flush()
+        return new_count
 
     def shutdown(self) -> None:
         # R2: 关停刷盘线程前最终 flush，防计数丢失
@@ -196,19 +206,15 @@ class ShareManager:
         if _is_expired(share.expires_at):
             logger.info("Share %s expired", share_id)
             return None
-        # E2: 超过 max_accesses 上限则拒绝（在 increment 前，含缓冲值）
-        effective_count = self.buffered_access_count(share_id, share.access_count)
-        if share.max_accesses is not None and effective_count >= share.max_accesses:
-            logger.info(
-                "Share %s exhausted: %d >= %d", share_id,
-                effective_count, share.max_accesses,
-            )
-            return None
+        # L-2: artifact 存在性校验先于 access 计数，否则已删 artifact 会污染 access 统计。
         artifact = self._storage.get_artifact(share.artifact_id)
         if artifact is None:
             return None
-        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
-        self._storage.increment_share_access(share_id)
+        # P1-2/H5: 原子 check-and-increment——单条条件 UPDATE 原子完成"未达上限才 +1"，
+        # 消除先读 access_count 再 increment 的 TOCTOU（并发突发下超出 max_accesses）。
+        if not self._storage.try_increment_share_access(share_id, share.max_accesses):
+            logger.info("Share %s exhausted: access_count >= max_accesses %s", share_id, share.max_accesses)
+            return None
         version = self.engine.get_version_content(share.artifact_id)
         content_type_map = {
             "html": "text/html",
@@ -240,21 +246,22 @@ class ShareManager:
         if _is_expired(share.expires_at):
             logger.info("Public share %s expired", share_id)
             return {"status": "gone", "reason": "expired"}
-        # E2: 超过 max_accesses 上限则返回 410 Gone（在 increment 前，含缓冲值）
-        effective_count = self.buffered_access_count(share_id, share.access_count)
-        if share.max_accesses is not None and effective_count >= share.max_accesses:
-            logger.info(
-                "Public share %s exhausted: %d >= %d", share_id,
-                effective_count, share.max_accesses,
-            )
-            return {"status": "gone", "reason": "exhausted"}
+        # L-2: artifact 存在性校验先于 access 计数，否则已删 artifact 会污染 access 统计。
+        # 此处无计数变更，仅读 artifact，移到 try_consume_access 之前不破坏 L-2。
         artifact = self._storage.get_artifact(share.artifact_id)
         if artifact is None:
             logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
             return {"status": "not_found"}
-        # L-2: increment 必须在 artifact 存在性校验之后，否则已删 artifact 会污染 access 统计
-        # R2: 公开端点走内存缓冲（不持写锁），后台批量刷盘
-        self._buffer_access(share_id, share)
+        # P1-2/H5: 原子 check-and-increment——check 与 buffer 增计数合并到同一 _lock 段，
+        # 消除并发突发下多请求全过检查后才各自增计数 → 超出 max_accesses 的 TOCTOU 窗口。
+        # R2: 公开端点走内存缓冲（不持写锁），后台批量刷盘。
+        new_count = self.try_consume_access(share_id, share.access_count, share.max_accesses)
+        if new_count is None:
+            logger.info(
+                "Public share %s exhausted: access_count >= max_accesses %d",
+                share_id, share.max_accesses,
+            )
+            return {"status": "gone", "reason": "exhausted"}
         version = self.engine.get_version_content(share.artifact_id)
         raw_content = version.content if version else ""
         rendered_html = render_share_html(artifact, raw_content)
@@ -270,7 +277,7 @@ class ShareManager:
             "expires_at": share.expires_at,
             "revoked": share.revoked,
             "max_accesses": share.max_accesses,
-            "access_count": effective_count + 1,
+            "access_count": new_count,
         }
         public_artifact = {
             "id": artifact.id,

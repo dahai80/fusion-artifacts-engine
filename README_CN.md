@@ -33,14 +33,14 @@ fusion-artifacts-engine status
 引擎通过 `X-API-Key` 请求头进行 API Key 认证。
 
 - 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>`
-- 若**未**配置 `api_key`，默认**允许**请求（`allow_no_auth: true`）
-- 生产环境建议设置 `api_key` 并将 `allow_no_auth` 设为 `false` 以强制认证
+- 若**未**配置 `api_key`，默认**拒绝**所有请求（fail-closed，`allow_no_auth: false`）
+- 生产环境：设置 `api_key`（env `FUSION_ARTIFACTS_API_KEY` 或 `security.api_key`）强制认证
+- 本地单机受信网络：可显式 `allow_no_auth: true` 跳过鉴权（不推荐公网/多租户）
 
 ```yaml
 # default_config.yaml
 security:
-  api_key: ""
-  allow_no_auth: true
+  allow_no_auth: false
   recycle_retention_days: 7
 ```
 
@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | 收藏/取消收藏 |
 | `artifact.pin` | artifact_id, pinned, chat_id? | 固定/取消固定到聊天 |
 | `artifact.duplicate` | artifact_id | 复制产物（新 ID） |
-| `artifact.list_all` | filters?, sort?, page?, page_size? | 列出所有产物（跨会话） |
+| `artifact.list_all` | filters?, sort?, page?, page_size?, cursor? | 列出所有产物（跨会话）；响应含 `next_cursor` 用于游标分页（仅 `updated_at`/`created_at` 排序） |
 
 ### 回收站方法 (P1)
 
@@ -256,8 +256,10 @@ GET /api/v1/folders            # 列出文件夹
 GET /api/v1/tags               # 列出标签
 GET /api/v1/events             # 列出事件
 GET /api/v1/recycle            # 列出回收站
-GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；已撤销/过期返回 410 Gone）
+GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；share_id 格式非法返回 400，已撤销/过期/耗尽返回 410 Gone，不存在返回 404）
 ```
+
+`GET /api/v1/share/{share_id}` 在访问 DB 前先校验 `share_id` 格式（`shr_<12>`；LOW-1）——格式非法立即返回 `400`，格式合法但不存在返回 `404`，不泄露该分享是否存在。
 
 `GET /api/v1/artifacts` 查询参数：
 - `created_by` — 按所有者过滤
@@ -284,6 +286,23 @@ POST /api/v1/events            # {"artifact_id": "...", "event_type": "..."}
 POST /api/v1/purge             # {}
 POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id": "ws-001", "name": "...", "type": "code", "content": "..."}
 ```
+
+### 运维端点 (运维5 / 运维2)
+
+存活/就绪探针与指标，全部 **免鉴权**（K8s 探针不带 API Key）：
+
+```bash
+GET /healthz    # 存活探针 — 进程存活 = 200 {"status":"ok","check":"liveness"}
+GET /readyz     # 就绪探针 — 200 {"status":"ready","checks":{...}} / 503 {"status":"not_ready",...}
+                #   checks: storage（SELECT 1 + content_dir 存在）、event_bus（未关闭）
+GET /metrics    # Prometheus 文本指标 0.0.4 — counter/gauge/histogram（运维2）
+                #   metrics.enabled=false 时返回 404
+                #   设置了 metrics.token 且 X-Metrics-Token 头缺失/不匹配时返回 401（LOW-4）
+```
+
+`/healthz` 只要进程能响应就返回 200——不依赖 storage 或 EventBus，故瞬时不可用的依赖不会触发 K8s 重启循环。`/readyz` 在 storage 不可达或 EventBus 已关闭时返回 503，表示"暂不引流"。`/metrics` 暴露 `rpc_requests_total`、`rpc_error_total`、`rpc_active_conns`、`rpc_request_latency_seconds`（histogram，固定桶）供抓取。
+
+**`/metrics` token（LOW-4）** —— 设置 `metrics.token`（env `FUSION_ARTIFACTS_METRICS_TOKEN`）后，`/metrics` 要求请求头 `X-Metrics-Token` 与之匹配（常量时间比较）；缺失或不匹配返回 `401`。留空/`""`（默认）= 不鉴权，依赖 `127.0.0.1` 绑定的本机隔离。**若把端口暴露到本机之外，必须设置 `metrics.token`**，否则运维指标泄露。
 
 ### SSE 事件流 (P4)
 
@@ -398,6 +417,64 @@ asyncio.run(main())
 - **Fail-closed 认证**：未配置 API Key 时拒绝请求，除非 `allow_no_auth=True`
 - **乐观锁**：通过 `expected_content_hash` 检测并发更新
 - **路径穿越防护**：导出路径经过清洗
+- **单租户边界**：引擎绑定 `127.0.0.1`，以单一共享 `X-API-Key` 认证，**无逐用户身份**——共享同一 Key 的所有调用方视为同一可信主体。**不要**将端口暴露到主机之外。多租户部署须在引擎前置认证代理，由其注入可信的 `caller_user_id`。
+- **IDOR 防护 (v0.5.0)**：当 RPC 参数中传入 `caller_user_id` 时，写操作与 `artifact.get` 强制校验归属。若设置了 `caller_user_id` 且产物有 `owner_user_id`，二者必须一致，否则抛出 `PermissionError`（`-32006`，HTTP `403`）并拒绝操作。当省略 `caller_user_id`（单租户默认）或产物未设置归属时，跳过校验以保持向后兼容。覆盖方法：`artifact.get`、`artifact.get_content`、`artifact.update`、`artifact.patch`、`artifact.delete`、`artifact.version_rollback`。归属在创建时通过 `artifact.create` 的可选参数 `owner_user_id` / `ownership_type`（`free`/`project`/`cowork`）设定。
+- **share_id 格式校验（LOW-1）**：公开端点 `GET /api/v1/share/{share_id}` 在任何 DB 查询前先拒绝格式非法的 share_id（`shr_<12>` 格式），返回 `400`——省一次 DB 往返且不泄露分享存在性。
+- **CSP nonce，去 `unsafe-inline`（LOW-5）**：渲染的分享 HTML 每次渲染签发一次性随机 `style-src 'nonce-<random>'`，替代 `style-src 'unsafe-inline'`；CSP 头与每个 `<style>` 标签共用同一 nonce，收紧分享预览的 XSS 攻击面。
+- **日志注入防护（LOW-3）**：全局 `LogSanitizerFilter` 剥除日志消息与 `%s` 参数中的 CR/LF，使含换行的用户输入（如产物名）无法伪造假日志行（CWE-117）。
+
+## 备份与恢复 (v0.4.2)
+
+守护进程以 SQLite **WAL** 模式运行。后台线程周期性执行 `PASSIVE` checkpoint（默认每 300 秒），控制 `-wal` 文件增长；`close()` 时执行最终 `TRUNCATE` checkpoint，确保停机后 `meta.db` 自成一体、无残留 WAL 帧。
+
+**在线备份** —— 守护进程运行时使用 `scripts/backup.sh`（不锁库，WAL 一致性快照）：
+
+```bash
+# 默认：~/.fusion/artifacts -> ~/.fusion/artifacts-backup-<时间戳>
+./scripts/backup.sh
+
+# 指定目标
+./scripts/backup.sh /var/backups/artifacts-20260826
+
+# 覆盖源 storage root
+STORAGE_ROOT=/data/artifacts ./scripts/backup.sh /backup
+```
+
+脚本通过 `sqlite3 .backup` 对 `meta.db` 做在线一致性快照（不阻塞读写），并用 rsync 增量复制 `content/`。需 PATH 中有 `sqlite3` 与 `rsync`。
+
+**恢复** —— 停止守护进程后，将快照 `meta.db` 与 `content/` 拷回 storage root：
+
+```bash
+./start.sh stop
+rsync -a /var/backups/artifacts-20260826/meta.db ~/.fusion/artifacts/
+rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
+./start.sh start
+```
+
+**配置** —— 通过 `wal_checkpoint_interval`（秒；`0` 禁用后台线程，依赖 SQLite 默认 1000 页自动 checkpoint）调整 checkpoint 间隔：
+
+```yaml
+storage:
+  wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
+```
+
+**metadata 索引 (v0.5.0)** —— `metadata_indexed_keys` 列出高频 metadata 过滤字段名。对每个 key 建 `json_extract(metadata, '$.<key>')` 表达式索引，使 `metadata_filter` 命中索引而非全表扫。key 须为安全标识符（字母/下划线/数字），非法值被丢弃。留空=不建索引（向后兼容默认）。
+
+```yaml
+storage:
+  metadata_indexed_keys: ["language", "framework"]
+```
+
+**游标分页 (v0.5.0)** —— `artifact.list_all` 接受可选 `cursor`（不透明，响应中以 `next_cursor` 返回）。配合 `updated_at` 或 `created_at` 排序时，引擎用 `WHERE (sort_col, id) < (cursor)` 游标查询替代 `OFFSET`，避免深分页扫+丢行的开销。其他排序或非法游标回退 OFFSET 分页。
+
+**增量 token 计数 (v0.5.0)** —— `auto_compact` 与 `patch_artifact` 避免对大内容重复全量编码：
+- 压缩器截断循环对每行 token 数只计一次，用前缀和遍历，每个 section 边界 O(1) 判定，不再每次重新拼接+全量编码（原先 O(n²)）。中间"是否已达预算"的判断先用廉价 `estimate_tokens` 估算门控，仅对候选结果调用精确编码器。
+- `patch_artifact` 复用已持久化的 `version.token_count` 作为新旧内容 token 数，不再重新计数（3 次编码 → 1 次）。
+- `auto_compact` 通过 `asyncio.to_thread` 把压缩+计数卸出事件循环，1MB+ 内容不阻塞其他请求。
+
+**内容分块读写 (v0.5.0)** —— 大版本内容（>10KB，落盘存储）以 1MB 分块读写，替代原先一次性 `write_text`/`read_text` 全量加载字符串。无论内容多大，单次 I/O 峰值内存被约束在分块大小，避免 64 并发 10MB 请求下的 1.9–2.5GB OOM 峰值。分块写入遇到磁盘满（ENOSPC）映射为 `ResourceLimitError` 并清理半成品文件。
+
+**SSE 事件体积上限 (v0.5.0)** —— `sse.max_event_bytes` 限制单个 SSE 事件序列化后字节数（默认 256KB）。超限事件被丢弃并记日志，不写入流，防单个大 payload 阻塞连接线程或撑爆客户端缓冲。`0` 禁用上限（向后兼容）。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES`。
 
 ## 配置
 
@@ -420,12 +497,35 @@ artifact:
   id_prefix: "art_"
 
 security:
-  allow_no_auth: true
+  allow_no_auth: false
   recycle_retention_days: 7
 
 sse:
   heartbeat_interval: 30
+  max_lifetime: 3600        # v0.4.2：单 SSE 连接最大存活秒；0=不限。到期服务端关流（发 __max_lifetime__）促客户端重连，防僵尸长连接占线程
+  max_event_bytes: 262144   # v0.5.0：单个 SSE 事件序列化后最大字节；超限丢弃+告警。0=不限
+  max_connections: 16       # v0.5.0：SSE 独立并发上限（与 server.max_workers 分离）。SSE 握手时释放 RPC worker 槽、占用此专用信号量；超限 SSE 返回 503。0=回退旧行为（SSE 继续占 worker 槽，不设独立上限，不推荐）
 ```
+
+**SSE 线程隔离 (v0.5.0)** —— `sse.max_connections` 把 SSE 长连接与 RPC worker 线程池分离。此前每个 SSE 连接在其整个生命周期内独占一个 `server_max_workers` 槽，64 个 SSE 客户端即占满全部 64 个 RPC worker 线程，导致所有新 RPC 请求被 `503` 拒绝。现在 SSE 握手从专用 `_sse_sem`（容量 `max_connections`，默认 16）取槽，并**释放**归还 RPC worker 槽，故无论多少 SSE 客户端在线，RPC 始终可用。客户端断开经非阻塞 socket 探活在约 1 秒内检测（不再等到下一次心跳——默认 30s 的心跳间隔会延迟槽归还，使高频连断客户端耗尽上限）。`max_connections=0` 回退旧的单池行为。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`。
+
+**RPC handler 线程卸载 (v0.5.0)** —— 此前异步 RPC handler 直接调用同步 `engine`/`storage` 方法（`self.engine.get_artifact`、`self.engine.storage.list_artifacts` …），每次调用都在单事件循环上执行，命中 SQLite 或文件系统时阻塞所有其他请求。现在 `rpc/methods.py` 中每个同步 storage/engine 调用都经 `await asyncio.to_thread(...)` 在默认 ThreadPoolExecutor 上运行，事件循环只做调度——sqlite/文件 I/O 不再阻塞它。`_publish` 改为 async（其 kind 回查读也卸载），SSE 事件发射不再阻塞循环。异步 engine 方法（`create_artifact`、`update_artifact` …）本就非阻塞，直接 await。由 `tests/test_p2_2_to_thread_offload.py` 验证（读/写卸载 + worker 线程执行 + 异步 publish）。
+
+**OTel 分布式追踪 (v0.5.0)** —— 可选 OpenTelemetry 集成，发出 `rpc.server.duration`（每次 dispatch，属性 `rpc_method`）与 `db.storage.duration`（每次 storage 操作，属性 `db_operation`）span，使 RPC → SQLite 的因果链端到端可观测。**默认关闭** —— 本中间件是 local-first 单租户守护进程，OTel 是可选依赖而非硬依赖。三种状态：
+
+- 未安装 `opentelemetry-api`/`opentelemetry-sdk` → `tracing.span`/`traced` 纯 no-op（零开销、零 import 错误）。安装：`pip install 'fusion-artifacts-engine[otel]'`。
+- 已装但 `tracing.enabled: false`（默认）→ no-op tracer。
+- 已装且 `tracing.enabled: true` → 真 tracer。默认导出器 `ConsoleSpanExporter`（本地单节点足够）。接 collector 后端时设 `OTEL_EXPORTER_OTLP_ENDPOINT`，OTel SDK 自动切 OTLP——无需改代码。
+
+配置（`default_config.yaml`，可经 `~/.fusion/artifacts/config.yaml` 或 env `FUSION_ARTIFACTS_TRACING_ENABLED` / `FUSION_ARTIFACTS_TRACING_SERVICE_NAME` 覆盖）：
+
+```yaml
+tracing:
+  enabled: false                 # 默认关；置 true 发 span
+  service_name: "fusion-artifacts-engine"
+```
+
+`configure_tracing()` 启动时调一次；`shutdown()` 在优雅退出时 flush span processor。OTel context 经 contextvars 跨 `asyncio.to_thread` 传播，故即便 storage 调用被卸载（P2-2），span 仍正确嵌套。由 `tests/test_p2_5_otel_tracing.py` 验证（no-op 路径 + 启用后 rpc/db span + 错误 span 状态 + 异常传播 + 装饰器写路径 span）。
 
 ## 架构
 
