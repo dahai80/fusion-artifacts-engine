@@ -844,6 +844,21 @@ class ArtifactEngine:
 
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         now_ts = _time.time()
+        # P0-5/H6: emit_event payload 字节上限校验，超限拒绝写入防事件总线放大
+        if payload is not None:
+            import json as _json
+
+            payload_size = len(_json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            limit = self.config.max_event_payload_bytes
+            if limit > 0 and payload_size > limit:
+                logger.warning(
+                    "Event payload rejected: %d bytes > max_event_payload_bytes %d (type=%s)",
+                    payload_size, limit, event_type,
+                )
+                raise ResourceLimitError(
+                    f"Event payload too large: {payload_size} bytes exceeds "
+                    f"max_event_payload_bytes {limit}"
+                )
         event = ArtifactEvent(
             event_id=event_id,
             artifact_id=artifact_id,

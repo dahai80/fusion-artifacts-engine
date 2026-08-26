@@ -27,9 +27,13 @@ artifact:
   max_content_bytes: 0
   # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限；超限拒绝写入
   max_metadata_bytes: 0
+  # P0-5/H6: emit_event payload JSON 字节上限，默认 64KB；超限拒绝写入防事件总线放大
+  max_event_payload_bytes: 65536
 
 security:
-  # C-4: 默认 fail-closed。无 api_key 且 allow_no_auth=false 时启动自动生成随机 key
+  # C-4/P1-6: 默认 fail-closed。无 api_key 且 allow_no_auth=false 时拒绝所有请求（安全默认）。
+  # 生产：设 api_key（env FUSION_ARTIFACTS_API_KEY 或下方 api_key 字段），鉴权 X-API-Key 头。
+  # 本地单机受信网络：可显式 allow_no_auth=true 跳过鉴权（不推荐公网/多租户）。
   allow_no_auth: false
   recycle_retention_days: 7
   # L-6: share expires_at 最大 TTL（天），0=不限；过去日期一律拒绝
@@ -38,18 +42,15 @@ security:
 sse:
   heartbeat_interval: 30
 
-cluster:
-  # H8: 多节点 ID。单机留空；多节点部署设唯一节点标识（或 FUSION_ARTIFACTS_NODE_ID）
-  node_id: ""
-
 rate_limit:
-  # 运维1: 令牌桶限流。rps=0 表示不限流（默认，向后兼容）。
+  # 运维1: 令牌桶限流。rps=0 表示不限流（向后兼容，但生产不建议）。
   # default 桶覆盖 JSON-RPC + 鉴权 REST；超限返回 429（JSON-RPC 用 -32003）
-  rps: 0
-  burst: 0
+  # P1-1/H4: 生产默认值——default rps:200/burst:400，公开端点 rps:50/burst:100
+  rps: 200
+  burst: 400
   # 公开 share 端点独立配额（无鉴权，易被刷量）
-  public_rps: 0
-  public_burst: 0
+  public_rps: 50
+  public_burst: 100
 
 metrics:
   # 运维2: Prometheus /metrics 端点开关。自实现文本格式，无外部依赖

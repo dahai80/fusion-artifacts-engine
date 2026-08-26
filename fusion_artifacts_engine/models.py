@@ -2,7 +2,7 @@ import logging
 import time
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +19,33 @@ _TYPE_TO_KIND: dict[str, str] = {
     "data": "tool",
 }
 
+# P0-5/H6: metadata 结构上限——顶层 key 数与单 key 名长度，防 DoS 式巨型/深嵌套 metadata
+_MAX_METADATA_KEYS = 64
+_MAX_METADATA_KEY_LEN = 128
+
 
 def infer_kind(artifact_type: str) -> ArtifactKind:
     return _TYPE_TO_KIND.get(artifact_type, "tool")
+
+
+def _validate_metadata(metadata: dict | None) -> dict | None:
+    # P0-5/H6: metadata 结构校验——非 dict 拒绝、顶层 key 数与 key 名长度上限。
+    # 字节上限由 storage 层 _enforce_metadata_limit 兜底；此处早拦截畸形结构。
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise ValueError("metadata must be a dict")
+    if len(metadata) > _MAX_METADATA_KEYS:
+        logger.warning("Metadata rejected: %d keys > %d", len(metadata), _MAX_METADATA_KEYS)
+        raise ValueError(f"metadata has too many keys: {len(metadata)} > {_MAX_METADATA_KEYS}")
+    for key in metadata:
+        if not isinstance(key, str):
+            raise ValueError(f"metadata key must be str, got {type(key).__name__}")
+        if len(key) > _MAX_METADATA_KEY_LEN:
+            raise ValueError(
+                f"metadata key too long: {len(key)} > {_MAX_METADATA_KEY_LEN}"
+            )
+    return metadata
 
 
 class Artifact(BaseModel):
@@ -32,6 +56,11 @@ class Artifact(BaseModel):
     kind: ArtifactKind | None = None
     project_id: str | None = None
     metadata: dict | None = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_validator(cls, v):
+        return _validate_metadata(v)
     current_version: int = 1
     summary: str = ""
     created_at: float = Field(default_factory=time.time)

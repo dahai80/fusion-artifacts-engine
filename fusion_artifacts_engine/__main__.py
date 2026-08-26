@@ -101,6 +101,20 @@ def main():
         host = args.host or config.server_host
         port = args.port or config.server_port
 
+        # P1-1/H4: 限流生产告警。rps==0 表示不限流——生产环境裸奔，启动显式 WARN。
+        # default_config.yaml 已设生产默认值（rps:200/burst:400，public_rps:50/burst:100），
+        # 但用户自定义配置或测试环境可能回退 0，此处兜底告警。
+        if config.rate_limit_rps == 0:
+            logger.warning(
+                "rate_limit.rps=0 (unlimited) — JSON-RPC/REST endpoints unthrottled; "
+                "set rate_limit.rps>0 in production"
+            )
+        if config.public_rate_limit_rps == 0:
+            logger.warning(
+                "rate_limit.public_rps=0 (unlimited) — public share endpoints unthrottled; "
+                "set rate_limit.public_rps>0 in production"
+            )
+
         # P0-8: watch loop 包裹单次 run。--watch 时 engine 退出码非 0 则 backoff 后重启。
         # 退出码 0（优雅 stop）跳出循环。单次 run 内含信号注册与 stop_event 逻辑。
         while True:

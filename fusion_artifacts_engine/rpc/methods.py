@@ -260,7 +260,13 @@ class RPCHandler:
         try:
             output_dir.relative_to(storage_root)
         except ValueError:
-            raise ValueError(f"output_dir must be under storage root {storage_root}")
+            # P1-10/M18: 错误消息不泄露 storage_root 文件系统路径给调用方；
+            # 内部 log 保留路径供运维定位，对外只回通用提示
+            logger.warning(
+                "export_session rejected: output_dir %s outside storage_root %s",
+                output_dir, storage_root,
+            )
+            raise ValueError("output_dir must be under storage root (path traversal denied)")
         output_dir.mkdir(parents=True, exist_ok=True)
         artifacts = self.engine.list_artifacts(params["session_id"])
         count = 0

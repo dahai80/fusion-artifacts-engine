@@ -1586,6 +1586,21 @@ class SQLiteStorage(StorageDriver):
             )
             self._conn.commit()
 
+    def try_increment_share_access(self, share_id: str, max_accesses: int | None) -> bool:
+        # P1-2/H5: 原子 check-and-increment——单条条件 UPDATE 在 _write_lock 下原子完成
+        # "未达上限才 +1"，消除 get_shared_artifact 里先读 access_count 再 increment 的 TOCTOU。
+        # 返回 True=已增计数（允许），False=已达上限或 share 不存在（拒绝）。
+        now_ts = time.time()
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE artifact_shares SET access_count = access_count + 1, last_access_at = ? "
+                "WHERE share_id = ? "
+                "AND (max_accesses IS NULL OR access_count < max_accesses)",
+                (now_ts, share_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
     # ── folders ────────────────────────────────────────────────
 
     def save_folder(self, folder: ArtifactFolder) -> None:

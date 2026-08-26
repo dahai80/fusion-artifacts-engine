@@ -33,14 +33,14 @@ fusion-artifacts-engine status
 引擎通过 `X-API-Key` 请求头进行 API Key 认证。
 
 - 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>`
-- 若**未**配置 `api_key`，默认**允许**请求（`allow_no_auth: true`）
-- 生产环境建议设置 `api_key` 并将 `allow_no_auth` 设为 `false` 以强制认证
+- 若**未**配置 `api_key`，默认**拒绝**所有请求（fail-closed，`allow_no_auth: false`）
+- 生产环境：设置 `api_key`（env `FUSION_ARTIFACTS_API_KEY` 或 `security.api_key`）强制认证
+- 本地单机受信网络：可显式 `allow_no_auth: true` 跳过鉴权（不推荐公网/多租户）
 
 ```yaml
 # default_config.yaml
 security:
-  api_key: ""
-  allow_no_auth: true
+  allow_no_auth: false
   recycle_retention_days: 7
 ```
 
@@ -420,7 +420,7 @@ artifact:
   id_prefix: "art_"
 
 security:
-  allow_no_auth: true
+  allow_no_auth: false
   recycle_retention_days: 7
 
 sse:
