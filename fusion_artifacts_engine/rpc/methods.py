@@ -26,15 +26,18 @@ class RPCHandler:
             raise RpcError(-32601, f"Method not found: {method}")
         return await handler(params)
 
-    def _publish(self, event_type: str, aid: str | None, **extra) -> None:
+    async def _publish(self, event_type: str, aid: str | None, **extra) -> None:
         # SSE ?kind= 过滤按 artifact kind (app/code/...) 而非事件名。
         # 每个 artifact 事件都必须携带 kind，否则订阅者按 kind 过滤时静默丢弃。
         # L-3: 调用方可经 extra 传 kind= 覆盖（删除事件用删除前 kind，避免硬删后读 None）
         # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
         # E10: kind 经覆盖 + 回查仍为 None 时记 warning，避免静默丢事件难排查
+        # P2-2/M1+F2: kind 回查读经 to_thread 卸载，不阻塞 event loop
         kind = extra.get("kind")
         if kind is None and aid:
-            artifact = self.engine.storage.get_artifact(aid)
+            artifact = await asyncio.to_thread(
+                self.engine.storage.get_artifact, aid
+            )
             if artifact is not None:
                 kind = artifact.kind
         if kind is None:
@@ -161,7 +164,7 @@ class RPCHandler:
             owner_user_id=params.get("owner_user_id"),
             ownership_type=params.get("ownership_type"),
         )
-        self._publish(
+        await self._publish(
             "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
         )
         return {
@@ -171,8 +174,10 @@ class RPCHandler:
         }
 
     async def _get(self, params: dict) -> dict:
-        artifact = self.engine.get_artifact(
-            params["artifact_id"], project_id=params.get("project_id")
+        # P2-2/M1+F2: 读路径经 to_thread 卸载，不阻塞 event loop
+        artifact = await asyncio.to_thread(
+            self.engine.get_artifact,
+            params["artifact_id"], project_id=params.get("project_id"),
         )
         if artifact is None:
             raise NotFoundError(f"Artifact not found: {params['artifact_id']}")
@@ -195,7 +200,10 @@ class RPCHandler:
                 pass
         if version == "latest":
             version = None
-        result = self.engine.get_version_content(params["artifact_id"], version)
+        # P2-2/M1+F2: 读内容经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.get_version_content, params["artifact_id"], version
+        )
         if result is None:
             raise NotFoundError("Version not found")
         return {
@@ -205,7 +213,9 @@ class RPCHandler:
         }
 
     async def _list(self, params: dict) -> dict:
-        artifacts = self.engine.list_artifacts(
+        # P2-2/M1+F2: 列表读经 to_thread 卸载
+        artifacts = await asyncio.to_thread(
+            self.engine.list_artifacts,
             params["session_id"],
             params.get("include_deleted", False),
             project_id=params.get("project_id"),
@@ -216,18 +226,21 @@ class RPCHandler:
     async def _delete(self, params: dict) -> dict:
         aid = params["artifact_id"]
         # L-3: 删除前缓存 kind，硬删后 get_artifact 返回 None 导致 kind-filter SSE 丢事件
-        pre_artifact = self.engine.storage.get_artifact(aid)
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        pre_artifact = await asyncio.to_thread(self.engine.storage.get_artifact, aid)
         pre_kind = pre_artifact.kind if pre_artifact is not None else None
         # P2-3/MEDIUM-4: IDOR——删除前校验归属（多租户注入 caller_user_id 时生效）
         self._enforce_owner(params, pre_artifact)
-        ok = self.engine.delete_artifact(
+        # P2-2/M1+F2: 写也经 to_thread 卸载（delete 持写锁，阻塞 event loop 同理）
+        ok = await asyncio.to_thread(
+            self.engine.delete_artifact,
             aid,
             params.get("soft_delete", True),
             project_id=params.get("project_id"),
         )
         # L-4: 仅删除成功才发 delete 事件，否则对未删 artifact 发虚假事件
         if ok:
-            self._publish(
+            await self._publish(
                 "artifact.deleted", aid, artifact_id=aid, kind=pre_kind
             )
         else:
@@ -252,7 +265,7 @@ class RPCHandler:
             source=source,
             expected_content_hash=params.get("expected_content_hash"),
         )
-        self._publish(
+        await self._publish(
             "artifact.updated",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -261,7 +274,9 @@ class RPCHandler:
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
-        versions = self.engine.list_versions(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        versions = await asyncio.to_thread(
+            self.engine.list_versions,
             params["artifact_id"],
             page=int(params.get("page", 1)),
             page_size=int(params.get("page_size", 200)),
@@ -279,7 +294,7 @@ class RPCHandler:
         version, ref_text = await self.engine.rollback_version(
             params["artifact_id"], params["target_version"]
         )
-        self._publish(
+        await self._publish(
             "artifact.rolled_back",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -288,16 +303,23 @@ class RPCHandler:
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _export(self, params: dict) -> dict:
-        artifact = self.engine.get_artifact(params["artifact_id"])
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        artifact = await asyncio.to_thread(
+            self.engine.get_artifact, params["artifact_id"]
+        )
         if artifact is None:
             raise NotFoundError("Artifact not found")
         include_versions = params.get("include_versions", False)
         data = {"artifact": artifact.model_dump()}
         if include_versions:
-            versions = self.engine.list_versions(params["artifact_id"])
+            versions = await asyncio.to_thread(
+                self.engine.list_versions, params["artifact_id"]
+            )
             data["versions"] = [v.model_dump() for v in versions]
         else:
-            latest = self.engine.get_version_content(params["artifact_id"])
+            latest = await asyncio.to_thread(
+                self.engine.get_version_content, params["artifact_id"]
+            )
             if latest:
                 data["content"] = latest.content
         return {"data": data}
@@ -316,10 +338,15 @@ class RPCHandler:
             )
             raise ValueError("output_dir must be under storage root (path traversal denied)")
         output_dir.mkdir(parents=True, exist_ok=True)
-        artifacts = self.engine.list_artifacts(params["session_id"])
+        # P2-2/M1+F2: 列表读经 to_thread 卸载
+        artifacts = await asyncio.to_thread(
+            self.engine.list_artifacts, params["session_id"]
+        )
         count = 0
         for art in artifacts:
-            content = self.engine.get_version_content(art.id)
+            content = await asyncio.to_thread(
+                self.engine.get_version_content, art.id
+            )
             if content:
                 safe_name = (
                     art.name.replace("/", "_")
@@ -335,7 +362,10 @@ class RPCHandler:
                         "Skipping artifact name that escapes export dir: %s", art.name
                     )
                     continue
-                path.write_text(content.content, encoding="utf-8")
+                # P2-2/M1+F2: 文件写经 to_thread 卸载（磁盘 I/O 阻塞 event loop 同理）
+                await asyncio.to_thread(
+                    path.write_text, content.content, "utf-8"
+                )
                 count += 1
         return {"count": count, "path": str(output_dir)}
 
@@ -361,14 +391,17 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=artifact_data.get("metadata"),
         )
-        self._publish(
+        await self._publish(
             "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
         )
         return {"artifact": artifact.model_dump(), "ref_text": ref_text}
 
     async def _export_code(self, params: dict) -> dict:
         language = params.get("language", "")
-        result = self.engine.export_code(params["artifact_id"], language)
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.export_code, params["artifact_id"], language
+        )
         return result
 
     async def _import_code(self, params: dict) -> dict:
@@ -379,7 +412,7 @@ class RPCHandler:
             name=params.get("name", ""),
             metadata=params.get("metadata"),
         )
-        self._publish(
+        await self._publish(
             "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
         )
         return {
@@ -396,15 +429,23 @@ class RPCHandler:
         if action == "register":
             if not watcher_id:
                 raise ValueError("watcher_id required for register action")
-            self.engine.register_watcher(artifact_id, watcher_id)
+            # P2-2/M1+F2: 写经 to_thread 卸载
+            await asyncio.to_thread(
+                self.engine.register_watcher, artifact_id, watcher_id
+            )
             return {"registered": True, "artifact_id": artifact_id}
         elif action == "unregister":
             if not watcher_id:
                 raise ValueError("watcher_id required for unregister action")
-            self.engine.unregister_watcher(artifact_id, watcher_id)
+            await asyncio.to_thread(
+                self.engine.unregister_watcher, artifact_id, watcher_id
+            )
             return {"unregistered": True, "artifact_id": artifact_id}
         elif action == "poll":
-            events = self.engine.get_watch_events(artifact_id, since_version)
+            # P2-2/M1+F2: 读经 to_thread 卸载
+            events = await asyncio.to_thread(
+                self.engine.get_watch_events, artifact_id, since_version
+            )
             return {"artifact_id": artifact_id, "events": events}
         else:
             raise ValueError(
@@ -415,8 +456,11 @@ class RPCHandler:
         return {"pong": True, "version": get_package_version()}
 
     async def _rename(self, params: dict) -> dict:
-        ok = self.engine.rename_artifact(params["artifact_id"], params["new_name"])
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.rename_artifact, params["artifact_id"], params["new_name"]
+        )
+        await self._publish(
             "artifact.renamed",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -425,10 +469,12 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _star(self, params: dict) -> dict:
-        ok = self.engine.star_artifact(
-            params["artifact_id"], params.get("starred", True)
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.star_artifact,
+            params["artifact_id"], params.get("starred", True),
         )
-        self._publish(
+        await self._publish(
             "artifact.starred",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -437,12 +483,14 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _pin(self, params: dict) -> dict:
-        ok = self.engine.pin_artifact(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.pin_artifact,
             params["artifact_id"],
             chat_id=params.get("chat_id"),
             pinned=params.get("pinned", True),
         )
-        self._publish(
+        await self._publish(
             "artifact.pinned",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -451,17 +499,21 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _duplicate(self, params: dict) -> dict:
-        dup = self.engine.duplicate_artifact(
-            params["artifact_id"], params.get("new_name")
+        # P2-2/M1+F2: 复制（读+写）经 to_thread 卸载
+        dup = await asyncio.to_thread(
+            self.engine.duplicate_artifact,
+            params["artifact_id"], params.get("new_name"),
         )
         if dup is None:
             raise ValueError("Failed to duplicate artifact")
-        self._publish("artifact.created", dup.id, artifact_id=dup.id, kind=dup.kind)
+        await self._publish("artifact.created", dup.id, artifact_id=dup.id, kind=dup.kind)
         return {"artifact": dup.model_dump()}
 
     async def _list_all(self, params: dict) -> dict:
         sort = params.get("sort", "updated_at")
-        artifacts, total = self.engine.list_all_artifacts(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        artifacts, total = await asyncio.to_thread(
+            self.engine.list_all_artifacts,
             filters=params.get("filters"),
             sort=sort,
             page=params.get("page", 1),
@@ -491,15 +543,20 @@ class RPCHandler:
     # ── P1: recycle bin ────────────────────────────────────────
 
     async def _list_recycle(self, params: dict) -> dict:
-        artifacts, total = self.engine.list_recycle(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        artifacts, total = await asyncio.to_thread(
+            self.engine.list_recycle,
             page=params.get("page", 1),
             page_size=params.get("page_size", 20),
         )
         return {"artifacts": [a.model_dump() for a in artifacts], "total": total}
 
     async def _restore(self, params: dict) -> dict:
-        ok = self.engine.restore_artifact(params["artifact_id"])
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.restore_artifact, params["artifact_id"]
+        )
+        await self._publish(
             "artifact.restored",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -507,8 +564,9 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _purge_expired(self, params: dict) -> dict:
-        count = self.engine.purge_expired()
-        self._publish("artifacts.purged", None, purged=count)
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        count = await asyncio.to_thread(self.engine.purge_expired)
+        await self._publish("artifacts.purged", None, purged=count)
         return {"purged": count}
 
     # ── P2: snapshots ──────────────────────────────────────────
@@ -519,7 +577,7 @@ class RPCHandler:
             label=params.get("label"),
             author=params.get("author"),
         )
-        self._publish(
+        await self._publish(
             "artifact.snapshot_created",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -528,7 +586,9 @@ class RPCHandler:
         return {"version": snapshot.model_dump()}
 
     async def _list_snapshots(self, params: dict) -> dict:
-        snapshots = self.engine.list_snapshots(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        snapshots = await asyncio.to_thread(
+            self.engine.list_snapshots,
             params["artifact_id"],
             page=int(params.get("page", 1)),
             page_size=int(params.get("page_size", 200)),
@@ -542,13 +602,15 @@ class RPCHandler:
         max_accesses = params.get("max_accesses")
         if max_accesses is not None:
             max_accesses = int(max_accesses)
-        share = self.engine.create_share(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        share = await asyncio.to_thread(
+            self.engine.create_share,
             params["artifact_id"],
             created_by=params.get("created_by"),
             expires_at=params.get("expires_at"),
             max_accesses=max_accesses,
         )
-        self._publish(
+        await self._publish(
             "artifact.shared",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -557,14 +619,20 @@ class RPCHandler:
         return {"share": share.model_dump()}
 
     async def _get_shared(self, params: dict) -> dict:
-        result = self.engine.get_shared_artifact(params["share_id"])
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.get_shared_artifact, params["share_id"]
+        )
         if result is None:
             raise NotFoundError("Shared artifact not found or access denied")
         return result
 
     async def _revoke_share(self, params: dict) -> dict:
-        ok = self.engine.revoke_share(params["share_id"])
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.revoke_share, params["share_id"]
+        )
+        await self._publish(
             "artifact.share_revoked",
             None,
             share_id=params["share_id"],
@@ -574,31 +642,45 @@ class RPCHandler:
     # ── P2: folders ────────────────────────────────────────────
 
     async def _create_folder(self, params: dict) -> dict:
-        folder = self.engine.create_folder(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        folder = await asyncio.to_thread(
+            self.engine.create_folder,
             params["name"],
             parent_id=params.get("parent_id"),
             project_id=params.get("project_id"),
         )
-        self._publish("folder.created", None, folder_id=folder.folder_id)
+        await self._publish("folder.created", None, folder_id=folder.folder_id)
         return {"folder": folder.model_dump()}
 
     async def _list_folders(self, params: dict) -> dict:
-        folders = self.engine.list_folders(params.get("project_id"))
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        folders = await asyncio.to_thread(
+            self.engine.list_folders, params.get("project_id")
+        )
         return {"folders": [f.model_dump() for f in folders]}
 
     async def _rename_folder(self, params: dict) -> dict:
-        ok = self.engine.rename_folder(params["folder_id"], params["new_name"])
-        self._publish("folder.renamed", None, folder_id=params["folder_id"])
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.rename_folder, params["folder_id"], params["new_name"]
+        )
+        await self._publish("folder.renamed", None, folder_id=params["folder_id"])
         return {"ok": ok}
 
     async def _delete_folder(self, params: dict) -> dict:
-        ok = self.engine.delete_folder(params["folder_id"])
-        self._publish("folder.deleted", None, folder_id=params["folder_id"])
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.delete_folder, params["folder_id"]
+        )
+        await self._publish("folder.deleted", None, folder_id=params["folder_id"])
         return {"ok": ok}
 
     async def _move_to_folder(self, params: dict) -> dict:
-        ok = self.engine.move_to_folder(params["artifact_id"], params.get("folder_id"))
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.move_to_folder, params["artifact_id"], params.get("folder_id")
+        )
+        await self._publish(
             "artifact.moved",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -609,12 +691,14 @@ class RPCHandler:
     # ── P4: tags ───────────────────────────────────────────────
 
     async def _add_tag(self, params: dict) -> dict:
-        tag = self.engine.add_tag(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        tag = await asyncio.to_thread(
+            self.engine.add_tag,
             params["artifact_id"],
             params["tag_name"],
             color=params.get("color"),
         )
-        self._publish(
+        await self._publish(
             "artifact.tagged",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -623,8 +707,11 @@ class RPCHandler:
         return {"tag": tag.model_dump()}
 
     async def _remove_tag(self, params: dict) -> dict:
-        ok = self.engine.remove_tag(params["artifact_id"], params["tag_name"])
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.remove_tag, params["artifact_id"], params["tag_name"]
+        )
+        await self._publish(
             "artifact.untagged",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -635,23 +722,29 @@ class RPCHandler:
     async def _list_tags(self, params: dict) -> dict:
         # L-7: 按 scope 过滤；不传则返回全部
         scope = params.get("scope")
-        tags = self.engine.list_tags(scope)
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        tags = await asyncio.to_thread(self.engine.list_tags, scope)
         return {"tags": [t.model_dump() for t in tags]}
 
     async def _list_artifact_tags(self, params: dict) -> dict:
-        tags = self.engine.list_artifact_tags(params["artifact_id"])
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        tags = await asyncio.to_thread(
+            self.engine.list_artifact_tags, params["artifact_id"]
+        )
         return {"tags": [t.model_dump() for t in tags]}
 
     # ── P4: events ─────────────────────────────────────────────
 
     async def _emit_event(self, params: dict) -> dict:
-        event = self.engine.emit_event(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        event = await asyncio.to_thread(
+            self.engine.emit_event,
             params["event_type"],
             artifact_id=params.get("artifact_id"),
             session_id=params.get("session_id"),
             payload=params.get("payload"),
         )
-        self._publish(
+        await self._publish(
             event.event_type,
             event.artifact_id,
             event_id=event.event_id,
@@ -662,7 +755,9 @@ class RPCHandler:
         return {"event": event.model_dump()}
 
     async def _list_events(self, params: dict) -> dict:
-        events, total = self.engine.list_events(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        events, total = await asyncio.to_thread(
+            self.engine.list_events,
             artifact_id=params.get("artifact_id"),
             session_id=params.get("session_id"),
             since_ts=params.get("since_ts"),
@@ -674,8 +769,12 @@ class RPCHandler:
     # ── P3: project KB ─────────────────────────────────────────
 
     async def _move_to_project_kb(self, params: dict) -> dict:
-        ok = self.engine.move_to_project_kb(params["artifact_id"], params["project_id"])
-        self._publish(
+        # P2-2/M1+F2: 写经 to_thread 卸载
+        ok = await asyncio.to_thread(
+            self.engine.move_to_project_kb,
+            params["artifact_id"], params["project_id"],
+        )
+        await self._publish(
             "artifact.moved_to_kb",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -706,7 +805,7 @@ class RPCHandler:
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
         )
-        self._publish(
+        await self._publish(
             "artifact.created",
             artifact.id,
             artifact_id=artifact.id,
@@ -719,7 +818,9 @@ class RPCHandler:
         }
 
     async def _list_by_source(self, params: dict) -> dict:
-        artifacts = self.engine.list_by_source(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        artifacts = await asyncio.to_thread(
+            self.engine.list_by_source,
             source_module=params["source_module"],
             workspace_id=params.get("workspace_id"),
             workflow_run_id=params.get("workflow_run_id"),
@@ -748,7 +849,7 @@ class RPCHandler:
             content=params.get("content", ""),
             expected_version=params.get("expected_version"),
         )
-        self._publish(
+        await self._publish(
             "artifact.patched",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -757,7 +858,9 @@ class RPCHandler:
         return {"version": version.model_dump(), "patch_info": patch_info}
 
     async def _load(self, params: dict) -> dict:
-        result = self.engine.load_artifact(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.load_artifact,
             artifact_id=params["artifact_id"],
             preview_only=params.get("preview_only", True),
             section=params.get("section"),
@@ -768,7 +871,9 @@ class RPCHandler:
         context_window = params.get("context_window")
         if context_window is not None:
             context_window = int(context_window)
-        result = self.engine.context_budget(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.context_budget,
             session_id=params.get("session_id"),
             context_window=context_window,
         )
@@ -779,7 +884,7 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             token_budget=params["token_budget"],
         )
-        self._publish(
+        await self._publish(
             "artifact.compacted",
             params["artifact_id"],
             artifact_id=params["artifact_id"],
@@ -787,7 +892,9 @@ class RPCHandler:
         return result
 
     async def _version_diff(self, params: dict) -> dict:
-        result = self.engine.version_diff(
+        # P2-2/M1+F2: 读（双版本内容）经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.version_diff,
             artifact_id=params["artifact_id"],
             from_version=params["from_version"],
             to_version=params["to_version"],
@@ -806,13 +913,13 @@ class RPCHandler:
         if result.get("created"):
             rid = result["artifact"]["id"]
             rkind = result["artifact"].get("kind")
-            self._publish(
+            await self._publish(
                 "artifact.created",
                 rid,
                 artifact_id=rid,
                 kind=rkind,
             )
-            self._publish(
+            await self._publish(
                 "artifact.rendered",
                 rid,
                 artifact_id=rid,
@@ -821,7 +928,9 @@ class RPCHandler:
         return result
 
     async def _check_safety(self, params: dict) -> dict:
-        result = self.engine.check_safety(
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        result = await asyncio.to_thread(
+            self.engine.check_safety,
             messages=params.get("messages", []),
             output_budget=params.get("output_budget"),
         )
@@ -848,7 +957,7 @@ class RPCHandler:
             file_path=params["file_path"],
             direction=params["direction"],
         )
-        self._publish(
+        await self._publish(
             "artifact.synced",
             params["artifact_id"],
             artifact_id=params["artifact_id"],

@@ -599,6 +599,8 @@ sse:
 
 **SSE thread isolation (v0.5.0)** — `sse.max_connections` separates SSE long-lived connections from the RPC worker pool. Previously an SSE connection held its `server_max_workers` slot for its entire lifetime, so 64 concurrent SSE clients exhausted all 64 RPC worker threads and every new RPC request got `503`. Now the SSE handshake acquires a slot from a dedicated `_sse_sem` (size `max_connections`, default 16) and **releases** the RPC worker slot back to the pool, so RPC stays available no matter how many SSE clients are connected. Client disconnect is detected within ~1s via a non-blocking socket probe (not waited out to the next heartbeat, which at the default 30s would delay slot release and let a connect/disconnect churn client exhaust the cap). `max_connections=0` falls back to the legacy single-pool behavior. Env override: `FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`.
 
+**RPC handler thread offload (v0.5.0)** — async RPC handlers previously called synchronous `engine`/`storage` methods directly (`self.engine.get_artifact`, `self.engine.storage.list_artifacts`, …). Each call ran on the single event loop and blocked every other request while it hit SQLite or the filesystem. Every synchronous storage/engine call in `rpc/methods.py` now runs via `await asyncio.to_thread(...)` on the default ThreadPoolExecutor, so the event loop only schedules — sqlite/file I/O no longer stalls it. `_publish` is async (its kind look-up read is offloaded too), so SSE event emission never blocks the loop. Async engine methods (`create_artifact`, `update_artifact`, …) were already non-blocking and are awaited directly. Verified by `tests/test_p2_2_to_thread_offload.py` (read/write offload + worker-thread execution + async publish).
+
 ## Architecture
 
 ```
