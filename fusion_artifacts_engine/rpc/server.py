@@ -649,6 +649,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "id": req_id,
                 "error": {"code": -32602, "message": str(e)},
             }
+        except KeyError as e:
+            logger.warning("Missing required parameter for %s: %s", method, e)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32602,
+                    "message": f"Missing required parameter: {e}",
+                },
+            }
+        except TypeError as e:
+            logger.warning("Invalid parameter type for %s: %s", method, e)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Invalid parameter type: {e}"},
+            }
         except Exception:
             logger.exception("Dispatch error for %s", method)
             return {
@@ -740,7 +757,10 @@ class ArtifactRPCServer:
 
     def stop(self) -> None:
         if self._server:
+            # P0-7: shutdown() 停止 accept 循环，server_close() 释放监听 socket。
+            # 不调 server_close 会泄漏 listen socket 与端口（TIME_WAIT 后才回收）。
             self._server.shutdown()
+            self._server.server_close()
         if self._async_loop and self._async_loop.is_running():
             self._async_loop.call_soon_threadsafe(self._async_loop.stop)
         if self._loop_thread and self._loop_thread.is_alive():

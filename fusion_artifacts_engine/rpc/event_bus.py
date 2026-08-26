@@ -52,7 +52,13 @@ class EventBus:
             try:
                 q.put_nowait({"event_type": event_type, **data})
             except queue.Full:
-                # A-3: 队列满删除前先投递 __dropped__ 信号，让 SSE handler 关流促客户端重连
+                # A-3: 队列满删除前先投递 __dropped__ 信号，让 SSE handler 关流促客户端重连。
+                # P0-6: 队列已满时 put_nowait(EVENT_DROPPED) 也必 Full——先 get_nowait 腾槽再投，
+                # 否则信号静默丢失，SSE 永不关流。
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
                 try:
                     q.put_nowait({"event_type": EVENT_DROPPED})
                 except queue.Full:

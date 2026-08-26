@@ -23,6 +23,10 @@ artifact:
   id_prefix: "art_"
   # R9: 单 artifact 版本上限，0=不限；超限淘汰最旧非快照版本
   max_versions_per_artifact: 100
+  # P0-5/H9: 单版本内容字节上限，0=不限；超限拒绝写入防 OOM/磁盘耗尽
+  max_content_bytes: 0
+  # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限；超限拒绝写入
+  max_metadata_bytes: 0
 
 security:
   # C-4: 默认 fail-closed。无 api_key 且 allow_no_auth=false 时启动自动生成随机 key

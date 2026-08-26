@@ -20,7 +20,7 @@ from fusion_artifacts_engine.models import (
     infer_kind,
 )
 from fusion_artifacts_engine.ref_parser import generate_ref_text
-from fusion_artifacts_engine.rpc.errors import ResourceLimitError
+from fusion_artifacts_engine.rpc.errors import ConflictError, NotFoundError, ResourceLimitError
 from fusion_artifacts_engine.rpc.event_bus import EventBus
 from fusion_artifacts_engine.section_index import build_sections_with_tokens as _build_secs
 from fusion_artifacts_engine.section_index import delete_section as _delete_sec
@@ -93,6 +93,8 @@ class ArtifactEngine:
             small_content_limit=self.config.small_content_limit,
             max_versions_per_artifact=self.config.max_versions_per_artifact,
             disk_space_warning_pct=self.config.disk_space_warning_pct,
+            max_content_bytes=self.config.max_content_bytes,
+            max_metadata_bytes=self.config.max_metadata_bytes,
         )
         # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
         # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
@@ -898,12 +900,13 @@ class ArtifactEngine:
         # H5: 阻塞 storage 读卸到线程池
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
-            raise ValueError(f"Artifact not found: {artifact_id}")
+            raise NotFoundError(f"Artifact not found: {artifact_id}")
         if (
             expected_version is not None
             and artifact.current_version != expected_version
         ):
-            raise ValueError(
+            # P0-2: 乐观锁冲突映射 ConflictError(-32002, 可重试)。
+            raise ConflictError(
                 f"Optimistic lock failed: expected version {expected_version}, "
                 f"got {artifact.current_version}"
             )
@@ -911,7 +914,7 @@ class ArtifactEngine:
             self.storage.get_version, artifact_id, artifact.current_version
         )
         if current is None:
-            raise ValueError(f"No current version for artifact: {artifact_id}")
+            raise NotFoundError(f"No current version for artifact: {artifact_id}")
         old_content = current.content
         old_tokens = count_tokens(old_content)
 
