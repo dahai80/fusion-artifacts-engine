@@ -100,6 +100,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         },
         "metrics": {
             "enabled": ("metrics_enabled", None),
+            "token": ("metrics_token", None),
         },
     }
     flat: dict[str, Any] = {}
@@ -142,6 +143,7 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_PUBLIC_RPS": ("public_rate_limit_rps", float),
         "FUSION_ARTIFACTS_PUBLIC_BURST": ("public_rate_limit_burst", int),
         "FUSION_ARTIFACTS_METRICS_ENABLED": ("metrics_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_METRICS_TOKEN": ("metrics_token", str),
         "FUSION_ARTIFACTS_DISK_WARNING_PCT": ("disk_space_warning_pct", int),
         # P1-4: WAL checkpoint 间隔 env 覆盖
         "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
@@ -221,6 +223,9 @@ class ArtifactEngineConfig(BaseModel):
     public_rate_limit_burst: int = Field(default=0)
     # 运维2: Prometheus /metrics 端点开关
     metrics_enabled: bool = Field(default=True)
+    # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配（常量时间比较）。
+    # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 时必须设值，否则运维指标泄露。
+    metrics_token: str | None = Field(default=None)
     # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
     # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
     metadata_indexed_keys: list[str] = Field(default_factory=list)

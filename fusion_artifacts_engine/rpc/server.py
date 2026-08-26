@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import typing
@@ -28,6 +29,10 @@ from fusion_artifacts_engine.rpc.errors import (
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
+
+# LOW-1: share_id 公开端点格式预校验。合法 share_id 形如 shr_<12 hex>（见 share.py）。
+# 非法格式直接 400，省掉一次 DB 往返，且不泄露「该 share 是否存在」。
+_SHARE_ID_RE = re.compile(r"^shr_[A-Za-z0-9]{12}$")
 
 # P1-3/H12: 每请求生成 uuid4 request ID，回写 X-Request-ID 响应头 + 绑入日志 extra，
 # 让运维从客户端回溯到服务端日志行。BaseHTTPRequestHandler 每请求新建 handler 实例，
@@ -343,6 +348,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not getattr(engine.config, "metrics_enabled", True):
             self._send_rest_response(404, {"error": "metrics disabled"})
             return
+        # LOW-4: 配置 metrics_token 时 /metrics 需 X-Metrics-Token 头匹配（常量时间比较）。
+        # 未配置则依赖 127.0.0.1 绑定；暴露 0.0.0.0 必须设值，防运维指标泄露。
+        expected_token = getattr(engine.config, "metrics_token", None)
+        if expected_token:
+            supplied = self.headers.get("X-Metrics-Token", "")
+            if not hmac.compare_digest(supplied, expected_token):
+                self._send_rest_response(401, {"error": "Unauthorized metrics access"})
+                return
         body = get_metrics().expose().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -370,6 +383,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 )
                 return
             share_id = path_parts[3]
+            # LOW-1: share_id 格式预校验。非法格式 400，省 DB 往返且不泄露存在性。
+            if not _SHARE_ID_RE.fullmatch(share_id):
+                self._send_rest_response(
+                    400, {"error": "Invalid share_id format", "code": -32602}
+                )
+                return
             result = engine.get_public_share(share_id)
             status = result.get("status")
             if status == "ok":

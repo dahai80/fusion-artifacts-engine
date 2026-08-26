@@ -332,8 +332,12 @@ GET /api/v1/artifacts?page=1&page_size=20&sort=updated_at  # List all artifacts 
 GET /api/v1/artifacts/{artifact_id}                  # Get artifact metadata
 GET /api/v1/artifacts/{artifact_id}/versions         # List artifact versions
 GET /api/v1/artifacts/{artifact_id}/versions/{num}   # Get a specific version's content
-GET /api/v1/share/{share_id}                         # Public share access (no auth; 410 Gone if revoked/expired/exhausted)
+GET /api/v1/share/{share_id}                         # Public share access (no auth; 400 if malformed share_id, 410 Gone if revoked/expired/exhausted, 404 if not found)
 ```
+
+`GET /api/v1/share/{share_id}` validates the `share_id` format (`shr_<12>`; LOW-1) before
+hitting the DB — a malformed id returns `400` immediately, and a valid-but-absent id returns
+`404` without leaking whether the share exists.
 
 Query parameters for `GET /api/v1/artifacts`:
 - `session_id` — scope list to a session; omitted → list all artifacts (paginated)
@@ -364,6 +368,7 @@ GET /readyz     # Readiness — 200 {"status":"ready","checks":{...}} / 503 {"st
                 #   checks: storage (SELECT 1 + content_dir exists), event_bus (not closed)
 GET /metrics    # Prometheus text exposition 0.0.4 — counters/gauge/histogram (运维2)
                 #   404 if metrics.enabled=false
+                #   401 if metrics.token set and X-Metrics-Token header missing/mismatched (LOW-4)
 ```
 
 `/healthz` always returns 200 if the process can answer — it never depends on storage or the
@@ -371,6 +376,12 @@ event bus, so a transiently-unready dependency does not trigger a K8s restart lo
 returns 503 when storage is unreachable or the EventBus is shut down, signalling "do not route
 traffic here yet". `/metrics` exposes `rpc_requests_total`, `rpc_error_total`, `rpc_active_conns`,
 and `rpc_request_latency_seconds` (histogram, fixed buckets) for scraping.
+
+**`/metrics` token (LOW-4)** — when `metrics.token` is set (env `FUSION_ARTIFACTS_METRICS_TOKEN`),
+`/metrics` requires an `X-Metrics-Token` request header matching it (constant-time compare); a
+missing or wrong header returns `401`. Empty/`""` (default) = no auth, relying on the `127.0.0.1`
+bind for isolation. **If you expose the port beyond localhost, you must set `metrics.token`** to
+prevent operational metrics leakage.
 
 ### SSE Events Stream (P4)
 
@@ -488,6 +499,9 @@ asyncio.run(main())
 - **Path traversal protection**: export paths are sanitized
 - **Single-tenant boundary**: the engine binds `127.0.0.1` and authenticates by a single shared `X-API-Key`. There is **no per-user identity** — all callers sharing the key are treated as one trusted principal. Do **not** expose the port beyond the host. Multi-tenant deployments must front the engine with an auth proxy that injects a trusted `caller_user_id`.
 - **IDOR protection (v0.5.0)**: write ops and `artifact.get` enforce ownership when a `caller_user_id` is supplied in the RPC params. If `caller_user_id` is set and the artifact has an `owner_user_id`, they must match — otherwise `PermissionError` (`-32006`, HTTP `403`) is raised and the op is denied. When `caller_user_id` is omitted (single-tenant default) or the artifact has no owner set, the check is skipped for backward compatibility. Applies to: `artifact.get`, `artifact.get_content`, `artifact.update`, `artifact.patch`, `artifact.delete`, `artifact.version_rollback`. Ownership is assigned at creation via the optional `owner_user_id` / `ownership_type` (`free`/`project`/`cowork`) params on `artifact.create`.
+- **share_id format validation (LOW-1)**: the public `GET /api/v1/share/{share_id}` endpoint rejects malformed share IDs (`shr_<12>` format) with `400` before any DB lookup — saving a round-trip and not leaking share existence.
+- **CSP nonce, no `unsafe-inline` (LOW-5)**: rendered share HTML issues a one-time random `style-src 'nonce-<random>'` per render instead of `style-src 'unsafe-inline'`; the CSP header and every `<style>` tag share the same nonce, tightening the XSS surface on shared artifact previews.
+- **Log injection guard (LOW-3)**: a global `LogSanitizerFilter` strips CR/LF from log messages and `%s` args, so user input (e.g. artifact names) cannot forge fake log lines (CWE-117).
 
 ## Backup & Restore (v0.4.2)
 

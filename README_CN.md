@@ -256,8 +256,10 @@ GET /api/v1/folders            # 列出文件夹
 GET /api/v1/tags               # 列出标签
 GET /api/v1/events             # 列出事件
 GET /api/v1/recycle            # 列出回收站
-GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；已撤销/过期返回 410 Gone）
+GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；share_id 格式非法返回 400，已撤销/过期/耗尽返回 410 Gone，不存在返回 404）
 ```
+
+`GET /api/v1/share/{share_id}` 在访问 DB 前先校验 `share_id` 格式（`shr_<12>`；LOW-1）——格式非法立即返回 `400`，格式合法但不存在返回 `404`，不泄露该分享是否存在。
 
 `GET /api/v1/artifacts` 查询参数：
 - `created_by` — 按所有者过滤
@@ -284,6 +286,23 @@ POST /api/v1/events            # {"artifact_id": "...", "event_type": "..."}
 POST /api/v1/purge             # {}
 POST /api/v1/external/create   # {"source_module": "fusion-mlx", "workspace_id": "ws-001", "name": "...", "type": "code", "content": "..."}
 ```
+
+### 运维端点 (运维5 / 运维2)
+
+存活/就绪探针与指标，全部 **免鉴权**（K8s 探针不带 API Key）：
+
+```bash
+GET /healthz    # 存活探针 — 进程存活 = 200 {"status":"ok","check":"liveness"}
+GET /readyz     # 就绪探针 — 200 {"status":"ready","checks":{...}} / 503 {"status":"not_ready",...}
+                #   checks: storage（SELECT 1 + content_dir 存在）、event_bus（未关闭）
+GET /metrics    # Prometheus 文本指标 0.0.4 — counter/gauge/histogram（运维2）
+                #   metrics.enabled=false 时返回 404
+                #   设置了 metrics.token 且 X-Metrics-Token 头缺失/不匹配时返回 401（LOW-4）
+```
+
+`/healthz` 只要进程能响应就返回 200——不依赖 storage 或 EventBus，故瞬时不可用的依赖不会触发 K8s 重启循环。`/readyz` 在 storage 不可达或 EventBus 已关闭时返回 503，表示"暂不引流"。`/metrics` 暴露 `rpc_requests_total`、`rpc_error_total`、`rpc_active_conns`、`rpc_request_latency_seconds`（histogram，固定桶）供抓取。
+
+**`/metrics` token（LOW-4）** —— 设置 `metrics.token`（env `FUSION_ARTIFACTS_METRICS_TOKEN`）后，`/metrics` 要求请求头 `X-Metrics-Token` 与之匹配（常量时间比较）；缺失或不匹配返回 `401`。留空/`""`（默认）= 不鉴权，依赖 `127.0.0.1` 绑定的本机隔离。**若把端口暴露到本机之外，必须设置 `metrics.token`**，否则运维指标泄露。
 
 ### SSE 事件流 (P4)
 
@@ -400,6 +419,9 @@ asyncio.run(main())
 - **路径穿越防护**：导出路径经过清洗
 - **单租户边界**：引擎绑定 `127.0.0.1`，以单一共享 `X-API-Key` 认证，**无逐用户身份**——共享同一 Key 的所有调用方视为同一可信主体。**不要**将端口暴露到主机之外。多租户部署须在引擎前置认证代理，由其注入可信的 `caller_user_id`。
 - **IDOR 防护 (v0.5.0)**：当 RPC 参数中传入 `caller_user_id` 时，写操作与 `artifact.get` 强制校验归属。若设置了 `caller_user_id` 且产物有 `owner_user_id`，二者必须一致，否则抛出 `PermissionError`（`-32006`，HTTP `403`）并拒绝操作。当省略 `caller_user_id`（单租户默认）或产物未设置归属时，跳过校验以保持向后兼容。覆盖方法：`artifact.get`、`artifact.get_content`、`artifact.update`、`artifact.patch`、`artifact.delete`、`artifact.version_rollback`。归属在创建时通过 `artifact.create` 的可选参数 `owner_user_id` / `ownership_type`（`free`/`project`/`cowork`）设定。
+- **share_id 格式校验（LOW-1）**：公开端点 `GET /api/v1/share/{share_id}` 在任何 DB 查询前先拒绝格式非法的 share_id（`shr_<12>` 格式），返回 `400`——省一次 DB 往返且不泄露分享存在性。
+- **CSP nonce，去 `unsafe-inline`（LOW-5）**：渲染的分享 HTML 每次渲染签发一次性随机 `style-src 'nonce-<random>'`，替代 `style-src 'unsafe-inline'`；CSP 头与每个 `<style>` 标签共用同一 nonce，收紧分享预览的 XSS 攻击面。
+- **日志注入防护（LOW-3）**：全局 `LogSanitizerFilter` 剥除日志消息与 `%s` 参数中的 CR/LF，使含换行的用户输入（如产物名）无法伪造假日志行（CWE-117）。
 
 ## 备份与恢复 (v0.4.2)
 

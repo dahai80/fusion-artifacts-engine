@@ -66,3 +66,6 @@ rate_limit:
 metrics:
   # 运维2: Prometheus /metrics 端点开关。自实现文本格式，无外部依赖
   enabled: true
+  # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配。
+  # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 / 公网时必须设值。
+  token: ""

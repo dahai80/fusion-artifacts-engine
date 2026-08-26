@@ -77,9 +77,26 @@ def test_share_rest_ok(share_server):
 
 def test_share_rest_not_found(share_server):
     _server, _engine, base = share_server
-    resp = rest_get(base, "/api/v1/share/shr_nonexistent")
+    # LOW-1: 合法格式但不存在 → 404
+    resp = rest_get(base, "/api/v1/share/shr_000000000000")
     assert resp.status_code == 404
     assert "not found" in resp.json()["error"].lower()
+
+
+def test_share_rest_invalid_format_400(share_server):
+    _server, _engine, base = share_server
+    # LOW-1: 非法 share_id 格式 → 400，不查 DB
+    resp = rest_get(base, "/api/v1/share/shr_nonexistent")
+    assert resp.status_code == 400
+    assert resp.json()["code"] == -32602
+
+
+def test_share_rest_malicious_share_id_400(share_server):
+    _server, _engine, base = share_server
+    # LOW-1: 非法格式 id（能进入 share 分支的）→ 400。含 / 的会被 URL 切分绕过 share 分支，故排除。
+    for bad in ("shr_短", "shr_<script>", "notashr_abcabcabcabc", "shr_" + "a" * 13, "shr_ab"):
+        resp = rest_get(base, f"/api/v1/share/{bad}")
+        assert resp.status_code == 400, f"{bad!r} should be 400"
 
 
 def test_share_rest_revoked_gone(share_server):
