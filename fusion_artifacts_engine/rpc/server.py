@@ -13,8 +13,8 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.models import ArtifactKind
 from fusion_artifacts_engine.metrics import get_metrics
+from fusion_artifacts_engine.models import ArtifactKind
 from fusion_artifacts_engine.rate_limiter import RateLimiter
 from fusion_artifacts_engine.rpc.errors import (
     BusinessRuleError,

@@ -68,6 +68,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "sync_root": ("sync_root", _expanduser_path),
             "disk_space_warning_pct": ("disk_space_warning_pct", None),
             "wal_checkpoint_interval": ("wal_checkpoint_interval", None),
+            "metadata_indexed_keys": ("metadata_indexed_keys", None),
         },
         "thresholds": {
             "auto_create_lines": ("auto_create_threshold_lines", None),
@@ -215,6 +216,9 @@ class ArtifactEngineConfig(BaseModel):
     public_rate_limit_burst: int = Field(default=0)
     # 运维2: Prometheus /metrics 端点开关
     metrics_enabled: bool = Field(default=True)
+    # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
+    # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
+    metadata_indexed_keys: list[str] = Field(default_factory=list)
 
     @property
     def db_path(self) -> Path:

@@ -460,13 +460,33 @@ class RPCHandler:
         return {"artifact": dup.model_dump()}
 
     async def _list_all(self, params: dict) -> dict:
+        sort = params.get("sort", "updated_at")
         artifacts, total = self.engine.list_all_artifacts(
             filters=params.get("filters"),
-            sort=params.get("sort", "updated_at"),
+            sort=sort,
             page=params.get("page", 1),
             page_size=params.get("page_size", 20),
+            cursor=params.get("cursor"),
         )
-        return {"artifacts": [a.model_dump() for a in artifacts], "total": total}
+        # P2-7/F6: 游标分页——结果满页则据末行构造 next_cursor 供客户端续翻。
+        # 仅 updated_at/created_at 排序支持游标（storage 内回退 OFFSET）。
+        # 用 _clamp_pagination 取规范化 page_size 做满页判定，防 params 传非 int 字符串。
+        from fusion_artifacts_engine.storage.sqlite_storage import (
+            _clamp_pagination,
+            _encode_cursor,
+        )
+        _, eff_page_size = _clamp_pagination(params.get("page", 1), params.get("page_size", 20))
+        next_cursor = None
+        if artifacts and len(artifacts) >= eff_page_size and sort in ("updated_at", "created_at"):
+            last = artifacts[-1]
+            col_val = getattr(last, sort, None)
+            if col_val is not None and getattr(last, "id", None):
+                next_cursor = _encode_cursor(float(col_val), last.id)
+        return {
+            "artifacts": [a.model_dump() for a in artifacts],
+            "total": total,
+            "next_cursor": next_cursor,
+        }
 
     # ── P1: recycle bin ────────────────────────────────────────
 

@@ -92,7 +92,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | 收藏/取消收藏 |
 | `artifact.pin` | artifact_id, pinned, chat_id? | 固定/取消固定到聊天 |
 | `artifact.duplicate` | artifact_id | 复制产物（新 ID） |
-| `artifact.list_all` | filters?, sort?, page?, page_size? | 列出所有产物（跨会话） |
+| `artifact.list_all` | filters?, sort?, page?, page_size?, cursor? | 列出所有产物（跨会话）；响应含 `next_cursor` 用于游标分页（仅 `updated_at`/`created_at` 排序） |
 
 ### 回收站方法 (P1)
 
@@ -435,6 +435,15 @@ rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
 storage:
   wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
 ```
+
+**metadata 索引 (v0.5.0)** —— `metadata_indexed_keys` 列出高频 metadata 过滤字段名。对每个 key 建 `json_extract(metadata, '$.<key>')` 表达式索引，使 `metadata_filter` 命中索引而非全表扫。key 须为安全标识符（字母/下划线/数字），非法值被丢弃。留空=不建索引（向后兼容默认）。
+
+```yaml
+storage:
+  metadata_indexed_keys: ["language", "framework"]
+```
+
+**游标分页 (v0.5.0)** —— `artifact.list_all` 接受可选 `cursor`（不透明，响应中以 `next_cursor` 返回）。配合 `updated_at` 或 `created_at` 排序时，引擎用 `WHERE (sort_col, id) < (cursor)` 游标查询替代 `OFFSET`，避免深分页扫+丢行的开销。其他排序或非法游标回退 OFFSET 分页。
 
 ## 配置
 

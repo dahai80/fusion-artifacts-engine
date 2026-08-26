@@ -17,6 +17,10 @@ storage:
   # P1-4: WAL 周期 checkpoint 间隔秒。0=禁用（依赖 SQLite 默认 1000 页自动）。
   # 生产建议 300——后台 PASSIVE checkpoint 控制 -wal 文件增长，配合 scripts/backup.sh 在线备份。
   wal_checkpoint_interval: 300
+  # P2-7/F6: metadata 高频过滤字段名列表。对每个 key 建 json_extract 表达式索引，
+  # 使 list 的 metadata_filter 不再全表扫。留空=不建索引（向后兼容）。
+  # 仅可填安全标识符（字母/下划线/数字），用于常被过滤的 metadata 字段。
+  metadata_indexed_keys: []
 
 thresholds:
   auto_create_lines: 30

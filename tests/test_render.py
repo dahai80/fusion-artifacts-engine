@@ -2,8 +2,6 @@ import importlib
 import sys
 import types
 
-import pytest
-
 from fusion_artifacts_engine import render as render_mod
 from fusion_artifacts_engine.render import (
     _html_escape,

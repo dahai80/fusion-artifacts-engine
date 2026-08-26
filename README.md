@@ -169,7 +169,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | Star/unstar artifact |
 | `artifact.pin` | artifact_id, pinned, chat_id? | Pin/unpin artifact to chat |
 | `artifact.duplicate` | artifact_id | Duplicate artifact with new ID |
-| `artifact.list_all` | filters?, sort?, page?, page_size? | List all artifacts (cross-session) |
+| `artifact.list_all` | filters?, sort?, page?, page_size?, cursor? | List all artifacts (cross-session); response includes `next_cursor` for keyset pagination (only `updated_at`/`created_at` sort) |
 
 ### Recycle Bin Methods (P1)
 
@@ -523,6 +523,15 @@ rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
 storage:
   wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
 ```
+
+**Metadata indexes (v0.5.0)** — `metadata_indexed_keys` lists high-frequency metadata filter field names. For each key, the engine creates a `json_extract(metadata, '$.<key>')` expression index so `metadata_filter` lookups hit the index instead of a full table scan. Keys must be safe identifiers (letters/underscore/digits); invalid keys are dropped. Empty list = no indexes (backward-compatible default).
+
+```yaml
+storage:
+  metadata_indexed_keys: ["language", "framework"]
+```
+
+**Keyset pagination (v0.5.0)** — `artifact.list_all` accepts an optional `cursor` (opaque, returned as `next_cursor` in the response). When supplied with `updated_at` or `created_at` sort, the engine uses a `WHERE (sort_col, id) < (cursor)` keyset query instead of `OFFSET`, avoiding the deep-page scan-and-discard cost. Other sort modes and invalid cursors fall back to OFFSET pagination.
 
 ## Configuration
 

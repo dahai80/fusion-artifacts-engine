@@ -114,6 +114,23 @@ def _clamp_pagination(page, page_size, max_size: int = 500) -> tuple[int, int]:
     return page, page_size
 
 
+def _decode_cursor(cursor: str) -> tuple[float | None, str]:
+    # P2-7/F6: 解析 "<float>:<id>" 游标。非法返回 (None, "") 回退 OFFSET。
+    # id 段可能含 ':' 之外的任意字符，故只在第一个 ':' 处分割。
+    if not cursor or ":" not in cursor:
+        return None, ""
+    head, _, tail = cursor.partition(":")
+    try:
+        return float(head), tail
+    except (ValueError, TypeError):
+        return None, ""
+
+
+def _encode_cursor(col_val: float, row_id: str) -> str:
+    # P2-7/F6: 编码游标 "<float>:<id>"。RPC 层据结果末行构造，回传客户端做下次请求。
+    return f"{col_val}:{row_id}"
+
+
 from fusion_artifacts_engine.storage.base import StorageDriver
 
 _SCHEMA_SQL = """
@@ -352,6 +369,7 @@ class SQLiteStorage(StorageDriver):
         max_versions_per_artifact: int = 0, disk_space_warning_pct: int = 0,
         max_content_bytes: int = 0, max_metadata_bytes: int = 0,
         wal_checkpoint_interval: int = 300,
+        metadata_indexed_keys: list[str] | None = None,
     ):
         self.db_path = db_path
         self.content_dir = content_dir
@@ -364,6 +382,11 @@ class SQLiteStorage(StorageDriver):
         self.max_content_bytes = max(0, int(max_content_bytes))
         # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限。超限拒绝写入
         self.max_metadata_bytes = max(0, int(max_metadata_bytes))
+        # P2-7/F6: metadata 高频过滤字段名。仅保留安全标识符（防 DDL 注入）。
+        # 对每个 key 建 json_extract 表达式索引，metadata_filter 走索引而非全表扫。
+        self.metadata_indexed_keys = [
+            k for k in (metadata_indexed_keys or []) if _META_KEY_RE.fullmatch(k)
+        ]
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
         # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
@@ -392,6 +415,9 @@ class SQLiteStorage(StorageDriver):
         # 迁移方法仍需幂等（兼容无 applied_migrations 记录的既有 DB 首次升级）。
         self._migrate_schema_meta()
         self._run_migrations_gated()
+        # P2-7/F6: 建配置的 metadata 表达式索引。幂等（IF NOT EXISTS），
+        # 配置改 key 后旧索引保留（无害），新 key 运行时即时建。
+        self._ensure_metadata_indexes()
         # P1-4: WAL 周期 checkpoint 后台线程。PASSIVE 模式不阻塞读写，控制 -wal 文件增长，
         # 让 scripts/backup.sh 的 sqlite3 .backup（需 WAL 已 checkpoint 才能完整快照）可靠。
         # interval=0 禁用（依赖 SQLite 默认 1000 页自动 checkpoint）。daemon 线程，stop event 退出。
@@ -806,6 +832,7 @@ class SQLiteStorage(StorageDriver):
         sort: str = "updated_at",
         page: int = 1,
         page_size: int = 20,
+        cursor: str | None = None,
     ) -> tuple[list[Artifact], int]:
         # P1-5/M5: 分页入参硬化
         page, page_size = _clamp_pagination(page, page_size)
@@ -867,6 +894,20 @@ class SQLiteStorage(StorageDriver):
                 conditions.append("created_at <= ?")
                 params.append(_coerce_float("until", until))
         where = " AND ".join(conditions)
+        # P2-7/F6: keyset 分页——updated_at/created_at 单列 DESC 排序支持游标，
+        # WHERE (sort_col, id) < (cursor_val, cursor_id) 替代 OFFSET 深分页（避免扫+丢行）。
+        # cursor 格式 "<float>:<id>"；非法或排序不支持时回退 OFFSET（向后兼容）。
+        keyset_cols = {"updated_at": "updated_at", "created_at": "created_at"}
+        use_keyset = False
+        cursor_params: list = []
+        cursor_cond = ""
+        if cursor and sort in keyset_cols:
+            col_val, row_id = _decode_cursor(cursor)
+            if col_val is not None and row_id:
+                col = keyset_cols[sort]
+                cursor_cond = f" AND ({col}, id) < (?, ?)"
+                cursor_params = [col_val, row_id]
+                use_keyset = True
         with self._read_conn() as conn:
             count_cur = conn.execute(
                 f"SELECT COUNT(*) FROM artifacts WHERE {where}", params
@@ -879,11 +920,20 @@ class SQLiteStorage(StorageDriver):
                 "starred": "is_starred DESC, updated_at DESC",
             }
             order = sort_map.get(sort, "updated_at DESC")
-            offset = (page - 1) * page_size
-            cur = conn.execute(
-                f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
-                params + [page_size, offset],
-            )
+            if use_keyset:
+                # keyset: 排序加 id DESC 做 tiebreaker（保证游标严格有序，不漏不重）。
+                keyset_order = f"{keyset_cols[sort]} DESC, id DESC"
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where}{cursor_cond} "
+                    f"ORDER BY {keyset_order} LIMIT ?",
+                    params + cursor_params + [page_size],
+                )
+            else:
+                offset = (page - 1) * page_size
+                cur = conn.execute(
+                    f"SELECT * FROM artifacts WHERE {where} ORDER BY {order} LIMIT ? OFFSET ?",
+                    params + [page_size, offset],
+                )
             artifacts = [_artifact_from_row(r) for r in cur.fetchall()]
         logger.info(
             "list_all_artifacts: %d/%d page=%d sort=%s",
@@ -2382,6 +2432,27 @@ class SQLiteStorage(StorageDriver):
                 )
                 self._conn.commit()
             logger.info("Migrated %d event timestamps ISO -> REAL", len(updates))
+
+    def _ensure_metadata_indexes(self) -> None:
+        # P2-7/F6: 对配置的 metadata 高频字段建 json_extract 表达式索引。
+        # metadata_filter 走索引而非全表扫。key 已在 __init__ 过 _META_KEY_RE 校验，
+        # 二次校验防内部误传。索引名 idx_meta_<key>，幂等建。
+        if not self.metadata_indexed_keys:
+            return
+        created = []
+        for key in self.metadata_indexed_keys:
+            if not _META_KEY_RE.fullmatch(key):
+                logger.warning("Skip metadata index, unsafe key: %s", key)
+                continue
+            idx_name = f"idx_meta_{key}"
+            expr = f"json_extract(metadata, '$.{key}')"
+            self._conn.execute(
+                f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON artifacts({expr})'
+            )
+            created.append(idx_name)
+        if created:
+            self._conn.commit()
+            logger.info("Ensured %d metadata indexes: %s", len(created), created)
 
     def _migrate_share_max_accesses_and_timestamps(self) -> None:
         # E1/E2: artifact_shares 加 max_accesses 列；created_at/last_access_at

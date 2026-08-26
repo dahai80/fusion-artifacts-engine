@@ -95,7 +95,7 @@ class ArtifactEngine:
             disk_space_warning_pct=self.config.disk_space_warning_pct,
             max_content_bytes=self.config.max_content_bytes,
             max_metadata_bytes=self.config.max_metadata_bytes,
-            wal_checkpoint_interval=self.config.wal_checkpoint_interval,
+            wal_checkpoint_interval=self.config.wal_checkpoint_interval, metadata_indexed_keys=self.config.metadata_indexed_keys,
         )
         # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
         # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
@@ -548,10 +548,10 @@ class ArtifactEngine:
         filters: dict | None = None,
         sort: str = "updated_at",
         page: int = 1,
-        page_size: int = 20,
+        page_size: int = 20, cursor: str | None = None,
     ) -> tuple[list[Artifact], int]:
         artifacts, total = self.storage.list_all_artifacts(
-            filters, sort, page, page_size
+            filters, sort, page, page_size, cursor
         )
         logger.info("list_all_artifacts: %d/%d page=%s", len(artifacts), total, page)
         return artifacts, total
