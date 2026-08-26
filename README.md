@@ -594,7 +594,10 @@ sse:
   heartbeat_interval: 30
   max_lifetime: 3600        # v0.4.2: max seconds per SSE connection; 0=unlimited. Server closes stream after expiry (emits __max_lifetime__) to force client reconnect; prevents zombie long-lived connections holding worker threads
   max_event_bytes: 262144   # v0.5.0: max serialized bytes per SSE event; oversized dropped + warned. 0=unlimited
+  max_connections: 16       # v0.5.0: SSE concurrency cap (separate from server.max_workers). On SSE handshake the connection releases its RPC worker slot and takes a slot from this dedicated semaphore; over-cap SSE gets 503. 0=legacy mode (SSE keeps worker slot, no separate cap; not recommended)
 ```
+
+**SSE thread isolation (v0.5.0)** — `sse.max_connections` separates SSE long-lived connections from the RPC worker pool. Previously an SSE connection held its `server_max_workers` slot for its entire lifetime, so 64 concurrent SSE clients exhausted all 64 RPC worker threads and every new RPC request got `503`. Now the SSE handshake acquires a slot from a dedicated `_sse_sem` (size `max_connections`, default 16) and **releases** the RPC worker slot back to the pool, so RPC stays available no matter how many SSE clients are connected. Client disconnect is detected within ~1s via a non-blocking socket probe (not waited out to the next heartbeat, which at the default 30s would delay slot release and let a connect/disconnect churn client exhaust the cap). `max_connections=0` falls back to the legacy single-pool behavior. Env override: `FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`.
 
 ## Architecture
 

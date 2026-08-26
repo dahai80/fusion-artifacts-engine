@@ -91,6 +91,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "heartbeat_interval": ("sse_heartbeat_interval", None),
             "max_lifetime": ("sse_max_lifetime", None),
             "max_event_bytes": ("sse_max_event_bytes", None),
+            "max_connections": ("sse_max_connections", None),
         },
         "rate_limit": {
             "rps": ("rate_limit_rps", None),
@@ -149,6 +150,7 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
         "FUSION_ARTIFACTS_SSE_MAX_LIFETIME": ("sse_max_lifetime", int),
         "FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES": ("sse_max_event_bytes", int),
+        "FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS": ("sse_max_connections", int),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -198,6 +200,10 @@ class ArtifactEngineConfig(BaseModel):
     # F5: SSE 单事件序列化后字节上限。超限事件被丢弃（仅记日志），防大 payload
     # 长时间阻塞单连接线程 + 客户端缓冲爆炸。0=不限（向后兼容）。
     sse_max_event_bytes: int = Field(default=262144)
+    # P2-1/F1/H3: SSE 独立并发上限。SSE 握手后释放 RPC worker 信号量、占用此专用信号量，
+    # 使长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
+    # 默认 16：本地单机足够（fusion-studio 通常 1-2 个 SSE）；0=不设独立上限（回退旧行为，不推荐）。
+    sse_max_connections: int = Field(default=16)
     context_budget_default: int = Field(default=200000)
     # C-1: sync_artifact_file 文件读写根目录，路径必须在其下
     sync_root: Path | None = Field(default=None)

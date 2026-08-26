@@ -5,6 +5,8 @@ import logging
 import os
 import queue
 import re
+import select
+import socket
 import threading
 import time
 import typing
@@ -84,11 +86,26 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
-    def __init__(self, server_address, handler_cls, max_workers: int = 64):
+    def __init__(self, server_address, handler_cls, max_workers: int = 64,
+                 sse_max_connections: int = 16):
         self._max_workers = max(1, int(max_workers))
         self._worker_sem = threading.BoundedSemaphore(self._max_workers)
         self._rejected_count = 0
         self._rate_limiter = RateLimiter()
+        # P2-1/F1/H3: SSE 独立并发信号量。SSE 握手成功后释放 _worker_sem 并占此信号量，
+        # 使 SSE 长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
+        # 0=不设独立上限（回退旧行为：SSE 继续占 worker 槽，不推荐）。
+        self._sse_max_connections = max(0, int(sse_max_connections))
+        self._sse_sem = (
+            threading.BoundedSemaphore(self._sse_max_connections)
+            if self._sse_max_connections > 0
+            else None
+        )
+        # P2-1: 记录已移交到 SSE 信号量的连接 id。socket 对象无 __dict__ 不能挂属性，
+        # 改用 server 级 set 跟踪；process_request_thread 见此 id 即跳过 _worker_sem 释放。
+        # 连接生命周期内 id 不复用；process_request_thread finally 必清理，防泄漏。
+        self._sse_handoffs: set[int] = set()
+        self._sse_handoffs_lock = threading.Lock()
         super().__init__(server_address, handler_cls)
 
     def process_request(self, request, client_address):
@@ -125,6 +142,14 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            # P2-1: SSE 握手已把本连接从 _worker_sem 移交到 _sse_sem，此处不可再释放
+            # _worker_sem（否则信号量计数溢出抛 ValueError）。socket 无 __dict__ 不能挂属性，
+            # 改查 server 级 _sse_handoffs set；命中即跳过释放并清理记录。
+            if self._sse_sem is not None:
+                with self._sse_handoffs_lock:
+                    if id(request) in self._sse_handoffs:
+                        self._sse_handoffs.discard(id(request))
+                        return
             self._worker_sem.release()
 
 
@@ -565,6 +590,25 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
             self._send_rest_response(400, {"error": f"Invalid kind: {kind_filter}"})
             return
+        # P2-1/F1/H3: SSE 独立并发信号量。握手前先占专用槽；占不到即 503 拒绝，
+        # 不让 SSE 客户端把 RPC worker 池吃光。占成功后释放 _worker_sem 把 RPC 槽还回，
+        # 并打 handoff 标志——process_request_thread 见此标志不再 release _worker_sem。
+        # sse_max_connections==0（_sse_sem 为 None）= 回退旧行为，SSE 继续占 worker 槽。
+        sse_sem = self.server._sse_sem
+        sse_handoff = False
+        if sse_sem is not None:
+            if not sse_sem.acquire(timeout=0.01):
+                self._log.warning(
+                    "SSE rejected: SSE connection cap reached (max=%d)",
+                    self.server._sse_max_connections,
+                )
+                self._send_rest_response(503, {"error": "SSE connection limit reached"})
+                return
+            sse_handoff = True
+            self.server._worker_sem.release()
+            # socket 无 __dict__，用 server 级 set 记录已移交连接 id（见 process_request_thread）
+            with self.server._sse_handoffs_lock:
+                self.server._sse_handoffs.add(id(self.request))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -601,6 +645,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         pass
+                    break
+                # P2-1: 客户端断开检测。阻塞在 sub.get(heartbeat) 上时，客户端关流后
+                # 服务端最长等一个 heartbeat_interval（默认 30s）才在下次 write 失败时发现，
+                # 期间 _sse_sem 槽不归还——高频连断客户端可耗尽 16 槽。
+                # 故每次循环用 select 非阻塞探活：socket 可读且无数据=对端关连接(EOF)，立即 break。
+                # read fd 设超时上限 1s，使探活频率不低于每秒一次，槽归还延迟≤1s 而非 30s。
+                try:
+                    rready, _, _ = select.select(
+                        [self.request], [], [], min(1.0, heartbeat_interval)
+                    )
+                    if rready:
+                        # 可读但 recv 0 字节=EOF；>0 字节=客户端发了垃圾数据，也按断开处理
+                        try:
+                            if not self.request.recv(1, socket.MSG_PEEK):
+                                break
+                        except OSError:
+                            break
+                except (OSError, ValueError):
                     break
                 try:
                     # P1-7: 取事件时不超过到 deadline 的剩余时间，避免超期仍阻塞整段心跳间隔
@@ -662,6 +724,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     break
         finally:
             engine.event_bus.unsubscribe(sub)
+            # P2-1: 归还 SSE 专用信号量槽（仅当握手时做了移交）
+            if sse_handoff and sse_sem is not None:
+                try:
+                    sse_sem.release()
+                except ValueError:
+                    # 防御：极端竞态下重复 release（不应发生），忽略而非崩溃
+                    self._log.warning("SSE sse_sem double-release guarded, watcher=%s", watcher_id)
             self._log.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _send_rest_response(self, code: int, data: dict) -> None:
@@ -845,8 +914,10 @@ class ArtifactRPCServer:
     def start(self) -> None:
         self._start_loop()
         max_workers = getattr(self.engine.config, "server_max_workers", 64)
+        sse_max = getattr(self.engine.config, "sse_max_connections", 16)
         self._server = _ThreadingHTTPServer(
-            (self.host, self.port), JSONRPCHandler, max_workers=max_workers
+            (self.host, self.port), JSONRPCHandler,
+            max_workers=max_workers, sse_max_connections=sse_max,
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop
@@ -860,8 +931,10 @@ class ArtifactRPCServer:
     def start_async(self) -> None:
         self._start_loop()
         max_workers = getattr(self.engine.config, "server_max_workers", 64)
+        sse_max = getattr(self.engine.config, "sse_max_connections", 16)
         self._server = _ThreadingHTTPServer(
-            (self.host, self.port), JSONRPCHandler, max_workers=max_workers
+            (self.host, self.port), JSONRPCHandler,
+            max_workers=max_workers, sse_max_connections=sse_max,
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop

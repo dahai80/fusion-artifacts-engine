@@ -2281,6 +2281,11 @@ class SQLiteStorage(StorageDriver):
         return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
+        # 幂等：重复 close（如测试显式 close 后 fixture teardown 再 close）不应崩溃。
+        # _conn 已为 None 说明此前已关闭，直接返回。
+        if self._conn is None:
+            logger.debug("SQLiteStorage.close() no-op: already closed")
+            return
         # P1-4: 先停 checkpoint 后台线程，再做最终 TRUNCATE checkpoint，确保停机后 -wal 清空。
         if self._checkpoint_thread is not None:
             self._checkpoint_stop.set()
@@ -2298,6 +2303,7 @@ class SQLiteStorage(StorageDriver):
             except queue.Empty:
                 break
         self._conn.close()
+        self._conn = None
         logger.info("SQLiteStorage closed")
 
     def health_check(self) -> bool:

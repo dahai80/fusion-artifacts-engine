@@ -504,7 +504,10 @@ sse:
   heartbeat_interval: 30
   max_lifetime: 3600        # v0.4.2：单 SSE 连接最大存活秒；0=不限。到期服务端关流（发 __max_lifetime__）促客户端重连，防僵尸长连接占线程
   max_event_bytes: 262144   # v0.5.0：单个 SSE 事件序列化后最大字节；超限丢弃+告警。0=不限
+  max_connections: 16       # v0.5.0：SSE 独立并发上限（与 server.max_workers 分离）。SSE 握手时释放 RPC worker 槽、占用此专用信号量；超限 SSE 返回 503。0=回退旧行为（SSE 继续占 worker 槽，不设独立上限，不推荐）
 ```
+
+**SSE 线程隔离 (v0.5.0)** —— `sse.max_connections` 把 SSE 长连接与 RPC worker 线程池分离。此前每个 SSE 连接在其整个生命周期内独占一个 `server_max_workers` 槽，64 个 SSE 客户端即占满全部 64 个 RPC worker 线程，导致所有新 RPC 请求被 `503` 拒绝。现在 SSE 握手从专用 `_sse_sem`（容量 `max_connections`，默认 16）取槽，并**释放**归还 RPC worker 槽，故无论多少 SSE 客户端在线，RPC 始终可用。客户端断开经非阻塞 socket 探活在约 1 秒内检测（不再等到下一次心跳——默认 30s 的心跳间隔会延迟槽归还，使高频连断客户端耗尽上限）。`max_connections=0` 回退旧的单池行为。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`。
 
 ## 架构
 
