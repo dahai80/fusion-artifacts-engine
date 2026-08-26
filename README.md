@@ -1,10 +1,10 @@
 # Fusion Artifacts Engine
 
-English | **[中文](./README_CN.md)**
+English | **[Chinese](./README_CN.md)**
 
 Structured artifact CRUD middleware for the Fusion architecture. Physically separates generated artifacts from chat messages to solve context overflow in long AI conversations.
 
-> **New: [Usage Guide / 使用指南](./docs/USAGE_GUIDE.md)** — bilingual (EN + 中文), scenario-based walkthrough with runnable examples covering create/version/share/render/budget/lifecycle/recycle/ops.
+> **New: [Usage Guide](./docs/USAGE_GUIDE.md)** — bilingual (EN + CN), scenario-based walkthrough with runnable examples covering create/version/share/render/budget/lifecycle/recycle/ops.
 
 ## How It Works
 
@@ -63,27 +63,27 @@ and `artifact.inject`/`artifact.interact` JSON-RPC `-32005` at the HTTP layer. s
 **v0.4.0** lands the ops-readiness batch — six production-operations capabilities added
 on top of v0.3.11. No domain behavior change; 416 tests green, ruff clean. v0.4.0 highlights:
 
-- **运维1 令牌桶限流**: `RateLimiter` (token bucket) guards the default JSON-RPC path and the
+- **Ops-1 token-bucket rate limiting**: `RateLimiter` (token bucket) guards the default JSON-RPC path and the
   public share path with separate buckets, so unauthenticated share abuse cannot starve the
   authenticated backend. `rps=0` = unlimited (backward-compatible default). Over-capacity calls
   return JSON-RPC `-32003` (retryable) / HTTP `429`. See `rate_limiter.py`.
-- **运维2 Prometheus /metrics**: `GET /metrics` emits Prometheus text exposition format 0.0.4
+- **Ops-2 Prometheus /metrics**: `GET /metrics` emits Prometheus text exposition format 0.0.4
   (counters `rpc_requests_total` / `rpc_error_total`, gauge `rpc_active_conns`, histogram
   `rpc_request_latency_seconds`). Self-implemented, no `prometheus_client` dependency. See `metrics.py`.
-- **运维3 日志轮转 + 结构化 JSON**: `RotatingFileHandler` (10MB, 5 backups) with a
+- **Ops-3 log rotation + structured JSON**: `RotatingFileHandler` (10MB, 5 backups) with a
   `JsonFormatter` writes machine-parseable structured logs to `logs/` under the storage root
   (env override `FUSION_ARTIFACTS_LOG_DIR`); a human-readable console handler stays on stderr.
   Initialized at daemon startup in `__main__`. See `utils.py`.
-- **运维4 磁盘空间检测**: `shutil.disk_usage` pre-write check in `SQLiteStorage` rejects writes
+- **Ops-4 disk-space check**: `shutil.disk_usage` pre-write check in `SQLiteStorage` rejects writes
   (raise `ResourceLimitError` `-32003`) when used-disk pct ≥ `storage.disk_space_warning_pct`
   (default 90 via `default_config.yaml`; field default 0 so unit tests stay decoupled from host
   disk state). The engine catches the error, publishes a `system.alarm` / `disk_full_alarm`
   event (severity critical) on the EventBus, then re-raises.
-- **运维5 /healthz + /readyz 分离**: `GET /healthz` (liveness, always `200`, process-alive, no
+- **Ops-5 /healthz + /readyz split**: `GET /healthz` (liveness, always `200`, process-alive, no
   auth) vs `GET /readyz` (readiness, `200` ready / `503` not_ready, checks `storage.health_check()`
   + `event_bus.is_closed()`, no auth). Proper K8s probe separation — no restart loop on a
   transiently-unready dependency.
-- **运维6 inject/interact 下线**: `artifact.inject` / `artifact.interact` were advertised but
+- **Ops-6 inject/interact removed**: `artifact.inject` / `artifact.interact` were advertised but
   never implemented (returned stubs). Commercial release must fail explicitly, not silently.
   RPC handlers now raise `-32005` `NotImplementedError` (REST `501`); the method names stay
   registered so old clients do not get `-32601` method-not-found. Engine-level
@@ -171,8 +171,8 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.version_diff` | artifact_id, from_version, to_version | Unified diff between two versions |
 | `artifact.render` | content, session_id, lang_hint, project_id? | Auto-detect type, create renderable artifact |
 | `artifact.check_safety` | messages, output_budget | Token budget safety check |
-| `artifact.inject` | messages, output_budget | **Removed (运维6)**: raises `-32005` NotImplementedError; use `context.budget` + `check_safety` |
-| `artifact.interact` | artifact_id, action, payload, session_id? | **Removed (运维6)**: raises `-32005` NotImplementedError; action dispatch not supported |
+| `artifact.inject` | messages, output_budget | **Removed (Ops-6)**: raises `-32005` NotImplementedError; use `context.budget` + `check_safety` |
+| `artifact.interact` | artifact_id, action, payload, session_id? | **Removed (Ops-6)**: raises `-32005` NotImplementedError; action dispatch not supported |
 | `artifact.sync` | artifact_id, file_path, direction | Sync artifact content ↔ file |
 | `artifact.version_list` | artifact_id, page?, page_size?, include_content? | List versions (paginated, default page_size=200, cap 500) |
 | `artifact.version_rollback` | artifact_id, target_version | Rollback to version |
@@ -381,7 +381,7 @@ snapshot, share creation, tags, folders, events, purge, external-source create) 
 **JSON-RPC only** — the REST surface intentionally covers artifact CRUD + public share;
 see the method table above for the JSON-RPC method names (e.g. `artifact.create_share`).
 
-### Ops Endpoints (运维5 / 运维2)
+### Ops Endpoints (Ops-5 / Ops-2)
 
 Liveness/readiness probes and metrics, all **no-auth** (K8s probes carry no API key):
 
@@ -389,7 +389,7 @@ Liveness/readiness probes and metrics, all **no-auth** (K8s probes carry no API 
 GET /healthz    # Liveness — process alive = 200 {"status":"ok","check":"liveness"}
 GET /readyz     # Readiness — 200 {"status":"ready","checks":{...}} / 503 {"status":"not_ready",...}
                 #   checks: storage (SELECT 1 + content_dir exists), event_bus (not closed)
-GET /metrics    # Prometheus text exposition 0.0.4 — counters/gauge/histogram (运维2)
+GET /metrics    # Prometheus text exposition 0.0.4 — counters/gauge/histogram (Ops-2)
                 #   404 if metrics.enabled=false
                 #   401 if metrics.token set and X-Metrics-Token header missing/mismatched (LOW-4)
 ```
@@ -591,7 +591,7 @@ storage:
   root: "~/.fusion/artifacts"
   db_name: "meta.db"
   small_content_limit: 10240
-  disk_space_warning_pct: 90   # 运维4: reject writes (ResourceLimitError) + alarm when used-disk ≥ pct
+  disk_space_warning_pct: 90   # Ops-4: reject writes (ResourceLimitError) + alarm when used-disk ≥ pct
 
 thresholds:
   auto_create_lines: 30
@@ -604,13 +604,13 @@ security:
   allow_no_auth: false   # fail-closed default; set true only for trusted single-user local use
   recycle_retention_days: 7
 
-rate_limit:              # 运维1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
+rate_limit:              # Ops-1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
   rps: 0                 # default JSON-RPC bucket
   burst: 0
   public_rps: 0          # public share bucket (separate so share abuse can't starve backend)
   public_burst: 0
 
-metrics:                 # 运维2
+metrics:                 # Ops-2
   enabled: true          # false → GET /metrics returns 404
 
 sse:
