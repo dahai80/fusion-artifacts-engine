@@ -616,8 +616,19 @@ class SQLiteStorage(StorageDriver):
         # P0-5/H9: metadata + 内容字节上限校验
         _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
         _enforce_content_limit(version.content, self.max_content_bytes)
+        # P1-8/H10: 内容文件两阶段写——先写临时路径（事务外），提交成功后 rename 到最终。
+        # 回滚删临时文件，不留孤儿；文件 I/O 不在 BEGIN IMMEDIATE 内，缩短 _write_lock 持锁。
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
+            tmp_path = None
+            final_template = None
+            content = version.content
+            if len(content.encode("utf-8")) > self.small_content_limit:
+                ext = self._guess_ext(version.artifact_id, version.content)
+                tmp_path, final_template, _ext = self._write_content_file_tmp(
+                    version.artifact_id, content, ext
+                )
+                content = ""
             try:
                 self._conn.execute(
                     """INSERT INTO artifacts
@@ -680,14 +691,12 @@ class SQLiteStorage(StorageDriver):
                         artifact.workflow_run_id,
                     ),
                 )
-                content = version.content
                 content_path = None
-                if len(content.encode("utf-8")) > self.small_content_limit:
-                    ext = self._guess_ext(version.artifact_id, version.content)
-                    content_path = self._write_content_file(
-                        version.artifact_id, version.version_num, content, ext
+                if tmp_path is not None:
+                    content_path = str(
+                        self.content_dir / version.artifact_id
+                        / final_template.format(version_num=version.version_num)
                     )
-                    content = ""
                 self._conn.execute(
                     """INSERT INTO artifact_versions
                        (artifact_id, version_num, content, content_path, size_bytes,
@@ -713,7 +722,24 @@ class SQLiteStorage(StorageDriver):
                     ),
                 )
                 self._conn.commit()
+                # P1-8/H10: 提交成功后 rename 临时文件到最终路径
+                if tmp_path is not None and content_path is not None:
+                    try:
+                        Path(tmp_path).rename(content_path)
+                        tmp_path = None
+                    except OSError as e:
+                        logger.error(
+                            "save_artifact_and_version rename failed %s -> %s: %s; "
+                            "orphan/tmp left for GC", tmp_path, content_path, e,
+                        )
+                        tmp_path = None
             except sqlite3.Error as e:
+                # P1-8/H10: 事务失败——清理临时文件，不留孤儿
+                if tmp_path is not None:
+                    try:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except OSError:
+                        pass
                 raise _translate_sqlite_error(e) from e
         logger.info(
             "Saved artifact+version: %s v%d size=%d tokens=%d",
