@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fusion-artifacts-engine"
-version = "0.4.2rc0"
+version = "0.5.0"
 description = "Artifact management middleware for Fusion architecture"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,8 +22,14 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
+# P2-5: OTel 分布式追踪为可选依赖——local-first 单租户默认不需要。
+otel = [
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+]
 all = [
     "fusion-artifacts-engine[test]",
+    "fusion-artifacts-engine[otel]",
     "ruff>=0.6",
 ]
 

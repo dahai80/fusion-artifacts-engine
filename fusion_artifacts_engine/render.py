@@ -1,5 +1,6 @@
 import html
 import logging
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +36,21 @@ except ImportError:
     )
 
 
-_SHARE_DOC_CSP = (
+# LOW-5/CWE-79: 去掉 style-src 'unsafe-inline'，改每渲染一次性 nonce。
+# {nonce} 由 _gen_nonce 注入；同一文档的 CSP 声明与 <style nonce="..."> 必须一致。
+_SHARE_DOC_CSP_TMPL = (
     "default-src 'none'; "
     "script-src 'none'; "
-    "style-src 'unsafe-inline'; "
+    "style-src 'nonce-{nonce}'; "
     "img-src data:; "
     "font-src data:; "
     "connect-src 'none';"
 )
+
+
+def _gen_nonce() -> str:
+    # LOW-5: 单次渲染随机 nonce。token_urlsafe(16) → ~22 字符 URL 安全串。
+    return secrets.token_urlsafe(16)
 
 
 def _html_escape(text: str) -> str:
@@ -89,15 +97,18 @@ def _sanitize_html(html_str: str) -> str:
 
 def render_share_html(artifact, content: str) -> str:
     # H7: 从 engine.py 抽出的分享渲染层。iframe sandbox + CSP + 净化。
+    # LOW-5: 单次渲染 nonce，去掉 style-src 'unsafe-inline'，CSP 与 <style> 共用同一 nonce。
     atype = artifact.type
     title = _html_escape(artifact.name or "Shared Artifact")
+    nonce = _gen_nonce()
+    csp = _SHARE_DOC_CSP_TMPL.format(nonce=nonce)
     if atype in ("html", "react"):
         iframe_doc = _html_escape(_sanitize_html(content))
         return (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
-            f"<style>html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
+            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
+            f"<style nonce=\"{nonce}\">html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
             f"</head><body>"
             f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
             f"</body></html>"
@@ -110,8 +121,8 @@ def render_share_html(artifact, content: str) -> str:
         return (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
-            f"<style>body{{font-family:system-ui,sans-serif;max-width:900px;"
+            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
+            f"<style nonce=\"{nonce}\">body{{font-family:system-ui,sans-serif;max-width:900px;"
             f"margin:2rem auto;padding:0 1rem;line-height:1.6}}"
             f"pre{{background:#f4f4f4;padding:1rem;overflow:auto;border-radius:4px}}"
             f"code{{background:#f4f4f4;padding:2px 6px;border-radius:3px}}</style>"
@@ -133,7 +144,7 @@ def render_share_html(artifact, content: str) -> str:
         return (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
-            f"<style>body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
+            f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
             f"</head><body>{pretty}</body></html>"
         )
     if atype == "svg":
@@ -141,8 +152,8 @@ def render_share_html(artifact, content: str) -> str:
         return (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{_SHARE_DOC_CSP}\">"
-            f"<style>html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
+            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
+            f"<style nonce=\"{nonce}\">html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
             f"</head><body>"
             f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
             f"</body></html>"
@@ -151,7 +162,7 @@ def render_share_html(artifact, content: str) -> str:
     return (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<title>{title}</title>"
-        f"<style>body{{font-family:monospace;white-space:pre-wrap;"
+        f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre-wrap;"
         f"padding:1rem;overflow:auto}}</style>"
         f"</head><body>{escaped}</body></html>"
     )

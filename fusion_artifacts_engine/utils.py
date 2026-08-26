@@ -71,6 +71,24 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+class LogSanitizerFilter(logging.Filter):
+    # LOW-3/CWE-117: 日志注入防护。用户输入可能含 \n / \r，未过滤可在控制台/文本日志
+    # 伪造新行（如 artifact name "ok\n[ERROR] fake"）。本过滤器把 msg 与各 args 中的
+    # CR/LF 替换为字面 \\r \\n，使注入文本留在同一日志行内。JSON 文件格式器对 \n 已
+    # 转义为字面两字符，本过滤器主要覆盖控制台文本格式器；两者并存无副作用。
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = record.msg.replace("\r", "\\r").replace("\n", "\\n")
+        if record.args:
+            record.args = tuple(
+                a.replace("\r", "\\r").replace("\n", "\\n")
+                if isinstance(a, str) else a
+                for a in (record.args if isinstance(record.args, tuple) else (record.args,))
+            )
+        return True
+
+
 def _resolve_log_dir() -> Path | None:
     # 运维3: 日志目录优先 env，其次 storage_root/logs，最后 ~/.fusion/artifacts/logs。
     env_dir = os.environ.get("FUSION_ARTIFACTS_LOG_DIR")
@@ -91,6 +109,8 @@ def setup_logging(level: int = logging.INFO) -> None:
     root.setLevel(level)
     for h in list(root.handlers):
         root.removeHandler(h)
+    # LOW-3/CWE-117: 全局日志注入过滤器，剥用户输入中的 CR/LF 防伪造日志行
+    root.addFilter(LogSanitizerFilter())
 
     console = logging.StreamHandler()
     console.setLevel(level)

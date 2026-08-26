@@ -4,26 +4,53 @@ import json
 import logging
 import os
 import queue
+import re
+import select
+import socket
 import threading
 import time
+import typing
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.metrics import get_metrics
+from fusion_artifacts_engine.models import ArtifactKind
 from fusion_artifacts_engine.rate_limiter import RateLimiter
 from fusion_artifacts_engine.rpc.errors import (
     BusinessRuleError,
     ConflictError,
     NotFoundError,
     NotImplementedError,
+    PermissionError,
     ResourceLimitError,
     RpcError,
 )
 from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
+
+# LOW-1: share_id 公开端点格式预校验。合法 share_id 形如 shr_<12 hex>（见 share.py）。
+# 非法格式直接 400，省掉一次 DB 往返，且不泄露「该 share 是否存在」。
+_SHARE_ID_RE = re.compile(r"^shr_[A-Za-z0-9]{12}$")
+
+# P1-3/H12: 每请求生成 uuid4 request ID，回写 X-Request-ID 响应头 + 绑入日志 extra，
+# 让运维从客户端回溯到服务端日志行。BaseHTTPRequestHandler 每请求新建 handler 实例，
+# 故 _request_id 天然 per-request，无需清理。
+_REQUEST_ID_HEADER = "X-Request-ID"
+
+
+class _RequestIdLogger(logging.LoggerAdapter):
+    # P1-3: 注入 request_id 到每条日志的 extra，格式器可引用 %(request_id)s。
+    def process(self, msg, kwargs):
+        rid = self.extra.get("request_id", "-") if self.extra else "-"
+        kwargs.setdefault("extra", {})
+        if "request_id" not in kwargs["extra"]:
+            kwargs["extra"]["request_id"] = rid
+        return msg, kwargs
+
 
 _MAX_BODY_SIZE = 10 * 1024 * 1024
 
@@ -34,6 +61,9 @@ _LARGE_BODY_THRESHOLD = 2 * 1024 * 1024
 _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
 _API_CSP = "default-src 'none'; frame-ancestors 'none'"
+
+# P1-7/M7: 合法 ArtifactKind 值集合，SSE kind_filter 校验用。非法 kind 拒绝连接。
+_VALID_ARTIFACT_KINDS = set(typing.get_args(ArtifactKind))
 
 
 def _parse_json_query(query: dict, key: str) -> dict | None:
@@ -56,11 +86,26 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     request_queue_size = 128
 
-    def __init__(self, server_address, handler_cls, max_workers: int = 64):
+    def __init__(self, server_address, handler_cls, max_workers: int = 64,
+                 sse_max_connections: int = 16):
         self._max_workers = max(1, int(max_workers))
         self._worker_sem = threading.BoundedSemaphore(self._max_workers)
         self._rejected_count = 0
         self._rate_limiter = RateLimiter()
+        # P2-1/F1/H3: SSE 独立并发信号量。SSE 握手成功后释放 _worker_sem 并占此信号量，
+        # 使 SSE 长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
+        # 0=不设独立上限（回退旧行为：SSE 继续占 worker 槽，不推荐）。
+        self._sse_max_connections = max(0, int(sse_max_connections))
+        self._sse_sem = (
+            threading.BoundedSemaphore(self._sse_max_connections)
+            if self._sse_max_connections > 0
+            else None
+        )
+        # P2-1: 记录已移交到 SSE 信号量的连接 id。socket 对象无 __dict__ 不能挂属性，
+        # 改用 server 级 set 跟踪；process_request_thread 见此 id 即跳过 _worker_sem 释放。
+        # 连接生命周期内 id 不复用；process_request_thread finally 必清理，防泄漏。
+        self._sse_handoffs: set[int] = set()
+        self._sse_handoffs_lock = threading.Lock()
         super().__init__(server_address, handler_cls)
 
     def process_request(self, request, client_address):
@@ -97,6 +142,14 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
+            # P2-1: SSE 握手已把本连接从 _worker_sem 移交到 _sse_sem，此处不可再释放
+            # _worker_sem（否则信号量计数溢出抛 ValueError）。socket 无 __dict__ 不能挂属性，
+            # 改查 server 级 _sse_handoffs set；命中即跳过释放并清理记录。
+            if self._sse_sem is not None:
+                with self._sse_handoffs_lock:
+                    if id(request) in self._sse_handoffs:
+                        self._sse_handoffs.discard(id(request))
+                        return
             self._worker_sem.release()
 
 
@@ -158,6 +211,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self):
+        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        self._request_id = uuid.uuid4().hex
+        self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_post()
             return
@@ -210,12 +266,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            logger.debug("RPC request: %s", request.get("method"))
+            self._log.debug("RPC request: %s", request.get("method"))
             method_name = request.get("method", "")
             timeout = self._timeout_for(method_name, length)
             if length >= _LARGE_BODY_THRESHOLD:
                 # R4: 大请求体重写入占写锁时间长，记日志便于运维定位全站写停摆窗口。
-                logger.warning(
+                self._log.warning(
                     "Large RPC body %d bytes for %s, timeout tier=%ds",
                     length,
                     method_name,
@@ -229,7 +285,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # H5: 协程排队超时（慢操作拖累全站）。返回 -32603 并标记 retryable，
             # 调用方可退避重试而非当致命错误。区分 R8 的业务错误码。
             errored = True
-            logger.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
+            self._log.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
             self._send_response(
                 200,
                 {
@@ -244,7 +300,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
         except Exception:
             errored = True
-            logger.exception("RPC error")
+            self._log.exception("RPC error")
             self._send_response(
                 200,
                 {
@@ -260,6 +316,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             metrics.dec_gauge("rpc_active_conns")
 
     def do_GET(self):
+        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        self._request_id = uuid.uuid4().hex
+        self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
         # 运维5: /healthz（liveness）+ /readyz（readiness）分离，无鉴权（K8s probe 标配）
         if self.path == "/healthz":
             self._handle_healthz()
@@ -314,9 +373,21 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not getattr(engine.config, "metrics_enabled", True):
             self._send_rest_response(404, {"error": "metrics disabled"})
             return
+        # LOW-4: 配置 metrics_token 时 /metrics 需 X-Metrics-Token 头匹配（常量时间比较）。
+        # 未配置则依赖 127.0.0.1 绑定；暴露 0.0.0.0 必须设值，防运维指标泄露。
+        expected_token = getattr(engine.config, "metrics_token", None)
+        if expected_token:
+            supplied = self.headers.get("X-Metrics-Token", "")
+            if not hmac.compare_digest(supplied, expected_token):
+                self._send_rest_response(401, {"error": "Unauthorized metrics access"})
+                return
         body = get_metrics().expose().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        # P1-3: 回写 request ID
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -337,6 +408,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 )
                 return
             share_id = path_parts[3]
+            # LOW-1: share_id 格式预校验。非法格式 400，省 DB 往返且不泄露存在性。
+            if not _SHARE_ID_RE.fullmatch(share_id):
+                self._send_rest_response(
+                    400, {"error": "Invalid share_id format", "code": -32602}
+                )
+                return
             result = engine.get_public_share(share_id)
             status = result.get("status")
             if status == "ok":
@@ -409,8 +486,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     },
                 )
             else:
-                page = int(query.get("page", ["1"])[0])
-                page_size = int(query.get("page_size", ["20"])[0])
+                try:
+                    page = int(query.get("page", ["1"])[0])
+                    page_size = int(query.get("page_size", ["20"])[0])
+                except ValueError:
+                    self._send_rest_response(400, {"error": "Invalid page or page_size"})
+                    return
                 sort = query.get("sort", ["updated_at"])[0]
                 artifacts, total = engine.list_all_artifacts(
                     filters=filters,
@@ -501,11 +582,42 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         kind_filter = query.get("kind", [None])[0]
+        # P1-7/M7: kind_filter 校验——非 None 时必须为合法 ArtifactKind，否则拒绝连接。
+        if kind_filter is not None and kind_filter not in _VALID_ARTIFACT_KINDS:
+            self._log.warning(
+                "SSE rejected invalid kind_filter=%s (allowed: %s)",
+                kind_filter, sorted(_VALID_ARTIFACT_KINDS),
+            )
+            self._send_rest_response(400, {"error": f"Invalid kind: {kind_filter}"})
+            return
+        # P2-1/F1/H3: SSE 独立并发信号量。握手前先占专用槽；占不到即 503 拒绝，
+        # 不让 SSE 客户端把 RPC worker 池吃光。占成功后释放 _worker_sem 把 RPC 槽还回，
+        # 并打 handoff 标志——process_request_thread 见此标志不再 release _worker_sem。
+        # sse_max_connections==0（_sse_sem 为 None）= 回退旧行为，SSE 继续占 worker 槽。
+        sse_sem = self.server._sse_sem
+        sse_handoff = False
+        if sse_sem is not None:
+            if not sse_sem.acquire(timeout=0.01):
+                self._log.warning(
+                    "SSE rejected: SSE connection cap reached (max=%d)",
+                    self.server._sse_max_connections,
+                )
+                self._send_rest_response(503, {"error": "SSE connection limit reached"})
+                return
+            sse_handoff = True
+            self.server._worker_sem.release()
+            # socket 无 __dict__，用 server 级 set 记录已移交连接 id（见 process_request_thread）
+            with self.server._sse_handoffs_lock:
+                self.server._sse_handoffs.add(id(self.request))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
+        # P1-3: 回写 request ID，SSE 客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.end_headers()
 
         watcher_id = f"sse_{id(self)}"
@@ -513,14 +625,51 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
         sub = engine.event_bus.subscribe()
         heartbeat_interval = engine.config.sse_heartbeat_interval
+        # P1-7/M7: 单连接最大存活。0=不限；超时主动关流促客户端重连，防僵尸长连接占线程。
+        max_lifetime = max(0, getattr(engine.config, "sse_max_lifetime", 0))
 
-        logger.info(
-            "SSE connected: watcher=%s kind_filter=%s", watcher_id, kind_filter
+        self._log.info(
+            "SSE connected: watcher=%s kind_filter=%s max_lifetime=%s",
+            watcher_id, kind_filter, max_lifetime or "unlimited",
         )
+        deadline = time.monotonic() + max_lifetime if max_lifetime > 0 else None
         try:
             while True:
+                # P1-7: 到达存活上限主动关流
+                if deadline is not None and time.monotonic() >= deadline:
+                    self._log.info(
+                        "SSE max_lifetime reached, closing watcher=%s", watcher_id
+                    )
+                    try:
+                        self.wfile.write(b"event: __max_lifetime__\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    break
+                # P2-1: 客户端断开检测。阻塞在 sub.get(heartbeat) 上时，客户端关流后
+                # 服务端最长等一个 heartbeat_interval（默认 30s）才在下次 write 失败时发现，
+                # 期间 _sse_sem 槽不归还——高频连断客户端可耗尽 16 槽。
+                # 故每次循环用 select 非阻塞探活：socket 可读且无数据=对端关连接(EOF)，立即 break。
+                # read fd 设超时上限 1s，使探活频率不低于每秒一次，槽归还延迟≤1s 而非 30s。
                 try:
-                    event = sub.get(timeout=heartbeat_interval)
+                    rready, _, _ = select.select(
+                        [self.request], [], [], min(1.0, heartbeat_interval)
+                    )
+                    if rready:
+                        # 可读但 recv 0 字节=EOF；>0 字节=客户端发了垃圾数据，也按断开处理
+                        try:
+                            if not self.request.recv(1, socket.MSG_PEEK):
+                                break
+                        except OSError:
+                            break
+                except (OSError, ValueError):
+                    break
+                try:
+                    # P1-7: 取事件时不超过到 deadline 的剩余时间，避免超期仍阻塞整段心跳间隔
+                    wait = heartbeat_interval
+                    if deadline is not None:
+                        wait = max(0.1, min(wait, deadline - time.monotonic()))
+                    event = sub.get(timeout=wait)
                     if event is None:
                         break
                     etype = event.get("event_type")
@@ -542,12 +691,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                         # E10: kind 缺失或被过滤时记日志，避免静默丢事件难排查。
                         # kind None 通常因 publish 时未传 kind 且 artifact 已删（回查取不到）。
                         if event.get("kind") is None:
-                            logger.warning(
+                            self._log.warning(
                                 "SSE event %s has no kind, dropped by filter=%s (watcher=%s)",
                                 etype, kind_filter, watcher_id,
                             )
                         continue
                     data = json.dumps(event)
+                    # F5: 单事件体积上限。超限丢弃（仅记日志），防大 payload 阻塞连接线程
+                    # + 客户端缓冲爆炸。0=不限（向后兼容）。
+                    max_event_bytes = max(
+                        0, getattr(engine.config, "sse_max_event_bytes", 0)
+                    )
+                    if max_event_bytes > 0 and len(data) > max_event_bytes:
+                        self._log.warning(
+                            "SSE event %s dropped: %d bytes > cap %d (watcher=%s)",
+                            etype, len(data), max_event_bytes, watcher_id,
+                        )
+                        continue
                     self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode())
                     self.wfile.flush()
                 except queue.Empty:
@@ -560,17 +720,28 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError):
                     break
                 except Exception:
-                    logger.exception("SSE loop error")
+                    self._log.exception("SSE loop error")
                     break
         finally:
             engine.event_bus.unsubscribe(sub)
-            logger.info("SSE disconnected: watcher=%s", watcher_id)
+            # P2-1: 归还 SSE 专用信号量槽（仅当握手时做了移交）
+            if sse_handoff and sse_sem is not None:
+                try:
+                    sse_sem.release()
+                except ValueError:
+                    # 防御：极端竞态下重复 release（不应发生），忽略而非崩溃
+                    self._log.warning("SSE sse_sem double-release guarded, watcher=%s", watcher_id)
+            self._log.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _send_rest_response(self, code: int, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
+        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -587,6 +758,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(503, {"error": exc.message, "code": exc.code, "retryable": True})
         elif isinstance(exc, BusinessRuleError):
             self._send_rest_response(422, {"error": exc.message, "code": exc.code})
+        elif isinstance(exc, PermissionError):
+            # P2-3/MEDIUM-4: IDOR 越权——403 Forbidden
+            self._send_rest_response(403, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, NotImplementedError):
             # 运维6: 占位方法下线——501 Not Implemented
             self._send_rest_response(501, {"error": exc.message, "code": exc.code})
@@ -625,9 +799,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def _run_async(self, coro, timeout: int | None = None):
         loop = self.server._async_loop
-        return asyncio.run_coroutine_threadsafe(coro, loop).result(
-            timeout=timeout or self._TIMEOUT_DEFAULT
-        )
+        # P1-9/M17: 捕获 future，超时后显式 cancel()，否则已提交任务在 event loop 里
+        # 孤儿般继续跑（占线程/内存/锁），超时只是放弃等待不放弃执行。
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        try:
+            return future.result(timeout=timeout or self._TIMEOUT_DEFAULT)
+        except TimeoutError:
+            cancelled = future.cancel()
+            logger.warning(
+                "async dispatch timed out (timeout=%ss), future cancel=%s",
+                timeout or self._TIMEOUT_DEFAULT, cancelled,
+            )
+            raise
 
     async def _handle(self, request: dict) -> dict:
         method = request.get("method", "")
@@ -635,6 +818,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = request.get("id")
         try:
             rpc_handler = self.server._rpc_handler
+            # P2-5/H12(trace): rpc.server.duration span 由 RPCHandler.dispatch 内部发出，
+            # 覆盖所有调用路径（server / REST / 直接调用）。此处不再重复包 span。
             result = await rpc_handler.dispatch(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except RpcError as e:
@@ -679,6 +864,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
+        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -727,8 +916,10 @@ class ArtifactRPCServer:
     def start(self) -> None:
         self._start_loop()
         max_workers = getattr(self.engine.config, "server_max_workers", 64)
+        sse_max = getattr(self.engine.config, "sse_max_connections", 16)
         self._server = _ThreadingHTTPServer(
-            (self.host, self.port), JSONRPCHandler, max_workers=max_workers
+            (self.host, self.port), JSONRPCHandler,
+            max_workers=max_workers, sse_max_connections=sse_max,
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop
@@ -742,8 +933,10 @@ class ArtifactRPCServer:
     def start_async(self) -> None:
         self._start_loop()
         max_workers = getattr(self.engine.config, "server_max_workers", 64)
+        sse_max = getattr(self.engine.config, "sse_max_connections", 16)
         self._server = _ThreadingHTTPServer(
-            (self.host, self.port), JSONRPCHandler, max_workers=max_workers
+            (self.host, self.port), JSONRPCHandler,
+            max_workers=max_workers, sse_max_connections=sse_max,
         )
         self._server._rpc_handler = self.rpc_handler
         self._server._async_loop = self._async_loop

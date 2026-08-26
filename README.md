@@ -30,6 +30,29 @@ fusion-artifacts-engine status
 
 ## Security (v0.3.11 audit hardening)
 
+**v0.5.0** is the enterprise-grade production release. It closes the full audit
+(§9 of the 2026-08-26 audit report) — all 10 P0 (released as v0.4.2-rc), 12 P1,
+8 P2, and all MEDIUM/LOW findings. No domain-behavior regression; 538 tests green,
+ruff clean. v0.5.0 headline remediation:
+
+- **P1 (12)**: rate-limit production defaults + `rps=0` startup WARN; share
+  `max_accesses` atomic CAS; per-request `X-Request-ID` (uuid4) + `LoggerAdapter`;
+  periodic WAL checkpoint + online backup script; list pagination bounds
+  (`page_size≤500`); `allow_no_auth` doc/impl alignment (fail-closed default);
+  SSE max-lifetime + `kind_filter` validation; `save_artifact_and_version`
+  two-phase write (tmp+rename); `future.cancel()` after request timeout;
+  `export_session` error message sanitization; `cluster_node_id` field deletion
+  + env-var override completion.
+- **P2 (8)**: SSE thread isolation (separate SSE concurrency from RPC worker pool);
+  RPC handler thread offload (all sync storage/engine calls via `asyncio.to_thread`);
+  IDOR owner-check (`caller_user_id` enforcement); chunked content I/O + SSE event
+  size cap; optional OTel tracing (`rpc.server.duration` + `db.storage.duration`);
+  incremental token counting (prefix-sum truncation, patch reuse); metadata function
+  indexes + keyset pagination; render.py coverage 63% → 88%.
+- **LOW (1..5)**: share_id format precheck; log-injection sanitization (CWE-117);
+  `/metrics` token auth; CSP nonce (CWE-79); LOW-2 documented-skip (runtime key
+  rotation).
+
 **v0.4.1** adds ops-integration test coverage on top of v0.4.0 — `tests/test_ops_integration.py`
 (9 live-server tests) covers the do_POST/do_GET paths the v0.4.0 unit tests exercised only at the
 handler level: JSON-RPC rate-limit `429` / `-32003` trigger, public-share rate-limit `429`,
@@ -169,7 +192,7 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.star` | artifact_id, starred | Star/unstar artifact |
 | `artifact.pin` | artifact_id, pinned, chat_id? | Pin/unpin artifact to chat |
 | `artifact.duplicate` | artifact_id | Duplicate artifact with new ID |
-| `artifact.list_all` | filters?, sort?, page?, page_size? | List all artifacts (cross-session) |
+| `artifact.list_all` | filters?, sort?, page?, page_size?, cursor? | List all artifacts (cross-session); response includes `next_cursor` for keyset pagination (only `updated_at`/`created_at` sort) |
 
 ### Recycle Bin Methods (P1)
 
@@ -332,8 +355,12 @@ GET /api/v1/artifacts?page=1&page_size=20&sort=updated_at  # List all artifacts 
 GET /api/v1/artifacts/{artifact_id}                  # Get artifact metadata
 GET /api/v1/artifacts/{artifact_id}/versions         # List artifact versions
 GET /api/v1/artifacts/{artifact_id}/versions/{num}   # Get a specific version's content
-GET /api/v1/share/{share_id}                         # Public share access (no auth; 410 Gone if revoked/expired/exhausted)
+GET /api/v1/share/{share_id}                         # Public share access (no auth; 400 if malformed share_id, 410 Gone if revoked/expired/exhausted, 404 if not found)
 ```
+
+`GET /api/v1/share/{share_id}` validates the `share_id` format (`shr_<12>`; LOW-1) before
+hitting the DB — a malformed id returns `400` immediately, and a valid-but-absent id returns
+`404` without leaking whether the share exists.
 
 Query parameters for `GET /api/v1/artifacts`:
 - `session_id` — scope list to a session; omitted → list all artifacts (paginated)
@@ -364,6 +391,7 @@ GET /readyz     # Readiness — 200 {"status":"ready","checks":{...}} / 503 {"st
                 #   checks: storage (SELECT 1 + content_dir exists), event_bus (not closed)
 GET /metrics    # Prometheus text exposition 0.0.4 — counters/gauge/histogram (运维2)
                 #   404 if metrics.enabled=false
+                #   401 if metrics.token set and X-Metrics-Token header missing/mismatched (LOW-4)
 ```
 
 `/healthz` always returns 200 if the process can answer — it never depends on storage or the
@@ -371,6 +399,12 @@ event bus, so a transiently-unready dependency does not trigger a K8s restart lo
 returns 503 when storage is unreachable or the EventBus is shut down, signalling "do not route
 traffic here yet". `/metrics` exposes `rpc_requests_total`, `rpc_error_total`, `rpc_active_conns`,
 and `rpc_request_latency_seconds` (histogram, fixed buckets) for scraping.
+
+**`/metrics` token (LOW-4)** — when `metrics.token` is set (env `FUSION_ARTIFACTS_METRICS_TOKEN`),
+`/metrics` requires an `X-Metrics-Token` request header matching it (constant-time compare); a
+missing or wrong header returns `401`. Empty/`""` (default) = no auth, relying on the `127.0.0.1`
+bind for isolation. **If you expose the port beyond localhost, you must set `metrics.token`** to
+prevent operational metrics leakage.
 
 ### SSE Events Stream (P4)
 
@@ -486,6 +520,64 @@ asyncio.run(main())
 - **Fail-closed auth**: rejects requests when no API key is configured unless `allow_no_auth=True`
 - **Optimistic locking**: concurrent update detection via `expected_content_hash`
 - **Path traversal protection**: export paths are sanitized
+- **Single-tenant boundary**: the engine binds `127.0.0.1` and authenticates by a single shared `X-API-Key`. There is **no per-user identity** — all callers sharing the key are treated as one trusted principal. Do **not** expose the port beyond the host. Multi-tenant deployments must front the engine with an auth proxy that injects a trusted `caller_user_id`.
+- **IDOR protection (v0.5.0)**: write ops and `artifact.get` enforce ownership when a `caller_user_id` is supplied in the RPC params. If `caller_user_id` is set and the artifact has an `owner_user_id`, they must match — otherwise `PermissionError` (`-32006`, HTTP `403`) is raised and the op is denied. When `caller_user_id` is omitted (single-tenant default) or the artifact has no owner set, the check is skipped for backward compatibility. Applies to: `artifact.get`, `artifact.get_content`, `artifact.update`, `artifact.patch`, `artifact.delete`, `artifact.version_rollback`. Ownership is assigned at creation via the optional `owner_user_id` / `ownership_type` (`free`/`project`/`cowork`) params on `artifact.create`.
+- **share_id format validation (LOW-1)**: the public `GET /api/v1/share/{share_id}` endpoint rejects malformed share IDs (`shr_<12>` format) with `400` before any DB lookup — saving a round-trip and not leaking share existence.
+- **CSP nonce, no `unsafe-inline` (LOW-5)**: rendered share HTML issues a one-time random `style-src 'nonce-<random>'` per render instead of `style-src 'unsafe-inline'`; the CSP header and every `<style>` tag share the same nonce, tightening the XSS surface on shared artifact previews.
+- **Log injection guard (LOW-3)**: a global `LogSanitizerFilter` strips CR/LF from log messages and `%s` args, so user input (e.g. artifact names) cannot forge fake log lines (CWE-117).
+
+## Backup & Restore (v0.4.2)
+
+The daemon runs in SQLite **WAL** mode. A background thread performs a periodic `PASSIVE` checkpoint (default every 300s) to bound `-wal` growth, and `close()` runs a final `TRUNCATE` checkpoint so a stopped instance leaves a clean `meta.db` with no outstanding WAL frames.
+
+**Online backup** — use `scripts/backup.sh` while the daemon is running (no lock, WAL-consistent snapshot):
+
+```bash
+# Default: ~/.fusion/artifacts -> ~/.fusion/artifacts-backup-<timestamp>
+./scripts/backup.sh
+
+# Custom destination
+./scripts/backup.sh /var/backups/artifacts-20260826
+
+# Override source storage root
+STORAGE_ROOT=/data/artifacts ./scripts/backup.sh /backup
+```
+
+The script snapshots `meta.db` via `sqlite3 .backup` (WAL-consistent, does not block reads/writes) and incrementally rsyncs `content/`. Requires `sqlite3` and `rsync` on PATH.
+
+**Restore** — stop the daemon, then copy the snapshot `meta.db` and `content/` back into the storage root:
+
+```bash
+./start.sh stop
+rsync -a /var/backups/artifacts-20260826/meta.db ~/.fusion/artifacts/
+rsync -a /var/backups/artifacts-20260826/content/ ~/.fusion/artifacts/content/
+./start.sh start
+```
+
+**Config** — tune the checkpoint interval via `wal_checkpoint_interval` (seconds; `0` disables the background thread, relying on SQLite's default 1000-page auto-checkpoint):
+
+```yaml
+storage:
+  wal_checkpoint_interval: 300   # env: FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL
+```
+
+**Metadata indexes (v0.5.0)** — `metadata_indexed_keys` lists high-frequency metadata filter field names. For each key, the engine creates a `json_extract(metadata, '$.<key>')` expression index so `metadata_filter` lookups hit the index instead of a full table scan. Keys must be safe identifiers (letters/underscore/digits); invalid keys are dropped. Empty list = no indexes (backward-compatible default).
+
+```yaml
+storage:
+  metadata_indexed_keys: ["language", "framework"]
+```
+
+**Keyset pagination (v0.5.0)** — `artifact.list_all` accepts an optional `cursor` (opaque, returned as `next_cursor` in the response). When supplied with `updated_at` or `created_at` sort, the engine uses a `WHERE (sort_col, id) < (cursor)` keyset query instead of `OFFSET`, avoiding the deep-page scan-and-discard cost. Other sort modes and invalid cursors fall back to OFFSET pagination.
+
+**Incremental token counting (v0.5.0)** — `auto_compact` and `patch_artifact` avoid redundant full-encoding of large content:
+- The compactor truncation loop computes per-line token counts once and walks a prefix sum, so each section boundary is evaluated in O(1) instead of re-joining and re-encoding the whole string (O(n²) previously). Intermediate "under budget?" checks are gated by a cheap `estimate_tokens` heuristic and only call the exact encoder on candidates.
+- `patch_artifact` reuses the persisted `version.token_count` for old/new content instead of re-counting (3 encodes → 1).
+- `auto_compact` runs compression + counting off the event loop via `asyncio.to_thread`, so 1MB+ content does not block other requests.
+
+**Chunked content I/O (v0.5.0)** — large version content (>10KB, stored on disk) is written and read in 1MB chunks instead of via `write_text`/`read_text`, which load the entire string into memory. This bounds peak I/O memory to the chunk size regardless of content size, preventing the 1.9–2.5GB OOM peak under 64 concurrent 10MB requests. Disk-full/ENOSPC during a chunked write maps to `ResourceLimitError` and cleans the partial file.
+
+**SSE event size cap (v0.5.0)** — `sse.max_event_bytes` bounds the serialized size of a single SSE event (default 256KB). Events exceeding the cap are dropped with a warning log instead of being written, so one large payload cannot block a connection thread or balloon client buffers. `0` disables the cap (backward-compatible). Env override: `FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES`.
 
 ## Configuration
 
@@ -523,7 +615,30 @@ metrics:                 # 运维2
 
 sse:
   heartbeat_interval: 30
+  max_lifetime: 3600        # v0.4.2: max seconds per SSE connection; 0=unlimited. Server closes stream after expiry (emits __max_lifetime__) to force client reconnect; prevents zombie long-lived connections holding worker threads
+  max_event_bytes: 262144   # v0.5.0: max serialized bytes per SSE event; oversized dropped + warned. 0=unlimited
+  max_connections: 16       # v0.5.0: SSE concurrency cap (separate from server.max_workers). On SSE handshake the connection releases its RPC worker slot and takes a slot from this dedicated semaphore; over-cap SSE gets 503. 0=legacy mode (SSE keeps worker slot, no separate cap; not recommended)
 ```
+
+**SSE thread isolation (v0.5.0)** — `sse.max_connections` separates SSE long-lived connections from the RPC worker pool. Previously an SSE connection held its `server_max_workers` slot for its entire lifetime, so 64 concurrent SSE clients exhausted all 64 RPC worker threads and every new RPC request got `503`. Now the SSE handshake acquires a slot from a dedicated `_sse_sem` (size `max_connections`, default 16) and **releases** the RPC worker slot back to the pool, so RPC stays available no matter how many SSE clients are connected. Client disconnect is detected within ~1s via a non-blocking socket probe (not waited out to the next heartbeat, which at the default 30s would delay slot release and let a connect/disconnect churn client exhaust the cap). `max_connections=0` falls back to the legacy single-pool behavior. Env override: `FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`.
+
+**RPC handler thread offload (v0.5.0)** — async RPC handlers previously called synchronous `engine`/`storage` methods directly (`self.engine.get_artifact`, `self.engine.storage.list_artifacts`, …). Each call ran on the single event loop and blocked every other request while it hit SQLite or the filesystem. Every synchronous storage/engine call in `rpc/methods.py` now runs via `await asyncio.to_thread(...)` on the default ThreadPoolExecutor, so the event loop only schedules — sqlite/file I/O no longer stalls it. `_publish` is async (its kind look-up read is offloaded too), so SSE event emission never blocks the loop. Async engine methods (`create_artifact`, `update_artifact`, …) were already non-blocking and are awaited directly. Verified by `tests/test_p2_2_to_thread_offload.py` (read/write offload + worker-thread execution + async publish).
+
+**OTel tracing (v0.5.0)** — optional OpenTelemetry integration emitting `rpc.server.duration` (per dispatch, attribute `rpc_method`) and `db.storage.duration` (per storage op, attribute `db_operation`) spans, so the causal chain RPC → SQLite is observable end-to-end. **Off by default** — this is a local-first single-tenant daemon, and OTel is an optional dependency, not a hard one. Three states:
+
+- `opentelemetry-api`/`opentelemetry-sdk` **not installed** → `tracing.span`/`traced` are pure no-ops (zero overhead, zero import error). Install via `pip install 'fusion-artifacts-engine[otel]'`.
+- installed + `tracing.enabled: false` (default) → no-op tracer.
+- installed + `tracing.enabled: true` → real tracer. Default exporter is `ConsoleSpanExporter` (sufficient for local single-node). For a collector backend, set `OTEL_EXPORTER_OTLP_ENDPOINT` and the OTel SDK auto-switches to OTLP — no code change needed.
+
+Config (in `default_config.yaml`, overridable via `~/.fusion/artifacts/config.yaml` or env `FUSION_ARTIFACTS_TRACING_ENABLED` / `FUSION_ARTIFACTS_TRACING_SERVICE_NAME`):
+
+```yaml
+tracing:
+  enabled: false                 # default off; set true to emit spans
+  service_name: "fusion-artifacts-engine"
+```
+
+`configure_tracing()` runs once at startup; `shutdown()` flushes the span processor on graceful exit. OTel context propagates across `asyncio.to_thread` via contextvars, so spans nest correctly even when storage calls are offloaded (P2-2). Verified by `tests/test_p2_5_otel_tracing.py` (no-op path + enabled rpc/db spans + error-span status + exception propagation + decorated write-path span).
 
 ## Architecture
 

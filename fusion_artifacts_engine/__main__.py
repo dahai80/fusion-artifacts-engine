@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 def _run_once(config, host, port) -> int:
     # P0-8: 单次 engine 运行，返回退出码。0=优雅退出，非 0=崩溃（watch loop 据此重启）。
+    # P2-5: 启动时按 config 配置 OTel tracing（可选；未装 SDK 或 enabled=false → no-op）。
+    import fusion_artifacts_engine.tracing as tracing
+
+    tracing.configure_tracing(config.tracing_enabled, config.tracing_service_name)
     engine = ArtifactEngine(config)
     server = ArtifactRPCServer(engine, host=host, port=port)
 
@@ -60,6 +64,10 @@ def _run_once(config, host, port) -> int:
         except Exception as e:  # noqa: BLE001
             logger.exception("error during shutdown: %s", e)
             code = 1
+        try:
+            tracing.shutdown()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("tracing shutdown: %s", e)
         logger.info("fusion-artifacts-engine stopped")
     if not graceful["yes"]:
         code = 1
@@ -100,6 +108,20 @@ def main():
             config.storage_root = Path(args.storage_root)
         host = args.host or config.server_host
         port = args.port or config.server_port
+
+        # P1-1/H4: 限流生产告警。rps==0 表示不限流——生产环境裸奔，启动显式 WARN。
+        # default_config.yaml 已设生产默认值（rps:200/burst:400，public_rps:50/burst:100），
+        # 但用户自定义配置或测试环境可能回退 0，此处兜底告警。
+        if config.rate_limit_rps == 0:
+            logger.warning(
+                "rate_limit.rps=0 (unlimited) — JSON-RPC/REST endpoints unthrottled; "
+                "set rate_limit.rps>0 in production"
+            )
+        if config.public_rate_limit_rps == 0:
+            logger.warning(
+                "rate_limit.public_rps=0 (unlimited) — public share endpoints unthrottled; "
+                "set rate_limit.public_rps>0 in production"
+            )
 
         # P0-8: watch loop 包裹单次 run。--watch 时 engine 退出码非 0 则 backoff 后重启。
         # 退出码 0（优雅 stop）跳出循环。单次 run 内含信号注册与 stop_event 逻辑。
