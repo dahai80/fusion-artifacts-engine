@@ -1,0 +1,49 @@
+name: Release
+
+# Auto-create GitHub Release on version tag push.
+# Prevents the Releases page from lagging behind the code:
+# a pushed git tag does NOT appear on the Releases tab by itself.
+# Trigger: any tag matching v* (e.g. v0.5.0, v0.4.2-rc).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # rc/pre-release tags skip the "latest" flag
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine release flags
+        id: flags
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # rc / beta / alpha → pre-release, not latest
+          if echo "$TAG" | grep -Eq 'rc|beta|alpha'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.flags.outputs.tag }}
+          IS_PRERELEASE: ${{ steps.flags.outputs.prerelease }}
+          IS_LATEST: ${{ steps.flags.outputs.latest }}
+        run: |
+          ARGS=("$TAG" --generate-notes)
+          [ "$IS_PRERELEASE" = "true" ] && ARGS+=(--prerelease)
+          [ "$IS_LATEST" = "true" ] && ARGS+=(--latest)
+          gh release create "${ARGS[@]}"
