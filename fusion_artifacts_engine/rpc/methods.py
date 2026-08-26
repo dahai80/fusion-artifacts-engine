@@ -4,7 +4,12 @@ from pathlib import Path
 from typing import Any
 
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.rpc.errors import NotFoundError, NotImplementedError, RpcError
+from fusion_artifacts_engine.rpc.errors import (
+    NotFoundError,
+    NotImplementedError,
+    PermissionError,
+    RpcError,
+)
 from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
@@ -40,6 +45,28 @@ class RPCHandler:
         payload = {"event_type": event_type, "kind": kind}
         payload.update(extra)
         self.engine.event_bus.publish(event_type, payload)
+
+    def _enforce_owner(self, params: dict, artifact) -> None:
+        # P2-3/MEDIUM-4: IDOR 防护。写操作 + get 校验调用方身份归属。
+        # 单租户默认不传 caller_user_id（None）→ 跳过，保持向后兼容。
+        # 多租户部署按请求注入 caller_user_id，与产物 owner_user_id 不符即 PermissionError(-32006)。
+        # 任一为 None 时不校验（未设置所有权或未注入身份均放行，避免误伤单租户默认）。
+        caller = params.get("caller_user_id")
+        if not caller:
+            return
+        if artifact is None:
+            return
+        owner = getattr(artifact, "owner_user_id", None)
+        if owner is None:
+            return
+        if caller != owner:
+            logger.warning(
+                "IDOR denied: caller=%s owner=%s artifact_id=%s",
+                caller, owner, getattr(artifact, "id", "?"),
+            )
+            raise PermissionError(
+                f"Permission denied: caller {caller} is not owner of artifact"
+            )
 
     def _build_methods(self) -> dict:
         return {
@@ -130,6 +157,9 @@ class RPCHandler:
             kind=kind,
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
+            # P2-3/MEDIUM-4: 创建时可注入 owner_user_id（多租户归属），默认 None=单租户
+            owner_user_id=params.get("owner_user_id"),
+            ownership_type=params.get("ownership_type"),
         )
         self._publish(
             "artifact.created", artifact.id, artifact_id=artifact.id, kind=artifact.kind
@@ -146,9 +176,17 @@ class RPCHandler:
         )
         if artifact is None:
             raise NotFoundError(f"Artifact not found: {params['artifact_id']}")
+        # P2-3/MEDIUM-4: IDOR——读取也校验归属（多租户注入 caller_user_id 时生效）
+        self._enforce_owner(params, artifact)
         return {"artifact": artifact.model_dump()}
 
     async def _get_content(self, params: dict) -> dict:
+        # P2-3/MEDIUM-4: IDOR——取内容前先取 artifact 校验归属（多租户注入 caller_user_id 时生效）
+        if params.get("caller_user_id"):
+            art = await asyncio.to_thread(
+                self.engine.storage.get_artifact, params["artifact_id"]
+            )
+            self._enforce_owner(params, art)
         version = params.get("version")
         if isinstance(version, str) and version != "latest":
             try:
@@ -180,6 +218,8 @@ class RPCHandler:
         # L-3: 删除前缓存 kind，硬删后 get_artifact 返回 None 导致 kind-filter SSE 丢事件
         pre_artifact = self.engine.storage.get_artifact(aid)
         pre_kind = pre_artifact.kind if pre_artifact is not None else None
+        # P2-3/MEDIUM-4: IDOR——删除前校验归属（多租户注入 caller_user_id 时生效）
+        self._enforce_owner(params, pre_artifact)
         ok = self.engine.delete_artifact(
             aid,
             params.get("soft_delete", True),
@@ -203,6 +243,8 @@ class RPCHandler:
         pre = await asyncio.to_thread(
             self.engine.storage.get_artifact, params["artifact_id"]
         )
+        # P2-3/MEDIUM-4: IDOR——更新前校验归属（多租户注入 caller_user_id 时生效）
+        self._enforce_owner(params, pre)
         version, ref_text = await self.engine.create_version(
             params["artifact_id"],
             params["content"],
@@ -228,6 +270,12 @@ class RPCHandler:
         return {"versions": [v.model_dump() for v in versions]}
 
     async def _version_rollback(self, params: dict) -> dict:
+        # P2-3/MEDIUM-4: IDOR——回滚前校验归属（多租户注入 caller_user_id 时生效）
+        if params.get("caller_user_id"):
+            art = await asyncio.to_thread(
+                self.engine.storage.get_artifact, params["artifact_id"]
+            )
+            self._enforce_owner(params, art)
         version, ref_text = await self.engine.rollback_version(
             params["artifact_id"], params["target_version"]
         )
@@ -671,6 +719,8 @@ class RPCHandler:
         pre = await asyncio.to_thread(
             self.engine.storage.get_artifact, params["artifact_id"]
         )
+        # P2-3/MEDIUM-4: IDOR——补丁前校验归属（多租户注入 caller_user_id 时生效）
+        self._enforce_owner(params, pre)
         version, patch_info = await self.engine.patch_artifact(
             artifact_id=params["artifact_id"],
             operation=operation,

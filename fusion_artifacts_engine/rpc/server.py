@@ -21,6 +21,7 @@ from fusion_artifacts_engine.rpc.errors import (
     ConflictError,
     NotFoundError,
     NotImplementedError,
+    PermissionError,
     ResourceLimitError,
     RpcError,
 )
@@ -658,6 +659,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(503, {"error": exc.message, "code": exc.code, "retryable": True})
         elif isinstance(exc, BusinessRuleError):
             self._send_rest_response(422, {"error": exc.message, "code": exc.code})
+        elif isinstance(exc, PermissionError):
+            # P2-3/MEDIUM-4: IDOR 越权——403 Forbidden
+            self._send_rest_response(403, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, NotImplementedError):
             # 运维6: 占位方法下线——501 Not Implemented
             self._send_rest_response(501, {"error": exc.message, "code": exc.code})

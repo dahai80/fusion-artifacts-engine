@@ -139,6 +139,7 @@ class ArtifactEngine:
         kind: str | None = None,
         project_id: str | None = None,
         metadata: dict | None = None,
+        owner_user_id: str | None = None, ownership_type: str | None = None,
     ) -> tuple[Artifact, ArtifactVersion, str]:
         artifact_id = generate_artifact_id(self.config.artifact_id_prefix)
         now = time.time()
@@ -153,11 +154,10 @@ class ArtifactEngine:
             type=artifact_type,
             kind=kind,
             project_id=project_id,
-            metadata=metadata,
-            current_version=1,
+            metadata=metadata, current_version=1,
             summary=summary,
-            created_at=now,
-            updated_at=now,
+            created_at=now, updated_at=now,
+            owner_user_id=owner_user_id, ownership_type=ownership_type if ownership_type is not None else "free",
         )
         size = _size_bytes(content)
         sections = extract_sections(content, artifact_type)

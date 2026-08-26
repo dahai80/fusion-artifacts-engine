@@ -398,6 +398,8 @@ asyncio.run(main())
 - **Fail-closed 认证**：未配置 API Key 时拒绝请求，除非 `allow_no_auth=True`
 - **乐观锁**：通过 `expected_content_hash` 检测并发更新
 - **路径穿越防护**：导出路径经过清洗
+- **单租户边界**：引擎绑定 `127.0.0.1`，以单一共享 `X-API-Key` 认证，**无逐用户身份**——共享同一 Key 的所有调用方视为同一可信主体。**不要**将端口暴露到主机之外。多租户部署须在引擎前置认证代理，由其注入可信的 `caller_user_id`。
+- **IDOR 防护 (v0.5.0)**：当 RPC 参数中传入 `caller_user_id` 时，写操作与 `artifact.get` 强制校验归属。若设置了 `caller_user_id` 且产物有 `owner_user_id`，二者必须一致，否则抛出 `PermissionError`（`-32006`，HTTP `403`）并拒绝操作。当省略 `caller_user_id`（单租户默认）或产物未设置归属时，跳过校验以保持向后兼容。覆盖方法：`artifact.get`、`artifact.get_content`、`artifact.update`、`artifact.patch`、`artifact.delete`、`artifact.version_rollback`。归属在创建时通过 `artifact.create` 的可选参数 `owner_user_id` / `ownership_type`（`free`/`project`/`cowork`）设定。
 
 ## 备份与恢复 (v0.4.2)
 

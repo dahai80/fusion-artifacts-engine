@@ -486,6 +486,8 @@ asyncio.run(main())
 - **Fail-closed auth**: rejects requests when no API key is configured unless `allow_no_auth=True`
 - **Optimistic locking**: concurrent update detection via `expected_content_hash`
 - **Path traversal protection**: export paths are sanitized
+- **Single-tenant boundary**: the engine binds `127.0.0.1` and authenticates by a single shared `X-API-Key`. There is **no per-user identity** — all callers sharing the key are treated as one trusted principal. Do **not** expose the port beyond the host. Multi-tenant deployments must front the engine with an auth proxy that injects a trusted `caller_user_id`.
+- **IDOR protection (v0.5.0)**: write ops and `artifact.get` enforce ownership when a `caller_user_id` is supplied in the RPC params. If `caller_user_id` is set and the artifact has an `owner_user_id`, they must match — otherwise `PermissionError` (`-32006`, HTTP `403`) is raised and the op is denied. When `caller_user_id` is omitted (single-tenant default) or the artifact has no owner set, the check is skipped for backward compatibility. Applies to: `artifact.get`, `artifact.get_content`, `artifact.update`, `artifact.patch`, `artifact.delete`, `artifact.version_rollback`. Ownership is assigned at creation via the optional `owner_user_id` / `ownership_type` (`free`/`project`/`cowork`) params on `artifact.create`.
 
 ## Backup & Restore (v0.4.2)
 
