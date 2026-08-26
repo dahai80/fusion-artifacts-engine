@@ -533,6 +533,11 @@ storage:
 
 **Keyset pagination (v0.5.0)** — `artifact.list_all` accepts an optional `cursor` (opaque, returned as `next_cursor` in the response). When supplied with `updated_at` or `created_at` sort, the engine uses a `WHERE (sort_col, id) < (cursor)` keyset query instead of `OFFSET`, avoiding the deep-page scan-and-discard cost. Other sort modes and invalid cursors fall back to OFFSET pagination.
 
+**Incremental token counting (v0.5.0)** — `auto_compact` and `patch_artifact` avoid redundant full-encoding of large content:
+- The compactor truncation loop computes per-line token counts once and walks a prefix sum, so each section boundary is evaluated in O(1) instead of re-joining and re-encoding the whole string (O(n²) previously). Intermediate "under budget?" checks are gated by a cheap `estimate_tokens` heuristic and only call the exact encoder on candidates.
+- `patch_artifact` reuses the persisted `version.token_count` for old/new content instead of re-counting (3 encodes → 1).
+- `auto_compact` runs compression + counting off the event loop via `asyncio.to_thread`, so 1MB+ content does not block other requests.
+
 ## Configuration
 
 ```yaml

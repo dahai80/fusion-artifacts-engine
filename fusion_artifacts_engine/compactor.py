@@ -1,7 +1,7 @@
 import logging
 import re
 
-from fusion_artifacts_engine.token_counter import count_tokens
+from fusion_artifacts_engine.token_counter import count_tokens, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -16,19 +16,26 @@ def compact_content(content: str, artifact_type: str, token_budget: int) -> str:
 
     result = content
     result = _remove_comments(result, artifact_type)
-    if count_tokens(result) <= token_budget:
+    if estimate_tokens(result) <= token_budget and count_tokens(result) <= token_budget:
         return result
 
     result = _collapse_blank_lines(result)
-    if count_tokens(result) <= token_budget:
+    if estimate_tokens(result) <= token_budget and count_tokens(result) <= token_budget:
         return result
 
     result = _remove_decorators(result, artifact_type)
-    if count_tokens(result) <= token_budget:
+    if estimate_tokens(result) <= token_budget and count_tokens(result) <= token_budget:
         return result
 
     result = _truncate_sections(result, artifact_type, token_budget)
     return result
+
+
+def compact_and_count(content: str, artifact_type: str, token_budget: int) -> tuple[str, int]:
+    # F3: 压缩 + 精确计数合并，供 engine 卸线程池；压缩结果与 token 数一次返回，
+    # 避免 engine 再 count_tokens(compacted_content) 二次全量编码
+    compacted = compact_content(content, artifact_type, token_budget)
+    return compacted, count_tokens(compacted)
 
 
 def _remove_comments(content: str, artifact_type: str) -> str:
@@ -123,24 +130,35 @@ def _truncate_sections(content: str, artifact_type: str, token_budget: int) -> s
             sections.append({"start": i, "anchor": anchor, "level": level})
         i += 1
 
+    # F3: 按行增量计 token + 前缀和，避免每个 section 边界重新 join+全量编码（O(n²)）。
+    # 仅在此函数内对每行编码一次；最终返回前用 count_tokens 对拼接结果做一次精确校验。
+    line_tokens = [count_tokens(line) for line in lines]
+    prefix = [0] * (len(lines) + 1)
+    for idx, t in enumerate(line_tokens):
+        prefix[idx + 1] = prefix[idx] + t
+
     if not sections:
-        truncated = "\n".join(lines)
-        # P-7: 复用 token 计数，避免回退路径两次全量 tiktoken encode
-        total = count_tokens(truncated)
+        total = prefix[len(lines)]
         if total <= token_budget:
-            return truncated
+            return "\n".join(lines)
         ratio = token_budget / max(1, total)
         cut = int(len(lines) * ratio)
+        candidate = "\n".join(lines[:cut])
+        if count_tokens(candidate) <= token_budget:
+            return candidate
+        while cut > 0 and count_tokens("\n".join(lines[:cut])) > token_budget:
+            cut -= 1
         return "\n".join(lines[:cut])
 
     sections.reverse()
     for sec in sections:
-        current = "\n".join(lines[: sec["start"]])
-        if count_tokens(current) <= token_budget:
-            logger.info(
-                "Truncated sections from anchor='%s' to meet budget=%d",
-                sec["anchor"],
-                token_budget,
-            )
-            return current
+        if prefix[sec["start"]] <= token_budget:
+            current = "\n".join(lines[: sec["start"]])
+            if count_tokens(current) <= token_budget:
+                logger.info(
+                    "Truncated sections from anchor='%s' to meet budget=%d",
+                    sec["anchor"],
+                    token_budget,
+                )
+                return current
     return "\n".join(lines[:1]) if lines else ""

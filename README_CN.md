@@ -445,6 +445,11 @@ storage:
 
 **游标分页 (v0.5.0)** —— `artifact.list_all` 接受可选 `cursor`（不透明，响应中以 `next_cursor` 返回）。配合 `updated_at` 或 `created_at` 排序时，引擎用 `WHERE (sort_col, id) < (cursor)` 游标查询替代 `OFFSET`，避免深分页扫+丢行的开销。其他排序或非法游标回退 OFFSET 分页。
 
+**增量 token 计数 (v0.5.0)** —— `auto_compact` 与 `patch_artifact` 避免对大内容重复全量编码：
+- 压缩器截断循环对每行 token 数只计一次，用前缀和遍历，每个 section 边界 O(1) 判定，不再每次重新拼接+全量编码（原先 O(n²)）。中间"是否已达预算"的判断先用廉价 `estimate_tokens` 估算门控，仅对候选结果调用精确编码器。
+- `patch_artifact` 复用已持久化的 `version.token_count` 作为新旧内容 token 数，不再重新计数（3 次编码 → 1 次）。
+- `auto_compact` 通过 `asyncio.to_thread` 把压缩+计数卸出事件循环，1MB+ 内容不阻塞其他请求。
+
 ## 配置
 
 ```yaml
