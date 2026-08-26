@@ -616,6 +616,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                             )
                         continue
                     data = json.dumps(event)
+                    # F5: 单事件体积上限。超限丢弃（仅记日志），防大 payload 阻塞连接线程
+                    # + 客户端缓冲爆炸。0=不限（向后兼容）。
+                    max_event_bytes = max(
+                        0, getattr(engine.config, "sse_max_event_bytes", 0)
+                    )
+                    if max_event_bytes > 0 and len(data) > max_event_bytes:
+                        self._log.warning(
+                            "SSE event %s dropped: %d bytes > cap %d (watcher=%s)",
+                            etype, len(data), max_event_bytes, watcher_id,
+                        )
+                        continue
                     self.wfile.write(f"event: artifact\ndata: {data}\n\n".encode())
                     self.wfile.flush()
                 except queue.Empty:

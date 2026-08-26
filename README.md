@@ -538,6 +538,10 @@ storage:
 - `patch_artifact` reuses the persisted `version.token_count` for old/new content instead of re-counting (3 encodes → 1).
 - `auto_compact` runs compression + counting off the event loop via `asyncio.to_thread`, so 1MB+ content does not block other requests.
 
+**Chunked content I/O (v0.5.0)** — large version content (>10KB, stored on disk) is written and read in 1MB chunks instead of via `write_text`/`read_text`, which load the entire string into memory. This bounds peak I/O memory to the chunk size regardless of content size, preventing the 1.9–2.5GB OOM peak under 64 concurrent 10MB requests. Disk-full/ENOSPC during a chunked write maps to `ResourceLimitError` and cleans the partial file.
+
+**SSE event size cap (v0.5.0)** — `sse.max_event_bytes` bounds the serialized size of a single SSE event (default 256KB). Events exceeding the cap are dropped with a warning log instead of being written, so one large payload cannot block a connection thread or balloon client buffers. `0` disables the cap (backward-compatible). Env override: `FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES`.
+
 ## Configuration
 
 ```yaml
@@ -575,6 +579,7 @@ metrics:                 # 运维2
 sse:
   heartbeat_interval: 30
   max_lifetime: 3600        # v0.4.2: max seconds per SSE connection; 0=unlimited. Server closes stream after expiry (emits __max_lifetime__) to force client reconnect; prevents zombie long-lived connections holding worker threads
+  max_event_bytes: 262144   # v0.5.0: max serialized bytes per SSE event; oversized dropped + warned. 0=unlimited
 ```
 
 ## Architecture

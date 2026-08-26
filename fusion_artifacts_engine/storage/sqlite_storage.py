@@ -1,6 +1,7 @@
 import errno
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -129,6 +130,45 @@ def _decode_cursor(cursor: str) -> tuple[float | None, str]:
 def _encode_cursor(col_val: float, row_id: str) -> str:
     # P2-7/F6: 编码游标 "<float>:<id>"。RPC 层据结果末行构造，回传客户端做下次请求。
     return f"{col_val}:{row_id}"
+
+
+# F5: 大 content 分块读写。write_text/read_text 一次性 encode/decode 全文字符串，
+# 10MB content 会在内存中再翻倍（str + bytes）。分块以 1MB 为单位 encode/decode +
+# 流式写盘，避免单次 I/O 占用 = content 大小的临时内存。
+_CHUNK_IO_BYTES = 1024 * 1024
+
+
+def _write_text_chunked(path, content: str) -> None:
+    encoded = content.encode("utf-8")
+    try:
+        with open(path, "wb") as f:
+            for off in range(0, len(encoded), _CHUNK_IO_BYTES):
+                f.write(encoded[off:off + _CHUNK_IO_BYTES])
+    except OSError as e:
+        # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):
+            logger.error("disk full writing content file %s: %s", path, e)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise ResourceLimitError(f"disk full writing content: {e}") from e
+        raise
+
+
+def _read_text_chunked(path) -> str:
+    chunks = []
+    try:
+        with open(path, "rb") as f:
+            while True:
+                block = f.read(_CHUNK_IO_BYTES)
+                if not block:
+                    break
+                chunks.append(block)
+    except OSError as e:
+        logger.error("Failed reading content file %s: %s", path, e)
+        raise
+    return b"".join(chunks).decode("utf-8")
 
 
 from fusion_artifacts_engine.storage.base import StorageDriver
@@ -480,14 +520,7 @@ class SQLiteStorage(StorageDriver):
                 "Refusing content write outside content_dir: %s (ext=%s)", path, ext
             )
             raise ValueError(f"Unsafe content path: {path}")
-        try:
-            path.write_text(content, encoding="utf-8")
-        except OSError as e:
-            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级），而非 -32603。
-            if e.errno in (errno.ENOSPC, errno.EDQUOT):
-                logger.error("disk full writing content file %s: %s", path, e)
-                raise ResourceLimitError(f"disk full writing content: {e}") from e
-            raise
+        _write_text_chunked(path, content)
         logger.debug("Wrote content file: %s", path)
         return str(path)
 
@@ -503,14 +536,7 @@ class SQLiteStorage(StorageDriver):
         if not tmp_path.resolve().is_relative_to(d.resolve()):
             logger.error("Refusing tmp content write outside content_dir: %s", tmp_path)
             raise ValueError(f"Unsafe content path: {tmp_path}")
-        try:
-            tmp_path.write_text(content, encoding="utf-8")
-        except OSError as e:
-            # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
-            if e.errno in (errno.ENOSPC, errno.EDQUOT):
-                logger.error("disk full writing tmp content file %s: %s", tmp_path, e)
-                raise ResourceLimitError(f"disk full writing content: {e}") from e
-            raise
+        _write_text_chunked(tmp_path, content)
         logger.debug("Wrote tmp content file: %s", tmp_path)
         return str(tmp_path), f"v{{version_num}}.{ext}", ext
 
@@ -518,7 +544,7 @@ class SQLiteStorage(StorageDriver):
     def _read_content_file(self, content_path: str) -> str:
         p = Path(content_path)
         if p.exists():
-            return p.read_text(encoding="utf-8")
+            return _read_text_chunked(p)
         logger.error("Content file missing: %s", content_path)
         raise FileNotFoundError(f"Content file missing: {content_path}")
 

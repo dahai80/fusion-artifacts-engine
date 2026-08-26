@@ -90,6 +90,7 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         "sse": {
             "heartbeat_interval": ("sse_heartbeat_interval", None),
             "max_lifetime": ("sse_max_lifetime", None),
+            "max_event_bytes": ("sse_max_event_bytes", None),
         },
         "rate_limit": {
             "rps": ("rate_limit_rps", None),
@@ -145,6 +146,7 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         # P1-4: WAL checkpoint 间隔 env 覆盖
         "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
         "FUSION_ARTIFACTS_SSE_MAX_LIFETIME": ("sse_max_lifetime", int),
+        "FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES": ("sse_max_event_bytes", int),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -191,6 +193,9 @@ class ArtifactEngineConfig(BaseModel):
     # P1-7/M7: SSE 单连接最大存活秒。0=不限。超时后服务端主动关流促客户端重连，
     # 防僵尸长连接占线程。生产建议 3600（1h），客户端应实现自动重连。
     sse_max_lifetime: int = Field(default=3600)
+    # F5: SSE 单事件序列化后字节上限。超限事件被丢弃（仅记日志），防大 payload
+    # 长时间阻塞单连接线程 + 客户端缓冲爆炸。0=不限（向后兼容）。
+    sse_max_event_bytes: int = Field(default=262144)
     context_budget_default: int = Field(default=200000)
     # C-1: sync_artifact_file 文件读写根目录，路径必须在其下
     sync_root: Path | None = Field(default=None)

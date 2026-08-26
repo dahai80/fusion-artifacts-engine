@@ -450,6 +450,10 @@ storage:
 - `patch_artifact` 复用已持久化的 `version.token_count` 作为新旧内容 token 数，不再重新计数（3 次编码 → 1 次）。
 - `auto_compact` 通过 `asyncio.to_thread` 把压缩+计数卸出事件循环，1MB+ 内容不阻塞其他请求。
 
+**内容分块读写 (v0.5.0)** —— 大版本内容（>10KB，落盘存储）以 1MB 分块读写，替代原先一次性 `write_text`/`read_text` 全量加载字符串。无论内容多大，单次 I/O 峰值内存被约束在分块大小，避免 64 并发 10MB 请求下的 1.9–2.5GB OOM 峰值。分块写入遇到磁盘满（ENOSPC）映射为 `ResourceLimitError` 并清理半成品文件。
+
+**SSE 事件体积上限 (v0.5.0)** —— `sse.max_event_bytes` 限制单个 SSE 事件序列化后字节数（默认 256KB）。超限事件被丢弃并记日志，不写入流，防单个大 payload 阻塞连接线程或撑爆客户端缓冲。`0` 禁用上限（向后兼容）。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES`。
+
 ## 配置
 
 ```yaml
@@ -477,6 +481,7 @@ security:
 sse:
   heartbeat_interval: 30
   max_lifetime: 3600        # v0.4.2：单 SSE 连接最大存活秒；0=不限。到期服务端关流（发 __max_lifetime__）促客户端重连，防僵尸长连接占线程
+  max_event_bytes: 262144   # v0.5.0：单个 SSE 事件序列化后最大字节；超限丢弃+告警。0=不限
 ```
 
 ## 架构
