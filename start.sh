@@ -52,15 +52,34 @@ is_running() {
 }
 
 # Health = process alive AND JSON-RPC ping returns pong (stdlib urllib, no deps).
+# 健康探测带 X-API-Key：server 在 allow_no_auth=false 时对所有 JSON-RPC（含 ping）
+# 强制鉴权，无 key 的 ping 被 401 拒 → 误报 not running。key 来源与 server._is_authed
+# 一致：env FUSION_ARTIFACTS_API_KEY → config api_key。
 is_healthy() {
     is_running || return 1
     FAE_HOST="$HOST" FAE_PORT="$PORT" python3 - <<'PY' 2>/dev/null
 import os, sys, json, urllib.request
 host = os.environ.get("FAE_HOST", "127.0.0.1")
 port = os.environ.get("FAE_PORT", "11451")
+api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
+if not api_key:
+    # 回退读 config（~/.fusion/artifacts/config.yaml 或 env 指向的配置文件）
+    cfg_path = os.environ.get(
+        "FUSION_ARTIFACTS_CONFIG",
+        os.path.expanduser("~/.fusion/artifacts/config.yaml"),
+    )
+    try:
+        import yaml
+        with open(cfg_path) as fh:
+            cfg = yaml.safe_load(fh) or {}
+        api_key = (cfg.get("security") or {}).get("api_key", "") or ""
+    except Exception:
+        api_key = ""
+headers = {"Content-Type": "application/json"}
+if api_key:
+    headers["X-API-Key"] = api_key
 body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
-req = urllib.request.Request(f"http://{host}:{port}", data=body,
-                             headers={"Content-Type": "application/json"})
+req = urllib.request.Request(f"http://{host}:{port}", data=body, headers=headers)
 try:
     with urllib.request.urlopen(req, timeout=2.0) as r:
         data = json.loads(r.read().decode())
