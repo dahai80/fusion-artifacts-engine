@@ -28,6 +28,46 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
+## Container Deployment
+
+A `Dockerfile` is shipped for containerized deployment (used by the
+multi-node compose stack). The image runs the same stdlib HTTP server on
+port 11451 — no FastAPI/uvicorn — and persists all data to a `/data` volume.
+
+```bash
+# Build
+docker build -t fusion-artifacts-engine .
+
+# Run (persist artifacts to a named volume, bind 127.0.0.1 only)
+docker run -d --name fae \
+    -p 127.0.0.1:11451:11451 \
+    -v fae-data:/data \
+    -e FUSION_ARTIFACTS_API_KEY="$API_KEY" \
+    fusion-artifacts-engine
+
+# Healthcheck (liveness, no auth)
+curl -sf http://127.0.0.1:11451/healthz && echo OK
+
+# Authenticated JSON-RPC ping
+curl -s http://127.0.0.1:11451 \
+    -H "Content-Type: application/json" \
+    -H "X-API-Key: $API_KEY" \
+    -d '{"jsonrpc":"2.0","method":"ping","id":1}'
+```
+
+Notes:
+
+- Image base: `python:3.12-slim`; installs `.[otel]` (no test/ruff extras).
+  Approx. 262 MB built.
+- The engine does **not** call MLX inference, so no `FUSION_MLX_URL` is set.
+  Callers needing MLX carry their own client env.
+- Auth is fail-closed by default. Set `FUSION_ARTIFACTS_API_KEY` (env, shown
+  above) or mount a config file with `security.api_key`. The
+  `allow_no_auth` flag has no env override on purpose — set it in the config
+  file only if you understand the risk.
+- `HEALTHCHECK` probes `/healthz` (liveness, always 200, no auth).
+  Readiness is also available at `/readyz` (200 healthy / 503 not).
+
 ## Security (v0.3.11 audit hardening)
 
 **v0.5.0** is the enterprise-grade production release. It closes the full audit

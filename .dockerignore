@@ -1,0 +1,21 @@
+# 构建上下文排除 — 不进镜像, 减小上下文体积 + 避免覆盖污染
+.git
+.github
+.remember
+.codegraph
+logs/
+.venv/
+*.pyc
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.coverage
+.fusion-artifacts-engine.pid
+# 测试不进生产镜像
+tests/
+docs/
+audit/
+*.md
+!README.md
+# fusion-mlx 符号链接 (本仓不依赖)
+fusion-mlx
