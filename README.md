@@ -68,6 +68,28 @@ Notes:
 - `HEALTHCHECK` probes `/healthz` (liveness, always 200, no auth).
   Readiness is also available at `/readyz` (200 healthy / 503 not).
 
+## v0.5.1 — Patch Release
+
+**v0.5.1** is a patch over v0.5.0. It adds two SSE endpoints the fusion-studio
+bridge expects and hardens a few operational paths. No domain-behavior
+regression; 543 tests green, ruff clean.
+
+- **Scope-filtered SSE (#55)** — new endpoints
+  `GET /api/v1/artifacts/{artifact_id}/events` and
+  `GET /api/v1/sessions/{session_id}/events` let clients subscribe to a single
+  artifact or session. They share `/api/v1/events/stream`'s handler; events
+  whose `artifact_id` / `session_id` does not match are dropped server-side.
+  The `kind` query filter remains combinable. Previously these paths 404'd and
+  the studio client fell back to a local path.
+- **Container image (#53)** — shipped `Dockerfile` + `.dockerignore`
+  (`python:3.12-slim`, `.[otel]`, `/data` volume, `/healthz` HEALTHCHECK, ~262 MB).
+- **start.sh status auth (#52)** — the health `ping` now sends `X-API-Key` so
+  `status` no longer false-reports "not running" when auth is enforced.
+- **Auto-release CI (#51)** — pushing a `v*` tag now auto-creates the GitHub
+  Release with generated notes; prerelease/stable flag derived from the tag.
+- **README English-only (#50)** — `README.md` contains zero CJK; Chinese lives
+  in `README_CN.md`.
+
 ## Security (v0.3.11 audit hardening)
 
 **v0.5.0** is the enterprise-grade production release. It closes the full audit
