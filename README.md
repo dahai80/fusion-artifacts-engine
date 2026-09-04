@@ -461,6 +461,17 @@ Filter by artifact kind:
 curl -N "http://127.0.0.1:11451/api/v1/events/stream?kind=app"
 ```
 
+Scope to a single artifact or session (#55 — used by the fusion-studio bridge):
+```bash
+# Only events for one artifact (artifact.updated/deleted carry artifact_id)
+curl -N http://127.0.0.1:11451/api/v1/artifacts/{artifact_id}/events
+
+# Only events for one session (artifact.created carries session_id)
+curl -N http://127.0.0.1:11451/api/v1/sessions/{session_id}/events
+```
+The `kind` query filter may be combined with either scope path. Events whose
+`artifact_id` / `session_id` does not match are dropped server-side.
+
 ## Python SDK
 
 ```python

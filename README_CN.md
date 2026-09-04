@@ -337,6 +337,16 @@ curl -N http://127.0.0.1:11451/api/v1/events/stream
 curl -N "http://127.0.0.1:11451/api/v1/events/stream?kind=app"
 ```
 
+按单个产物或会话限定范围（#55 —— fusion-studio bridge 使用）：
+```bash
+# 仅订阅某产物的事件（artifact.updated/deleted 携带 artifact_id）
+curl -N http://127.0.0.1:11451/api/v1/artifacts/{artifact_id}/events
+
+# 仅订阅某会话的事件（artifact.created 携带 session_id）
+curl -N http://127.0.0.1:11451/api/v1/sessions/{session_id}/events
+```
+`kind` 查询过滤可与任一 scope 路径组合。`artifact_id` / `session_id` 不匹配的事件在服务端丢弃。
+
 ## Python SDK
 
 ```python

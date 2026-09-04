@@ -330,7 +330,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path == "/metrics":
             self._handle_metrics()
             return
-        if self.path.startswith("/api/v1/events/stream"):
+        # SSE 事件流。三种形态共用 _handle_sse：
+        #   /api/v1/events/stream[?kind=...]                 全局流
+        #   /api/v1/artifacts/{artifactId}/events[?kind=...] 按 artifact 过滤 (#55)
+        #   /api/v1/sessions/{sessionId}/events[?kind=...]   按 session 过滤 (#55)
+        # fusion-studio bridge artifactEventStream/sessionEventStream 调后两者。
+        parsed_get = urlparse(self.path)
+        gp = [p for p in parsed_get.path.split("/") if p]
+        if (
+            (len(gp) == 5 and gp[2] == "artifacts" and gp[4] == "events")
+            or (len(gp) == 5 and gp[2] == "sessions" and gp[4] == "events")
+            or self.path.startswith("/api/v1/events/stream")
+        ):
             self._handle_sse()
             return
         if self.path.startswith("/api/v1/"):
@@ -582,6 +593,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         kind_filter = query.get("kind", [None])[0]
+        # #55: 路径携带的 scope 过滤。
+        #   /api/v1/artifacts/{id}/events → artifact_id_filter
+        #   /api/v1/sessions/{id}/events  → session_id_filter
+        # 事件 payload 中 artifact_id/session_id 不匹配即丢弃（与 kind_filter 同一机制）。
+        sse_path_parts = [p for p in parsed.path.split("/") if p]
+        artifact_id_filter = None
+        session_id_filter = None
+        if len(sse_path_parts) == 5 and sse_path_parts[2] == "artifacts" and sse_path_parts[4] == "events":
+            artifact_id_filter = sse_path_parts[3]
+        elif len(sse_path_parts) == 5 and sse_path_parts[2] == "sessions" and sse_path_parts[4] == "events":
+            session_id_filter = sse_path_parts[3]
         # P1-7/M7: kind_filter 校验——非 None 时必须为合法 ArtifactKind，否则拒绝连接。
         if kind_filter is not None and kind_filter not in _VALID_ARTIFACT_KINDS:
             self._log.warning(
@@ -629,8 +651,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         max_lifetime = max(0, getattr(engine.config, "sse_max_lifetime", 0))
 
         self._log.info(
-            "SSE connected: watcher=%s kind_filter=%s max_lifetime=%s",
-            watcher_id, kind_filter, max_lifetime or "unlimited",
+            "SSE connected: watcher=%s kind_filter=%s artifact_id=%s session_id=%s max_lifetime=%s",
+            watcher_id, kind_filter, artifact_id_filter, session_id_filter,
+            max_lifetime or "unlimited",
         )
         deadline = time.monotonic() + max_lifetime if max_lifetime > 0 else None
         try:
@@ -695,6 +718,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                                 "SSE event %s has no kind, dropped by filter=%s (watcher=%s)",
                                 etype, kind_filter, watcher_id,
                             )
+                        continue
+                    # #55: artifact_id / session_id scope 过滤。
+                    # 事件 payload 无该字段或不匹配即丢弃。folder/系统事件不带这俩字段，
+                    # scope 流自然收不到——符合 fusion-studio 按产物/会话订阅的语义。
+                    if artifact_id_filter and event.get("artifact_id") != artifact_id_filter:
+                        continue
+                    if session_id_filter and event.get("session_id") != session_id_filter:
                         continue
                     data = json.dumps(event)
                     # F5: 单事件体积上限。超限丢弃（仅记日志），防大 payload 阻塞连接线程
