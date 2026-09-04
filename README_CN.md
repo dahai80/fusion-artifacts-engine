@@ -28,6 +28,19 @@ fusion-artifacts-engine start --port 11451
 fusion-artifacts-engine status
 ```
 
+## v0.5.1 — 补丁发布
+
+**v0.5.1** 是 v0.5.0 的补丁版本。新增 fusion-studio bridge 期望的两个 SSE 端点，并加固若干运维路径。无领域行为回归；543 测试全绿，ruff 干净。
+
+- **Scope 过滤 SSE (#55)** —— 新增端点
+  `GET /api/v1/artifacts/{artifact_id}/events` 与
+  `GET /api/v1/sessions/{session_id}/events`，让客户端只订阅单个产物或会话。二者与 `/api/v1/events/stream` 共用 handler；`artifact_id` / `session_id` 不匹配的事件在服务端丢弃。`kind` 查询过滤仍可组合。此前这两个路径返回 404，studio 客户端退回本地路径。
+- **容器镜像 (#53)** —— 提供 `Dockerfile` + `.dockerignore`
+ （`python:3.12-slim`，`.[otel]`，`/data` 卷，`/healthz` HEALTHCHECK，约 262 MB）。
+- **start.sh status 鉴权 (#52)** —— 健康 `ping` 现携带 `X-API-Key`，强制鉴权时 `status` 不再误报 "not running"。
+- **自动发布 CI (#51)** —— 推送 `v*` tag 即自动创建 GitHub Release（含生成 notes）；预发布/正式标志由 tag 推断。
+- **README 仅英文 (#50)** —— `README.md` 不含中文；中文在 `README_CN.md`。
+
 ## v0.5.0 — 企业级生产发布
 
 **v0.5.0** 是企业级商用生产版本。完整关闭审计报告（2026-08-26 审计报告 §9）的全部发现——
