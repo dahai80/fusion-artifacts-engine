@@ -807,12 +807,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        # 有限流——推送完所有 step 后主动关流，非长连接 event bus，故用 close 而非 keep-alive
+        self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
         rid = getattr(self, "_request_id", None)
         if rid:
             self.send_header(_REQUEST_ID_HEADER, rid)
         self.end_headers()
+        self.close_connection = True
         try:
             from fusion_artifacts_engine.dsl_parser import (
                 get_pipeline_progress,
