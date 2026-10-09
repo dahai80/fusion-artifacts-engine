@@ -330,6 +330,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path == "/metrics":
             self._handle_metrics()
             return
+        # #59: SSE 流式可视化渲染——按 pipeline step 逐步推送 HTML 片段
+        if self.path.startswith("/api/v1/render-visual/stream"):
+            self._handle_render_visual_sse()
+            return
         # SSE 事件流。三种形态共用 _handle_sse：
         #   /api/v1/events/stream[?kind=...]                 全局流
         #   /api/v1/artifacts/{artifactId}/events[?kind=...] 按 artifact 过滤 (#55)
@@ -584,6 +588,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(404, {"error": "Not found"})
             return
 
+        # #59: POST /api/v1/render-visual — DSL → HTML（3 级兜底渲染）
+        if len(path_parts) == 3 and path_parts[2] == "render-visual":
+            try:
+                result = self._run_async(
+                    rpc_handler.dispatch("render.visual", data)
+                )
+            except Exception as e:
+                self._rest_error_response(e)
+                return
+            self._send_rest_response(200, result)
+            return
+
         self._send_rest_response(404, {"error": "Not found"})
 
     def _handle_sse(self) -> None:
@@ -762,6 +778,83 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     # 防御：极端竞态下重复 release（不应发生），忽略而非崩溃
                     self._log.warning("SSE sse_sem double-release guarded, watcher=%s", watcher_id)
             self._log.info("SSE disconnected: watcher=%s", watcher_id)
+
+    def _handle_render_visual_sse(self) -> None:
+        # #59: SSE 流式可视化渲染。接受 ?dsl=<urlencoded_json> 或 ?raw_text=<urlencoded>，
+        # 解析 DSL 后按 pipeline 各 step 的 progress_range 中点逐段渲染 HTML 并推送。
+        # 有限流——推送完所有 step 后主动关流（非长连接 event bus）。
+        if not self._is_authed():
+            self._send_auth_denied(jsonrpc=False)
+            return
+        from urllib.parse import unquote
+
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        engine = self.server._rpc_handler.engine
+        raw_text = None
+        dsl_dict = None
+        if "raw_text" in query:
+            raw_text = unquote(query["raw_text"][0])
+        elif "dsl" in query:
+            try:
+                dsl_dict = json.loads(unquote(query["dsl"][0]))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                self._send_rest_response(400, {"error": f"Invalid dsl param: {e}"})
+                return
+        else:
+            self._send_rest_response(400, {"error": "Missing raw_text or dsl param"})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
+        self.end_headers()
+        try:
+            from fusion_artifacts_engine.dsl_parser import (
+                get_pipeline_progress,
+                parse_model_output,
+            )
+
+            if dsl_dict is not None:
+                progress_ranges = get_pipeline_progress(dsl_dict)
+                visual_type = dsl_dict.get("meta", {}).get("visual_type", "flow_card")
+            else:
+                parsed_dsl = parse_model_output(raw_text)
+                dsl_dict = parsed_dsl.dsl
+                progress_ranges = get_pipeline_progress(dsl_dict)
+                visual_type = parsed_dsl.visual_type
+            if not progress_ranges:
+                progress_ranges = [(0.0, 1.0)]
+            for i, (lo, hi) in enumerate(progress_ranges):
+                mid = (lo + hi) / 2.0
+                html_out = engine.visual_dispatcher.dispatch(dsl_dict, mid)
+                evt_data = json.dumps(
+                    {"step": i, "progress": round(mid, 3), "html": html_out},
+                    ensure_ascii=False,
+                )
+                self.wfile.write(f"event: render_step\ndata: {evt_data}\n\n".encode())
+                self.wfile.flush()
+            final_html = engine.visual_dispatcher.dispatch(dsl_dict, 1.0)
+            final_data = json.dumps(
+                {"step": "final", "progress": 1.0, "html": final_html, "visual_type": visual_type},
+                ensure_ascii=False,
+            )
+            self.wfile.write(f"event: render_final\ndata: {final_data}\n\n".encode())
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            self._log.info("render-visual SSE client disconnected")
+        except Exception as e:
+            self._log.warning("render-visual SSE error: %s", e)
+            try:
+                err_data = json.dumps({"error": str(e)})
+                self.wfile.write(f"event: render_error\ndata: {err_data}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     def _send_rest_response(self, code: int, data: dict) -> None:
         body = json.dumps(data).encode("utf-8")

@@ -146,6 +146,8 @@ class RPCHandler:
             "artifact.inject": self._inject,
             "artifact.interact": self._interact,
             "artifact.sync": self._sync,
+            # #58/#59/#60: visual engine — DSL parse + 8 primitive compilers + 3-level fallback
+            "render.visual": self._render_visual,
             "ping": self._ping,
         }
 
@@ -970,5 +972,30 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             direction=params["direction"],
             file_path=params["file_path"],
+        )
+        return result
+
+    async def _render_visual(self, params: dict) -> dict:
+        # #58/#59/#60: 可视化渲染 RPC。接受 raw_text（模型原始输出）或 dsl（已解析 dict）。
+        # 返回自包含 HTML + visual_type + valid/errors 元数据。
+        raw_text = params.get("raw_text")
+        dsl = params.get("dsl")
+        progress = params.get("progress", 1.0)
+        try:
+            progress = float(progress)
+        except (TypeError, ValueError):
+            progress = 1.0
+        result = await asyncio.to_thread(
+            self.engine.render_visual,
+            raw_text=raw_text,
+            dsl=dsl,
+            progress=progress,
+        )
+        await self._publish(
+            "visual.rendered",
+            None,
+            visual_type=result.get("visual_type"),
+            valid=result.get("valid"),
+            html_len=len(result.get("html") or ""),
         )
         return result

@@ -108,6 +108,9 @@ class ArtifactEngine:
         self.event_bus = EventBus()
         # H7: share 访问控制 + R2 内存缓冲抽到 ShareManager
         self.share_mgr = ShareManager(self)
+        # #58/#59/#60: 可视化引擎调度器（DSL 解析 + 8 基元 + 3 级兜底）
+        from fusion_artifacts_engine.visual_dispatcher import VisualEngineDispatcher
+        self.visual_dispatcher = VisualEngineDispatcher()
         logger.info(
             "ArtifactEngine initialized: storage_root=%s", self.config.storage_root
         )
@@ -1231,6 +1234,10 @@ class ArtifactEngine:
         except Exception as e:
             logger.exception("render_artifact failed")
             return {"created": False, "reason": str(e)}
+
+    def render_visual(self, raw_text: str | None = None, dsl: dict | None = None, progress: float = 1.0) -> dict:
+        # #58/#59/#60: 委托 VisualEngineDispatcher.render（H7：engine 保持薄包装，逻辑在 visual_dispatcher.py）。
+        return self.visual_dispatcher.render(raw_text=raw_text, dsl=dsl, progress=progress)
 
     def check_safety(
         self, messages: list[dict], output_budget: int | None = None
