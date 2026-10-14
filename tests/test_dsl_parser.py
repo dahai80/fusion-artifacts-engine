@@ -163,3 +163,49 @@ def test_no_eval_or_exec_in_output():
     malicious = '<dsl>\n{"__import__": "os"}\n</dsl>'
     parsed = parse_model_output(malicious)
     assert parsed.valid is False
+
+
+def test_fallback_validator_rejects_incomplete_meta():
+    from fusion_artifacts_engine.dsl_parser import _fallback_validate_dsl
+
+    errors = _fallback_validate_dsl({"meta": {"id": "x"}})
+    assert any("missing required property" in e for e in errors)
+    assert any("visual_type" in e for e in errors)
+
+
+def test_fallback_validator_rejects_unknown_visual_type():
+    from fusion_artifacts_engine.dsl_parser import _fallback_validate_dsl
+
+    errors = _fallback_validate_dsl(
+        {
+            "meta": {
+                "id": "x",
+                "grade": 3,
+                "topic": "t",
+                "visual_type": "no_such_type",
+                "fallback_type": "flow_card",
+            },
+            "parameters": {},
+            "entities": [],
+            "pipeline": [],
+        }
+    )
+    assert any("visual_type" in e for e in errors)
+
+
+def test_fallback_validator_accepts_valid_dsl():
+    from fusion_artifacts_engine.dsl_parser import _fallback_validate_dsl
+
+    dsl = {
+        "meta": {
+            "id": "x",
+            "grade": 3,
+            "topic": "t",
+            "visual_type": "flow_card",
+            "fallback_type": "flow_card",
+        },
+        "parameters": {},
+        "entities": [],
+        "pipeline": [],
+    }
+    assert _fallback_validate_dsl(dsl) == []
