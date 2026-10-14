@@ -738,6 +738,42 @@ Storage: SQLite (WAL, single write conn + read pool of 4) + Filesystem
   StorageDriver ABC (47 abstract methods) — swap point for multi-node/Postgres
 ```
 
+## React Rendering Layer (v0.5.3, issue #63)
+
+`client/` ships `@fusion/artifacts-visual` — the React rendering layer for the
+Socratic DSL v3.0 visual engine (PRD k12-train-model A8). It mirrors the
+server-side Python compilers in `fusion_artifacts_engine/visual_primitives/`:
+
+- **8 primitive components** (`src/primitives/`): `ArrayGrid`, `TapeDiagram`,
+  `Geometry2D`, `Isometric3D`, `TrackTimeline`, `BucketDivider`, `DataChart`,
+  `FlowCard` — dependency-free SVG (the server-side `isometric_3d` uses
+  Three.js and `data_chart` uses Chart.js via CDN; the React layer draws both
+  natively in SVG so it stays SSR-safe and dependency-free).
+- **`VisualEngineDispatcher`** — 4-level fallback chain: primary
+  (`meta.visual_type`) → `meta.fallback_type` → `TapeDiagram` → `FlowCard`,
+  each level wrapped in an `ErrorBoundary` with a final static error card
+  (100% render guarantee, mirrors `visual_dispatcher.py` +
+  `visual_error_boundary.py`).
+- **`useVisualStream`** — consumes the finite SSE stream
+  `GET /api/v1/render-visual/stream` via `fetch` + `ReadableStream`
+  (header-based `X-API-Key` auth; `EventSource` cannot set headers), parsing
+  `render_step` / `render_final` / `render_error` events.
+- **`VisualStage`** — top-level component: local mode (`dsl` + `progress`) or
+  streamed mode (`rawText` / `dslJson` → SSE).
+
+```tsx
+import { VisualStage, VisualEngineDispatcher } from "@fusion/artifacts-visual";
+
+// Local: DSL + progress, dispatcher runs client-side.
+<VisualStage dsl={dsl} progress={0.5} />
+
+// Streamed: raw model output, server parses + renders per pipeline step.
+<VisualStage rawText={modelOutput} baseUrl="http://127.0.0.1:11451" apiKey={key} />
+```
+
+Tests: `cd client && bun install && bun test` (16 tests), typecheck:
+`bunx tsc --noEmit`.
+
 ## Roadmap
 
 The refactoring blueprint to make fusion-artifacts-engine competitive with Claude Artifacts (AR = Architecture Refactor) covers:
