@@ -10,6 +10,91 @@ _DSL_RE = re.compile(r"<dsl>\n?(.*?)\n?</dsl>", re.DOTALL)
 
 _FALLBACK_VISUAL_TYPE = "flow_card"
 
+# Issue #64/#63 CI: fusion_core.dsl_schema is a monorepo sibling package and
+# may be absent in isolated environments (CI installs only this repo). Schema
+# validation must never silently degrade to "everything is valid" — a
+# malformed DSL would then be marked valid and rendered downstream. This
+# fallback validator mirrors the required/enum checks of
+# fusion_core.dsl_schema.SOCRATIC_DSL_V3_SCHEMA (kept in sync manually).
+_FALLBACK_VISUAL_TYPES = (
+    "array_grid",
+    "tape_diagram",
+    "geometry_2d",
+    "isometric_3d",
+    "track_timeline",
+    "bucket_divider",
+    "data_chart",
+    "flow_card",
+)
+_FALLBACK_FALLBACK_TYPES = ("tape_diagram", "flow_card")
+
+
+def _fallback_validate_dsl(dsl_dict: dict) -> list[str]:
+    errors: list[str] = []
+    for key in ("meta", "parameters", "entities", "pipeline"):
+        if key not in dsl_dict:
+            errors.append(f"missing required property: {key}")
+    extra = set(dsl_dict) - {"meta", "parameters", "entities", "pipeline"}
+    if extra:
+        errors.append(f"additional properties not allowed: {sorted(extra)}")
+    meta = dsl_dict.get("meta")
+    if not isinstance(meta, dict):
+        if meta is not None or "meta" not in dsl_dict:
+            errors.append("meta must be an object")
+    else:
+        for key in ("id", "grade", "topic", "visual_type", "fallback_type"):
+            if key not in meta:
+                errors.append(f"meta: missing required property: {key}")
+        meta_extra = set(meta) - {"id", "grade", "topic", "visual_type", "fallback_type"}
+        if meta_extra:
+            errors.append(f"meta: additional properties not allowed: {sorted(meta_extra)}")
+        if meta.get("visual_type") not in _FALLBACK_VISUAL_TYPES:
+            errors.append(f"meta.visual_type: {meta.get('visual_type')!r} is not one of {_FALLBACK_VISUAL_TYPES}")
+        if meta.get("fallback_type") not in _FALLBACK_FALLBACK_TYPES:
+            errors.append(f"meta.fallback_type: {meta.get('fallback_type')!r} is not one of {_FALLBACK_FALLBACK_TYPES}")
+    params = dsl_dict.get("parameters")
+    if params is not None and not isinstance(params, dict):
+        errors.append("parameters must be an object")
+    elif isinstance(params, dict):
+        for key, val in params.items():
+            if not isinstance(val, dict):
+                errors.append(f"parameters.{key}: must be an object")
+                continue
+            for sub in ("label", "value", "unit"):
+                if sub not in val:
+                    errors.append(f"parameters.{key}: missing required property: {sub}")
+    entities = dsl_dict.get("entities")
+    if entities is not None and not isinstance(entities, list):
+        errors.append("entities must be an array")
+    elif isinstance(entities, list):
+        for i, ent in enumerate(entities):
+            if not isinstance(ent, dict):
+                errors.append(f"entities[{i}]: must be an object")
+                continue
+            for sub in ("id", "type", "label", "properties"):
+                if sub not in ent:
+                    errors.append(f"entities[{i}]: missing required property: {sub}")
+    pipeline = dsl_dict.get("pipeline")
+    if pipeline is not None and not isinstance(pipeline, list):
+        errors.append("pipeline must be an array")
+    elif isinstance(pipeline, list):
+        for i, step in enumerate(pipeline):
+            if not isinstance(step, dict):
+                errors.append(f"pipeline[{i}]: must be an object")
+                continue
+            for sub in ("step", "title", "formula", "eval", "result_unit", "visual_state"):
+                if sub not in step:
+                    errors.append(f"pipeline[{i}]: missing required property: {sub}")
+            vs = step.get("visual_state")
+            if vs is not None and isinstance(vs, dict):
+                for sub in ("progress_range", "active_entities", "action"):
+                    if sub not in vs:
+                        errors.append(f"pipeline[{i}].visual_state: missing required property: {sub}")
+                pr = vs.get("progress_range")
+                if pr is not None and (not isinstance(pr, list) or len(pr) != 2):
+                    errors.append(f"pipeline[{i}].visual_state.progress_range: must be a 2-item array")
+    return errors
+
 
 @dataclass
 class ParsedDSL:
@@ -38,7 +123,12 @@ def parse_dsl_json(dsl_str: str) -> tuple[dict | None, list[str]]:
         if not ok:
             return None, [f"schema violation: {err}"]
     except ImportError:
-        logger.warning("fusion_core.dsl_schema unavailable, skipping schema validation")
+        # #63 CI: fusion_core is a monorepo sibling, not on PyPI — validate
+        # with the in-repo fallback instead of silently accepting anything.
+        errors = _fallback_validate_dsl(parsed)
+        if errors:
+            return None, [f"schema violation: {'; '.join(errors)}"]
+        logger.debug("validated with in-repo fallback validator (fusion_core absent)")
     except Exception as exc:
         logger.warning("dsl schema validation error: %s", exc)
         return None, [f"schema validation error: {exc}"]

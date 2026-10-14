@@ -1,0 +1,28 @@
+{
+  "name": "@fusion/artifacts-visual",
+  "version": "0.5.3",
+  "description": "React rendering layer for the Fusion Socratic DSL v3.0 visual engine (issue #63). Mirrors the server-side Python compilers in fusion_artifacts_engine/visual_primitives/.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "bun-types": "^1.4.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.3"
+  }
+}

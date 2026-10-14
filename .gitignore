@@ -17,3 +17,4 @@ PLAN.md
 .fusion-artifacts-engine.pid
 logs/
 .coverage
+client/node_modules/

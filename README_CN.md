@@ -578,6 +578,41 @@ tracing:
 存储层: SQLite (WAL) + 文件系统
 ```
 
+## React 渲染层 (v0.5.3, issue #63)
+
+`client/` 提供 `@fusion/artifacts-visual` —— Socratic DSL v3.0 可视化引擎的 React 渲染层（k12-train-model PRD A8），与
+`fusion_artifacts_engine/visual_primitives/` 下的 Python 编译器一一对应：
+
+- **8 个可视化基元组件**（`src/primitives/`）：`ArrayGrid`、`TapeDiagram`、
+  `Geometry2D`、`Isometric3D`、`TrackTimeline`、`BucketDivider`、
+  `DataChart`、`FlowCard`——纯 SVG 实现、零依赖（服务端 `isometric_3d` 用
+  Three.js、`data_chart` 用 Chart.js（CDN）；React 层均以原生 SVG 绘制，
+  SSR 安全且无第三方依赖）。
+- **`VisualEngineDispatcher`** —— 4 级兜底链：主组件（`meta.visual_type`）→
+  `meta.fallback_type` → `TapeDiagram` → `FlowCard`，每级由 `ErrorBoundary`
+  包裹，最终兜底静态错误卡片（100% 渲染保证，对应
+  `visual_dispatcher.py` + `visual_error_boundary.py`）。
+- **`useVisualStream`** —— 通过 `fetch` + `ReadableStream` 消费有限 SSE 流
+  `GET /api/v1/render-visual/stream`（可用请求头 `X-API-Key` 鉴权；
+  `EventSource` 无法自定义请求头），解析 `render_step` /
+  `render_final` / `render_error` 事件。
+- **`VisualStage`** —— 顶层组件：本地模式（`dsl` + `progress`）与流式模式
+  （`rawText` / `dslJson` → SSE）。
+
+```tsx
+import { VisualStage } from "@fusion/artifacts-visual";
+
+// 本地模式：DSL + progress，客户端跑 4 级兜底链
+<VisualStage dsl={dsl} progress={0.5} />
+
+// 流式模式：原始模型输出，服务端解析并按 pipeline step 流式渲染
+<VisualStage rawText={modelOutput} baseUrl="http://127.0.0.1:11451" apiKey={key} />
+```
+
+测试：`cd client && bun install && bun test`（16 个用例）；类型检查：
+`bunx tsc --noEmit`。
+
+
 ## 路线图
 
 使 fusion-artifacts-engine 达到 Claude Artifacts 竞争力的重构蓝图（AR = Architecture Refactor）涵盖：
