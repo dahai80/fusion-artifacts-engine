@@ -43,6 +43,13 @@ jobs:
           IS_PRERELEASE: ${{ steps.flags.outputs.prerelease }}
           IS_LATEST: ${{ steps.flags.outputs.latest }}
         run: |
+          # Idempotent: a release may already exist if it was created manually
+          # or by a previous run — duplicate create fails with 422 and leaves
+          # the workflow red for no real reason (issue #65).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists, skipping create"
+            exit 0
+          fi
           ARGS=("$TAG" --generate-notes)
           [ "$IS_PRERELEASE" = "true" ] && ARGS+=(--prerelease)
           [ "$IS_LATEST" = "true" ] && ARGS+=(--latest)
