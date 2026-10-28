@@ -1,0 +1,54 @@
+# Example configuration for fusion-artifacts-engine (config-conventions §4).
+# Copy to ~/.fusion/artifacts/config.yaml (or point FUSION_ARTIFACTS_CONFIG at it)
+# and adjust values. Every key below is optional — missing keys fall back to
+# the shipped default_config.yaml. Environment variables override file values.
+
+server:
+  host: "127.0.0.1"          # listen address; env FUSION_ARTIFACTS_HOST overrides
+  port: 11451                # listen port; env FUSION_ARTIFACTS_PORT overrides
+  max_workers: 64            # HTTP thread pool cap, 0=unlimited
+
+storage:
+  root: "~/.fusion/artifacts"  # data dir; env FUSION_ARTIFACTS_DATA_DIR overrides (STORAGE_ROOT is a deprecated alias)
+  db_name: "meta.db"           # SQLite metadata filename
+  small_content_limit: 10240   # content <= this many bytes is stored inline in SQLite
+  sync_root: ""                # allowed root for artifact.sync file ops; empty disables sync
+  disk_space_warning_pct: 90   # disk usage warning threshold (0-100), 0 disables monitoring
+  wal_checkpoint_interval: 300 # background WAL checkpoint interval in seconds, 0 disables
+  metadata_indexed_keys: []    # metadata keys to build json_extract expression indexes on
+
+thresholds:
+  auto_create_lines: 30       # min lines before content auto-becomes an artifact
+  auto_create_chars: 1500     # min chars before content auto-becomes an artifact
+
+artifact:
+  id_prefix: "art_"                     # artifact ID prefix
+  max_versions_per_artifact: 100        # version cap per artifact, 0=unlimited
+  max_content_bytes: 0                  # per-version content byte cap, 0=unlimited
+  max_metadata_bytes: 0                 # per-artifact metadata byte cap, 0=unlimited
+  max_event_payload_bytes: 65536        # per-event payload byte cap
+
+security:
+  allow_no_auth: false        # fail-closed by default; true skips X-API-Key auth (local trusted nets only)
+  recycle_retention_days: 7   # days a recycled artifact is kept before permanent purge
+  share_max_ttl_days: 90      # max share TTL in days, 0=unlimited
+
+sse:
+  heartbeat_interval: 30      # seconds between SSE heartbeats
+  max_lifetime: 3600          # max SSE connection lifetime in seconds, 0=unlimited
+  max_event_bytes: 262144     # max serialized event size, oversized events dropped, 0=unlimited
+  max_connections: 16         # dedicated SSE concurrency cap, 0=no separate cap
+
+rate_limit:
+  rps: 200                    # token-bucket rate for JSON-RPC + authed REST, 0=unlimited
+  burst: 400                  # bucket burst size
+  public_rps: 50              # separate bucket for unauthenticated public share endpoints
+  public_burst: 100
+
+metrics:
+  enabled: true               # expose Prometheus /metrics
+  token: ""                   # optional; if set, /metrics requires matching X-Metrics-Token header
+
+tracing:
+  enabled: false              # OTel tracing; requires pip install ".[otel]"
+  service_name: "fusion-artifacts-engine"
