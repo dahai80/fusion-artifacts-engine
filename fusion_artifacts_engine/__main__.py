@@ -19,6 +19,29 @@ from fusion_artifacts_engine.utils import get_package_version, setup_logging
 logger = logging.getLogger(__name__)
 
 
+def _set_process_title(title: str) -> None:
+    # #68: macOS homebrew Python 的 comm 显示为裸 "Python"，operator 无法区分产品。
+    # 优先用 fusion_core.proc（共享 helper）；fusion_core 缺失（隔离 CI）时回退
+    # 直接 import setproctitle；两者皆缺则静默跳过（acceptance #3: fallback safe）。
+    try:
+        from fusion_core.proc import set_process_title
+
+        set_process_title(title)
+        return
+    except ImportError:
+        pass
+    except Exception as e:  # noqa: BLE001
+        logger.debug("fusion_core set_process_title failed: %s", e)
+    try:
+        import setproctitle
+
+        setproctitle.setproctitle(title)
+    except ImportError:
+        logger.debug("setproctitle not installed, process title stays default (pip install '.[proc]')")
+    except Exception as e:  # noqa: BLE001
+        logger.debug("setproctitle failed, process title stays default: %s", e)
+
+
 def _run_once(config, host, port) -> int:
     # P0-8: 单次 engine 运行，返回退出码。0=优雅退出，非 0=崩溃（watch loop 据此重启）。
     # P2-5: 启动时按 config 配置 OTel tracing（可选；未装 SDK 或 enabled=false → no-op）。
@@ -108,6 +131,10 @@ def main():
             config.storage_root = Path(args.storage_root)
         host = args.host or config.server_host
         port = args.port or config.server_port
+
+        # #68: 进程标题设为产品名，ps/Activity Monitor 不再显示裸 "Python"。
+        # 放 watch loop 外——重启不改端口，无需重复设置。
+        _set_process_title(f"fusion-artifacts-engine serve :{port}")
 
         # P1-1/H4: 限流生产告警。rps==0 表示不限流——生产环境裸奔，启动显式 WARN。
         # default_config.yaml 已设生产默认值（rps:200/burst:400，public_rps:50/burst:100），

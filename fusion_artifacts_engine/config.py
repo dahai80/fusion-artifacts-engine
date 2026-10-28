@@ -52,6 +52,38 @@ def _parse_bool(v: str) -> bool:
     raise ValueError(f"invalid bool: {v}")
 
 
+def _resolve_contract_env() -> dict[str, Any]:
+    # #69 (config Phase 2.2): 契约变量 FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR
+    # 经 fusion_core.config 单点解析（config-conventions §1/§2）。fusion_core 是
+    # monorepo 兄弟包、隔离 CI 中缺失——回退到语义等价的仓内解析（同 dsl_parser
+    # 的 _fallback_validate_dsl 模式），两路径行为一致。
+    overrides: dict[str, Any] = {}
+    raw_port = os.environ.get("FUSION_ARTIFACTS_PORT", "")
+    if raw_port:
+        try:
+            from fusion_core.config import service_port
+        except ImportError:
+            try:
+                overrides["server_port"] = int(raw_port)
+            except ValueError:
+                logger.warning("Invalid env FUSION_ARTIFACTS_PORT=%s: not an integer", raw_port)
+        else:
+            try:
+                overrides["server_port"] = service_port("artifacts", default=11451)
+            except ValueError as exc:
+                logger.warning("Invalid FUSION_ARTIFACTS_PORT: %s", exc)
+    raw_dir = os.environ.get("FUSION_ARTIFACTS_DATA_DIR", "")
+    if raw_dir:
+        try:
+            from fusion_core.config import service_data_dir
+        except ImportError:
+            overrides["storage_root"] = _expanduser_path(raw_dir)
+        else:
+            # fusion_core 不展开 ~（上游 gap），仓内统一展开保持与 STORAGE_ROOT 一致
+            overrides["storage_root"] = _expanduser_path(str(service_data_dir("artifacts", default=raw_dir)))
+    return overrides
+
+
 def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
     # A-9: yaml section.key -> model field 的映射集中在此表，新增字段只改一处。
     # 路径类值经 _expanduser_path 展开 ~；空字符串 sync_root 归一为 None。
@@ -137,8 +169,9 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
     env_overrides: dict[str, Any] = {}
     env_map = {
         "FUSION_ARTIFACTS_HOST": ("server_host", str),
-        "FUSION_ARTIFACTS_PORT": ("server_port", int),
-        # L-23: env STORAGE_ROOT 也展开 ~
+        # FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR 契约变量在
+        # _resolve_contract_env (#69) 中经 fusion_core 单点解析，不再走 env_map。
+        # L-23: env STORAGE_ROOT 也展开 ~。#69 后为 legacy 别名，优先用 DATA_DIR。
         "FUSION_ARTIFACTS_STORAGE_ROOT": ("storage_root", _expanduser_path),
         "FUSION_ARTIFACTS_API_KEY": ("api_key", str),
         # P1-12/M22: 运维可调项 env 覆盖补全——容器/多节点部署不依赖改 YAML 即可调参
@@ -169,6 +202,15 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
                 logger.warning("Invalid env %s=%s: %s", env_key, val, e)
 
     merged.update(env_overrides)
+
+    # #69: 契约变量（PORT/DATA_DIR）后应用——优先级高于 legacy STORAGE_ROOT；
+    # STORAGE_ROOT 迁移期保留（config-conventions §6），设值时告警指路 DATA_DIR。
+    merged.update(_resolve_contract_env())
+    if os.environ.get("FUSION_ARTIFACTS_STORAGE_ROOT", ""):
+        logger.warning(
+            "FUSION_ARTIFACTS_STORAGE_ROOT is deprecated, set FUSION_ARTIFACTS_DATA_DIR instead "
+            "(config-conventions §1, issue #69)"
+        )
 
     # 丢弃用户配置中模型已不存在的 stale key，避免 extra="forbid" 抛错 (P2-18)。
     valid_fields = set(ArtifactEngineConfig.model_fields.keys())

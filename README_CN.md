@@ -548,6 +548,17 @@ sse:
   max_connections: 16       # v0.5.0：SSE 独立并发上限（与 server.max_workers 分离）。SSE 握手时释放 RPC worker 槽、占用此专用信号量；超限 SSE 返回 503。0=回退旧行为（SSE 继续占 worker 槽，不设独立上限，不推荐）
 ```
 
+**环境变量 (v0.5.5)** —— env 覆盖文件配置（优先级最高，仅次于 CLI 参数）。契约名见 `architecture/config-conventions.md` §1，经 `fusion_core.config` 单点解析（仓内回退路径行为一致）：
+
+- `FUSION_ARTIFACTS_PORT` —— 监听端口（非法值告警并保留 YAML 值）
+- `FUSION_ARTIFACTS_DATA_DIR` —— 存储根目录，展开 `~`；与废弃别名 `FUSION_ARTIFACTS_STORAGE_ROOT` 同时设置时优先（仅设别名时打废弃告警）
+- `FUSION_ARTIFACTS_CONFIG` —— 用户配置 YAML 路径（默认 `~/.fusion/artifacts/config.yaml`）
+- `FUSION_ARTIFACTS_HOST`、`FUSION_ARTIFACTS_API_KEY`，以及逐字段运维覆盖（`FUSION_ARTIFACTS_MAX_WORKERS`、`FUSION_ARTIFACTS_RATE_LIMIT_RPS`、`FUSION_ARTIFACTS_SSE_*`、`FUSION_ARTIFACTS_TRACING_*` 等）
+
+完整带注释参考见 `config.example.yaml`。env 优先级：契约变量（`PORT`/`DATA_DIR`）在 legacy 变量之后应用，即 `DATA_DIR` > `STORAGE_ROOT` > YAML。
+
+**进程标题 (v0.5.5)** —— 守护进程启动时把进程标题设为 `fusion-artifacts-engine serve :<端口>`，`ps` / 活动监视器显示产品名而非裸 `Python`。依赖 `setproctitle`（`pip install 'fusion-artifacts-engine[proc]'`，已含于 `[all]`）；未安装时静默跳过重命名，守护进程行为不变。`start.sh` 用 PID 文件而非进程名跟踪守护进程，重命名不影响 start/stop/status。
+
 **SSE 线程隔离 (v0.5.0)** —— `sse.max_connections` 把 SSE 长连接与 RPC worker 线程池分离。此前每个 SSE 连接在其整个生命周期内独占一个 `server_max_workers` 槽，64 个 SSE 客户端即占满全部 64 个 RPC worker 线程，导致所有新 RPC 请求被 `503` 拒绝。现在 SSE 握手从专用 `_sse_sem`（容量 `max_connections`，默认 16）取槽，并**释放**归还 RPC worker 槽，故无论多少 SSE 客户端在线，RPC 始终可用。客户端断开经非阻塞 socket 探活在约 1 秒内检测（不再等到下一次心跳——默认 30s 的心跳间隔会延迟槽归还，使高频连断客户端耗尽上限）。`max_connections=0` 回退旧的单池行为。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`。
 
 **RPC handler 线程卸载 (v0.5.0)** —— 此前异步 RPC handler 直接调用同步 `engine`/`storage` 方法（`self.engine.get_artifact`、`self.engine.storage.list_artifacts` …），每次调用都在单事件循环上执行，命中 SQLite 或文件系统时阻塞所有其他请求。现在 `rpc/methods.py` 中每个同步 storage/engine 调用都经 `await asyncio.to_thread(...)` 在默认 ThreadPoolExecutor 上运行，事件循环只做调度——sqlite/文件 I/O 不再阻塞它。`_publish` 改为 async（其 kind 回查读也卸载），SSE 事件发射不再阻塞循环。异步 engine 方法（`create_artifact`、`update_artifact` …）本就非阻塞，直接 await。由 `tests/test_p2_2_to_thread_offload.py` 验证（读/写卸载 + worker 线程执行 + 异步 publish）。

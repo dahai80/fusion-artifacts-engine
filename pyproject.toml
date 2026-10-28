@@ -27,9 +27,14 @@ otel = [
     "opentelemetry-api>=1.24",
     "opentelemetry-sdk>=1.24",
 ]
+# #68: 进程标题 remediation——macOS 上 ps/Activity Monitor 显示产品名而非裸 "Python"。
+proc = [
+    "setproctitle>=1.3",
+]
 all = [
     "fusion-artifacts-engine[test]",
     "fusion-artifacts-engine[otel]",
+    "fusion-artifacts-engine[proc]",
     "ruff>=0.6",
 ]
 

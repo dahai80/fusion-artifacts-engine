@@ -5,7 +5,22 @@ from unittest.mock import patch
 
 import pytest
 
-from fusion_artifacts_engine.__main__ import main
+from fusion_artifacts_engine.__main__ import _set_process_title, main
+
+
+def test_set_process_title_no_throw():
+    # #68: 无论 setproctitle/fusion_core 是否可用，调用不得抛异常（fallback safe）
+    _set_process_title("fusion-artifacts-engine-test")
+
+
+def test_set_process_title_actual():
+    # #68: setproctitle 已安装时进程标题真实生效（CI 未装则跳过）
+    pytest.importorskip("setproctitle")
+    import setproctitle
+
+    _set_process_title("fae-proc-title-test")
+    assert setproctitle.getproctitle() == "fae-proc-title-test"
+    setproctitle.setproctitle("pytest")
 
 
 def test_version_command(capsys):

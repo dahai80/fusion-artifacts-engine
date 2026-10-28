@@ -71,6 +71,44 @@ def test_load_config_env_override(monkeypatch):
     assert config.server_host == "0.0.0.0"
 
 
+def test_env_data_dir_override(monkeypatch, tmp_path):
+    # #69: FUSION_ARTIFACTS_DATA_DIR 契约变量，覆盖 yaml 默认 storage root
+    monkeypatch.setenv("FUSION_ARTIFACTS_DATA_DIR", str(tmp_path / "data"))
+    config = load_config()
+    assert config.storage_root == tmp_path / "data"
+
+
+def test_env_data_dir_tilde_expansion(monkeypatch):
+    # #69: DATA_DIR 含 ~ 时展开（与 STORAGE_ROOT 行为一致）
+    monkeypatch.setenv("FUSION_ARTIFACTS_DATA_DIR", "~/artifacts_data_6869")
+    config = load_config()
+    assert str(config.storage_root).startswith(str(Path.home()))
+    assert "~" not in str(config.storage_root)
+
+
+def test_env_storage_root_legacy_alias(monkeypatch, tmp_path):
+    # #69: legacy FUSION_ARTIFACTS_STORAGE_ROOT 仍生效（迁移期向后兼容）
+    monkeypatch.setenv("FUSION_ARTIFACTS_STORAGE_ROOT", str(tmp_path / "legacy"))
+    config = load_config()
+    assert config.storage_root == tmp_path / "legacy"
+
+
+def test_env_data_dir_wins_over_storage_root(monkeypatch, tmp_path):
+    # #69: 两个都设时 DATA_DIR（契约名）优先于 STORAGE_ROOT（legacy 别名）
+    monkeypatch.setenv("FUSION_ARTIFACTS_STORAGE_ROOT", str(tmp_path / "legacy"))
+    monkeypatch.setenv("FUSION_ARTIFACTS_DATA_DIR", str(tmp_path / "contract"))
+    config = load_config()
+    assert config.storage_root == tmp_path / "contract"
+
+
+def test_invalid_port_env_keeps_yaml_value(monkeypatch):
+    # #69: 非整数 PORT 走 fusion_core.service_port 的 ValueError 路径，
+    # 告警并保留 yaml 默认值（fail-open 到默认而非崩溃）
+    monkeypatch.setenv("FUSION_ARTIFACTS_PORT", "not-a-port")
+    config = load_config()
+    assert config.server_port == 11451
+
+
 def test_db_path_and_content_dir():
     config = ArtifactEngineConfig(storage_root=Path("/tmp/test_engine"))
     assert config.db_path == Path("/tmp/test_engine/meta.db")
