@@ -1,6 +1,6 @@
 {
   "name": "@fusion/artifacts-visual",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "React rendering layer for the Fusion Socratic DSL v3.0 visual engine (issue #63). Mirrors the server-side Python compilers in fusion_artifacts_engine/visual_primitives/.",
   "license": "Apache-2.0",
   "type": "module",
