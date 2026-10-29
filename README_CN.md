@@ -559,6 +559,13 @@ sse:
 
 **进程标题 (v0.5.5)** —— 守护进程启动时把进程标题设为 `fusion-artifacts-engine serve :<端口>`，`ps` / 活动监视器显示产品名而非裸 `Python`。依赖 `setproctitle`（`pip install 'fusion-artifacts-engine[proc]'`，已含于 `[all]`）；未安装时静默跳过重命名，守护进程行为不变。`start.sh` 用 PID 文件而非进程名跟踪守护进程，重命名不影响 start/stop/status。
 
+**端口注册自检 (v0.5.6, #72)** —— `start.sh start` 启动前校验即将监听的端口（`FUSION_ARTIFACTS_PORT`，默认 11451）已在 `architecture/port-registry.yaml`（monorepo 端口唯一事实源）中为 `fusion-artifacts-engine` 注册，落实 Config Phase 3.3 register-then-start。行为：
+
+- 服务条目下找不到该端口 → **拒绝启动**（exit 1），报错指明端口与 registry 路径
+- registry 文件缺失 → 仅告警并继续（独立部署机器上没有 workspace 文档属正常）
+- `FUSION_SKIP_REGISTRY_CHECK=1` → 告警并绕过检查（隔离端口测试的逃生门）
+- `FUSION_REGISTRY=/path/to/registry.yaml` → 指向备用 registry 副本（默认 `~/fusion/architecture/port-registry.yaml`）
+
 **SSE 线程隔离 (v0.5.0)** —— `sse.max_connections` 把 SSE 长连接与 RPC worker 线程池分离。此前每个 SSE 连接在其整个生命周期内独占一个 `server_max_workers` 槽，64 个 SSE 客户端即占满全部 64 个 RPC worker 线程，导致所有新 RPC 请求被 `503` 拒绝。现在 SSE 握手从专用 `_sse_sem`（容量 `max_connections`，默认 16）取槽，并**释放**归还 RPC worker 槽，故无论多少 SSE 客户端在线，RPC 始终可用。客户端断开经非阻塞 socket 探活在约 1 秒内检测（不再等到下一次心跳——默认 30s 的心跳间隔会延迟槽归还，使高频连断客户端耗尽上限）。`max_connections=0` 回退旧的单池行为。env 覆盖：`FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS`。
 
 **RPC handler 线程卸载 (v0.5.0)** —— 此前异步 RPC handler 直接调用同步 `engine`/`storage` 方法（`self.engine.get_artifact`、`self.engine.storage.list_artifacts` …），每次调用都在单事件循环上执行，命中 SQLite 或文件系统时阻塞所有其他请求。现在 `rpc/methods.py` 中每个同步 storage/engine 调用都经 `await asyncio.to_thread(...)` 在默认 ThreadPoolExecutor 上运行，事件循环只做调度——sqlite/文件 I/O 不再阻塞它。`_publish` 改为 async（其 kind 回查读也卸载），SSE 事件发射不再阻塞循环。异步 engine 方法（`create_artifact`、`update_artifact` …）本就非阻塞，直接 await。由 `tests/test_p2_2_to_thread_offload.py` 验证（读/写卸载 + worker 线程执行 + 异步 publish）。
