@@ -3,6 +3,7 @@
 # JSON-RPC artifact engine on 127.0.0.1:11451 (ping method).
 # Callers: fusion-studio UpstreamServiceManager (auto-start on launch + manual start).
 # Affected API: start.sh start|stop|restart|status; status exits 0 if running, 1 if not.
+# #72: start 自检端口注册于 architecture/port-registry.yaml（FUSION_SKIP_REGISTRY_CHECK=1 绕过）。
 # Data schemas: PID file .fusion-artifacts-engine.pid; logs/stdout.log + logs/stderr.log.
 # User instruction: "在所有依赖的上游模块根目录创建start.sh，在fusion-studio启动时需要检测上游服务是否启动，如果没有启动，尝试调用start.sh启动上游服务，如果启动不成功，fusion-studio要展示服务不存在，或者服务启动失败等等"
 
@@ -94,6 +95,23 @@ start() {
         log_info "artifacts-engine already running (PID $(get_pid))"
         exit 0
     fi
+
+    # #72: Config Phase 3.3 register-then-start 自检——启动前确认本服务端口已在
+    # architecture/port-registry.yaml 注册（防端口漂移后静默占用未分配端口）。
+    # FUSION_REGISTRY 可指向测试用 registry 副本；FUSION_SKIP_REGISTRY_CHECK=1 绕过；
+    # registry 文件缺失只告警不阻断（独立部署机器上无 workspace 文档属正常）。
+    local service="fusion-artifacts-engine"
+    local registry="${FUSION_REGISTRY:-$HOME/fusion/architecture/port-registry.yaml}"
+    if [ ! -f "$registry" ]; then
+        log_warn "port-registry.yaml not found at ${registry} — registry self-check skipped"
+    elif ! grep -A3 "^  ${service}:" "$registry" 2>/dev/null | grep -q "port: $PORT$"; then
+        if [ "${FUSION_SKIP_REGISTRY_CHECK:-}" != "1" ]; then
+            log_error "port ${PORT} for ${service} not registered in ${registry} — refusing to start"
+            exit 1
+        fi
+        log_warn "registry check bypassed (FUSION_SKIP_REGISTRY_CHECK=1)"
+    fi
+
     mkdir -p "$LOG_DIR"
     ensure_venv
 
