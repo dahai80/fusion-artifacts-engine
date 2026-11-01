@@ -139,6 +139,13 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "enabled": ("tracing_enabled", None),
             "service_name": ("tracing_service_name", None),
         },
+        "gateway": {
+            "enabled": ("gateway_enabled", None),
+            "url": ("gateway_url", None),
+            "module_id": ("gateway_module_id", None),
+            "admin_key": ("gateway_admin_key", None),
+            "heartbeat_interval": ("gateway_heartbeat_interval", None),
+        },
     }
     flat: dict[str, Any] = {}
     for section, field_map in section_map.items():
@@ -191,6 +198,15 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         # P2-5: OTel tracing env 覆盖
         "FUSION_ARTIFACTS_TRACING_ENABLED": ("tracing_enabled", _parse_bool),
         "FUSION_ARTIFACTS_TRACING_SERVICE_NAME": ("tracing_service_name", str),
+        # #75: web-shell 集成 env 覆盖
+        "FUSION_ARTIFACTS_GATEWAY_ENABLED": ("gateway_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_GATEWAY_URL": ("gateway_url", str),
+        "FUSION_ARTIFACTS_GATEWAY_MODULE_ID": ("gateway_module_id", str),
+        "FUSION_ARTIFACTS_GATEWAY_ADMIN_KEY": ("gateway_admin_key", str),
+        "FUSION_ARTIFACTS_GATEWAY_HEARTBEAT_INTERVAL": (
+            "gateway_heartbeat_interval",
+            int,
+        ),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -288,6 +304,15 @@ class ArtifactEngineConfig(BaseModel):
     # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
     # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
     metadata_indexed_keys: list[str] = Field(default_factory=list)
+    # #75: web-shell 集成——向 fusion-gateway 自注册 shell manifest + 周期心跳。
+    # enabled=false（默认）零开销；enabled=true 且 api_key 已配置时启动注册/心跳线程。
+    gateway_enabled: bool = Field(default=False)
+    gateway_url: str = Field(default="http://127.0.0.1:11432")
+    gateway_module_id: str = Field(default="fusion-artifacts")
+    # 首次注册引导用（gateway web_shell.admin_key）；注册成功后凭引擎自身 api_key
+    # 完成心跳与 #369 self-heal 再注册，admin_key 可从配置中移除。
+    gateway_admin_key: str | None = Field(default=None)
+    gateway_heartbeat_interval: int = Field(default=15)
 
     @property
     def db_path(self) -> Path:

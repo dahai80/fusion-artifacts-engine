@@ -80,3 +80,16 @@ tracing:
   enabled: false
   service_name: "fusion-artifacts-engine"
 
+gateway:
+  # #75: web-shell 集成。enabled=true 时启动时向 fusion-gateway 自注册 shell
+  # manifest（侧栏 Artifacts 菜单 + /shell/<module_id>/ 代理路由）并周期心跳。
+  # 需要同时配置 security.api_key（注册与心跳凭它，#296 self-keyed 模式）。
+  enabled: false
+  url: "http://127.0.0.1:11432"
+  module_id: "fusion-artifacts"
+  # 首次注册引导用（gateway web_shell.admin_key）；注册成功后凭引擎自身
+  # api_key 心跳 + self-heal 再注册，此后可从配置移除。
+  admin_key: ""
+  # 心跳间隔秒（gateway heartbeat_timeout 默认 30s，须小于它）
+  heartbeat_interval: 15
+

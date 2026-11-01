@@ -169,7 +169,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "Auth rejected: no API_KEY configured and allow_no_auth=False"
             )
             return False
+        # #75: 双通道鉴权。X-API-Key 为传统通道（fusion-studio/fusion-code 直连）；
+        # Authorization: Bearer 为 gateway /shell/<id>/ 代理注入通道（代理剥离调用方
+        # 凭据后只注入 Bearer）。两者常量时间比较，任一匹配即通过。
         provided = self.headers.get("X-API-Key", "")
+        if not provided:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided = auth_header[len("Bearer "):].strip()
         return hmac.compare_digest(provided, api_key)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
