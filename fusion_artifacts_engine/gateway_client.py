@@ -124,10 +124,13 @@ class GatewayClient:
             )
             if resp.status_code == 200:
                 return True
-            # 404 manifest_unknown：注册丢失（gateway 重建 store 等），再注册
-            if resp.status_code == 404:
+            # 404 manifest_unknown / 403 heartbeat_forbidden：注册丢失（gateway 重建
+            # store 后无该 module 的 service key 记录，心跳被 403 拒绝）→ 再注册自愈。
+            # 实测：gateway 重启清空 shell_manifests 后心跳返回 403 而非 404。
+            if resp.status_code in (403, 404):
                 logger.warning(
-                    "gateway heartbeat 404 (manifest gone), re-registering module=%s",
+                    "gateway heartbeat %d (manifest gone), re-registering module=%s",
+                    resp.status_code,
                     self._module_id,
                 )
                 return self.register()
