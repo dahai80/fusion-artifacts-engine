@@ -80,6 +80,8 @@ class Artifact(BaseModel):
     source_module: str | None = None
     workspace_id: str | None = None
     workflow_run_id: str | None = None
+    # #77: remix lineage — the artifact this one was remixed from (None = original)
+    parent_artifact_id: str | None = None
 
 
 class ArtifactVersion(BaseModel):
@@ -124,6 +126,15 @@ class ArtifactShare(BaseModel):
     # get_shared/get_public_share 在 increment 前校验 access_count>=max_accesses。
     max_accesses: int | None = None
     last_access_at: float | None = None
+    # #77: share permission level — "view" read-only (default) / "remix" viewer may remix.
+    permission: str = "view"
+
+    @field_validator("permission")
+    @classmethod
+    def _permission_validator(cls, v):
+        if v not in ("view", "remix"):
+            raise ValueError(f"share permission must be 'view' or 'remix', got: {v!r}")
+        return v
 
 
 class ArtifactFolder(BaseModel):

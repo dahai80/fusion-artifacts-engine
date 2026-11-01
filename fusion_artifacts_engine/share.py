@@ -130,7 +130,11 @@ class ShareManager:
         created_by: str | None = None,
         expires_at: str | None = None,
         max_accesses: int | None = None,
+        permission: str = "view",
     ) -> ArtifactShare:
+        # #77: 权限校验前置（模型 validator 之外的早失败点）
+        if permission not in ("view", "remix"):
+            raise ValueError(f"share permission must be 'view' or 'remix', got: {permission!r}")
         artifact = self._storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -172,11 +176,20 @@ class ShareManager:
                         )
         existing = self._storage.get_share_by_artifact(artifact_id)
         if existing is not None:
-            logger.info(
-                "Returning existing share %s for artifact %s",
-                existing.share_id,
-                artifact_id,
-            )
+            # #77: 同链接改权限 —— 已有 share 时 upsert permission，下次打开即生效
+            if existing.permission != permission:
+                self._storage.update_share_permission(existing.share_id, permission)
+                existing = self._storage.get_share(existing.share_id)
+                logger.info(
+                    "Updated existing share %s permission=%s for artifact %s",
+                    existing.share_id, permission, artifact_id,
+                )
+            else:
+                logger.info(
+                    "Returning existing share %s for artifact %s",
+                    existing.share_id,
+                    artifact_id,
+                )
             return existing
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
         # E1: created_at 用 float epoch，与 Artifact/Version 一致
@@ -187,12 +200,13 @@ class ShareManager:
             created_at=time.time(),
             expires_at=expires_at,
             max_accesses=max_accesses,
+            permission=permission,
         )
         self._storage.save_share(share)
         self._storage.set_artifact_share_id(artifact_id, share_id)
         logger.info(
-            "Created share %s for artifact %s max_accesses=%s",
-            share_id, artifact_id, max_accesses,
+            "Created share %s for artifact %s max_accesses=%s permission=%s",
+            share_id, artifact_id, max_accesses, permission,
         )
         return share
 
@@ -278,6 +292,7 @@ class ShareManager:
             "revoked": share.revoked,
             "max_accesses": share.max_accesses,
             "access_count": new_count,
+            "permission": share.permission,
         }
         public_artifact = {
             "id": artifact.id,

@@ -99,6 +99,7 @@ class RPCHandler:
             "artifact.star": self._star,
             "artifact.pin": self._pin,
             "artifact.duplicate": self._duplicate,
+            "artifact.remix": self._remix,
             "artifact.list_all": self._list_all,
             # P1: recycle bin
             "artifact.list_recycle": self._list_recycle,
@@ -518,6 +519,22 @@ class RPCHandler:
         await self._publish("artifact.created", dup.id, artifact_id=dup.id, kind=dup.kind)
         return {"artifact": dup.model_dump()}
 
+    async def _remix(self, params: dict) -> dict:
+        # #77: remix 派生副本 —— parent_artifact_id 血统，落调用方库
+        dup = await asyncio.to_thread(
+            self.engine.remix_artifact,
+            params["artifact_id"], params.get("new_name"),
+        )
+        if dup is None:
+            raise ValueError("Failed to remix artifact")
+        await self._publish(
+            "artifact.remixed",
+            dup.id,
+            artifact_id=dup.id,
+            parent_artifact_id=params["artifact_id"],
+        )
+        return {"artifact": dup.model_dump()}
+
     async def _list_all(self, params: dict) -> dict:
         sort = params.get("sort", "updated_at")
         # P2-2/M1+F2: 读经 to_thread 卸载
@@ -618,6 +635,7 @@ class RPCHandler:
             created_by=params.get("created_by"),
             expires_at=params.get("expires_at"),
             max_accesses=max_accesses,
+            permission=params.get("permission", "view"),
         )
         await self._publish(
             "artifact.shared",

@@ -86,7 +86,11 @@ class StorageDriver(ABC):
 
     @abstractmethod
     def duplicate_artifact(
-        self, artifact_id: str, new_id: str, new_name: str | None = None
+        self,
+        artifact_id: str,
+        new_id: str,
+        new_name: str | None = None,
+        parent_artifact_id: str | None = None,
     ) -> Artifact | None: ...
 
     @abstractmethod
@@ -165,6 +169,10 @@ class StorageDriver(ABC):
 
     @abstractmethod
     def revoke_share(self, share_id: str) -> bool: ...
+
+    def update_share_permission(self, share_id: str, permission: str) -> bool:
+        # #77: 可选能力 —— 默认不支持（返回 False），SQLite 实现已支持
+        return False
 
     @abstractmethod
     def increment_share_access(

@@ -222,6 +222,7 @@ CREATE TABLE IF NOT EXISTS artifact_shares (
     access_count INTEGER DEFAULT 0,
     max_accesses INTEGER,
     last_access_at REAL,
+    permission TEXT DEFAULT 'view' CHECK(permission IN ('view','remix')),
     UNIQUE(share_id),
     FOREIGN KEY (artifact_id) REFERENCES artifacts(id) ON DELETE CASCADE
 );
@@ -308,6 +309,9 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         source_module=row["source_module"] if "source_module" in keys else None,
         workspace_id=row["workspace_id"] if "workspace_id" in keys else None,
         workflow_run_id=row["workflow_run_id"] if "workflow_run_id" in keys else None,
+        parent_artifact_id=row["parent_artifact_id"]
+        if "parent_artifact_id" in keys
+        else None,
     )
 
 
@@ -361,6 +365,7 @@ def _share_from_row(row: sqlite3.Row) -> ArtifactShare:
         access_count=row["access_count"],
         max_accesses=row["max_accesses"] if "max_accesses" in keys else None,
         last_access_at=_ts_to_float(row["last_access_at"]),
+        permission=row["permission"] if "permission" in keys else "view",
     )
 
 
@@ -600,8 +605,8 @@ class SQLiteStorage(StorageDriver):
                         owner_user_id, ownership_type, is_starred, is_pinned,
                         pinned_chat_id, share_id, in_project_kb, folder_id,
                         deleted_at, content_hash, active_in_session,
-                        source_module, workspace_id, workflow_run_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_module, workspace_id, workflow_run_id, parent_artifact_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          session_id=excluded.session_id,
                          name=excluded.name,
@@ -624,7 +629,8 @@ class SQLiteStorage(StorageDriver):
                          active_in_session=excluded.active_in_session,
                          source_module=excluded.source_module,
                          workspace_id=excluded.workspace_id,
-                         workflow_run_id=excluded.workflow_run_id""",
+                         workflow_run_id=excluded.workflow_run_id,
+                         parent_artifact_id=excluded.parent_artifact_id""",
                     (
                         artifact.id,
                         artifact.session_id,
@@ -652,6 +658,7 @@ class SQLiteStorage(StorageDriver):
                         artifact.source_module,
                         artifact.workspace_id,
                         artifact.workflow_run_id,
+                        artifact.parent_artifact_id,
                     ),
                 )
                 self._conn.commit()
@@ -694,8 +701,8 @@ class SQLiteStorage(StorageDriver):
                         owner_user_id, ownership_type, is_starred, is_pinned,
                         pinned_chat_id, share_id, in_project_kb, folder_id,
                         deleted_at, content_hash, active_in_session,
-                        source_module, workspace_id, workflow_run_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_module, workspace_id, workflow_run_id, parent_artifact_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          session_id=excluded.session_id,
                          name=excluded.name,
@@ -718,7 +725,8 @@ class SQLiteStorage(StorageDriver):
                          active_in_session=excluded.active_in_session,
                          source_module=excluded.source_module,
                          workspace_id=excluded.workspace_id,
-                         workflow_run_id=excluded.workflow_run_id""",
+                         workflow_run_id=excluded.workflow_run_id,
+                         parent_artifact_id=excluded.parent_artifact_id""",
                     (
                         artifact.id,
                         artifact.session_id,
@@ -746,6 +754,7 @@ class SQLiteStorage(StorageDriver):
                         artifact.source_module,
                         artifact.workspace_id,
                         artifact.workflow_run_id,
+                        artifact.parent_artifact_id,
                     ),
                 )
                 content_path = None
@@ -1123,7 +1132,11 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def duplicate_artifact(
-        self, artifact_id: str, new_id: str, new_name: str | None = None
+        self,
+        artifact_id: str,
+        new_id: str,
+        new_name: str | None = None,
+        parent_artifact_id: str | None = None,
     ) -> Artifact | None:
         art = self.get_artifact(artifact_id)
         if art is None:
@@ -1148,6 +1161,7 @@ class SQLiteStorage(StorageDriver):
             owner_user_id=art.owner_user_id,
             ownership_type=art.ownership_type,
             folder_id=art.folder_id,
+            parent_artifact_id=parent_artifact_id,
         )
         ver = self.get_version(artifact_id, art.current_version)
         if ver is None:
@@ -1698,8 +1712,8 @@ class SQLiteStorage(StorageDriver):
     def save_share(self, share: ArtifactShare) -> None:
         with self._write_lock:
             self._conn.execute(
-                """INSERT INTO artifact_shares (share_id, artifact_id, created_by, created_at, expires_at, revoked, access_count, max_accesses, last_access_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO artifact_shares (share_id, artifact_id, created_by, created_at, expires_at, revoked, access_count, max_accesses, last_access_at, permission)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(share_id) DO UPDATE SET
                      artifact_id=excluded.artifact_id,
                      created_by=excluded.created_by,
@@ -1707,7 +1721,8 @@ class SQLiteStorage(StorageDriver):
                      revoked=excluded.revoked,
                      access_count=excluded.access_count,
                      max_accesses=excluded.max_accesses,
-                     last_access_at=excluded.last_access_at""",
+                     last_access_at=excluded.last_access_at,
+                     permission=excluded.permission""",
                 (
                     share.share_id,
                     share.artifact_id,
@@ -1718,6 +1733,7 @@ class SQLiteStorage(StorageDriver):
                     share.access_count,
                     share.max_accesses,
                     share.last_access_at,
+                    share.permission,
                 ),
             )
             self._conn.commit()
@@ -1758,6 +1774,19 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
         ok = cur.rowcount > 0
         logger.info("Revoked share %s ok=%s", share_id, ok)
+        return ok
+
+    def update_share_permission(self, share_id: str, permission: str) -> bool:
+        # #77: 同链接改权限 —— view/remix 下次打开即生效
+        with self._write_lock:
+            cur = self._conn.execute(
+                "UPDATE artifact_shares SET permission = ? WHERE share_id = ? AND revoked = 0",
+                (permission, share_id),
+            )
+            self._conn.commit()
+        ok = cur.rowcount > 0
+        logger.info("Updated share %s permission=%s ok=%s", share_id, permission, ok)
+        return ok
         return ok
 
     def increment_share_access(self, share_id: str, delta: int = 1) -> None:
@@ -2437,6 +2466,8 @@ class SQLiteStorage(StorageDriver):
         ("migrate_event_timestamps", "_migrate_event_timestamps"),
         ("migrate_share_max_accesses_and_timestamps", "_migrate_share_max_accesses_and_timestamps"),
         ("migrate_tag_scope_column", "_migrate_tag_scope_column"),
+        ("migrate_remix_lineage", "_migrate_remix_lineage"),
+        ("migrate_share_permission", "_migrate_share_permission"),
     ]
 
     def _run_migrations_gated(self) -> None:
@@ -2456,6 +2487,33 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
             logger.debug("Migration applied and recorded: %s", name)
 
+
+    def _migrate_remix_lineage(self) -> None:
+        # #77: remix lineage — artifacts.parent_artifact_id（派生自哪个产物，NULL=原创）
+        cur = self._conn.execute("PRAGMA table_info(artifacts)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "parent_artifact_id" not in columns:
+            self._conn.executescript(
+                "ALTER TABLE artifacts ADD COLUMN parent_artifact_id TEXT DEFAULT NULL;"
+            )
+            self._conn.commit()
+            logger.info("Migrated: added 'parent_artifact_id' column to artifacts table")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_parent ON artifacts(parent_artifact_id)"
+        )
+        self._conn.commit()
+
+    def _migrate_share_permission(self) -> None:
+        # #77: share permission level — 'view'（只读，默认）/ 'remix'（可派生）
+        cur = self._conn.execute("PRAGMA table_info(artifact_shares)")
+        columns = {row["name"] for row in cur.fetchall()}
+        if "permission" not in columns:
+            self._conn.executescript(
+                "ALTER TABLE artifact_shares ADD COLUMN permission TEXT DEFAULT 'view' "
+                "CHECK(permission IN ('view','remix'));"
+            )
+            self._conn.commit()
+            logger.info("Migrated: added 'permission' column to artifact_shares table")
 
     def _migrate_event_timestamps(self) -> None:
         # A-8: artifact_events.created_at 统一 REAL epoch。旧 ISO 串转 epoch。

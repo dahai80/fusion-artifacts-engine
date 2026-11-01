@@ -3,6 +3,7 @@ import {
     Code2,
     FileText,
     BarChart3,
+    GitFork,
     Globe,
     Link2,
     Package,
@@ -90,6 +91,12 @@ function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: strin
                 <span className="rounded-md bg-indigo-500/10 px-1.5 py-0.5 font-medium text-indigo-600 dark:text-indigo-400">
                     {typeLabel(a, lang)}
                 </span>
+                {a.parent_artifact_id && (
+                    <span className="flex items-center gap-0.5 text-violet-600 dark:text-violet-400">
+                        <GitFork size={11} />
+                        {d.remixBadge}
+                    </span>
+                )}
                 {a.share_id && (
                     <span className="flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                         <Link2 size={11} />
