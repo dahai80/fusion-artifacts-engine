@@ -42,6 +42,7 @@ export interface Artifact {
     share_id: string | null;
     source_module: string | null;
     workflow_run_id: string | null;
+    parent_artifact_id: string | null;
 }
 
 export interface ArtifactVersion {
@@ -93,13 +94,18 @@ export async function listEvents(id: string): Promise<any[]> {
     return r.events ?? r;
 }
 
-export async function createShare(id: string): Promise<{ share_id: string }> {
-    const r = await rpc("artifact.create_share", { artifact_id: id });
+export async function createShare(id: string, permission: "view" | "remix" = "view"): Promise<{ share_id: string; permission: string }> {
+    const r = await rpc("artifact.create_share", { artifact_id: id, permission });
     return r.share;
 }
 
 export async function revokeShare(shareId: string): Promise<void> {
     await rpc("artifact.revoke_share", { share_id: shareId });
+}
+
+export async function remixArtifact(id: string): Promise<Artifact> {
+    const r = await rpc("artifact.remix", { artifact_id: id });
+    return r.artifact;
 }
 
 export async function restoreArtifact(id: string): Promise<void> {
