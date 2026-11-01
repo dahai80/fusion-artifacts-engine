@@ -61,9 +61,9 @@ fusion-artifacts-engine status
 
 ## 认证
 
-引擎通过 `X-API-Key` 请求头进行 API Key 认证。
+引擎通过 `X-API-Key` 请求头进行 API Key 认证（v0.6.0 起同时接受 `Authorization: Bearer <key>` — fusion-gateway shell 代理注入的是 Bearer）。
 
-- 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>`
+- 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>` 或 `Authorization: Bearer <key>`
 - 若**未**配置 `api_key`，默认**拒绝**所有请求（fail-closed，`allow_no_auth: false`）
 - 生产环境：设置 `api_key`（env `FUSION_ARTIFACTS_API_KEY` 或 `security.api_key`）强制认证
 - 本地单机受信网络：可显式 `allow_no_auth: true` 跳过鉴权（不推荐公网/多租户）
@@ -630,6 +630,43 @@ import { VisualStage } from "@fusion/artifacts-visual";
 测试：`cd client && bun install && bun test`（16 个用例）；类型检查：
 `bunx tsc --noEmit`。
 
+
+## Web Shell 集成 (v0.6.0, issue #75)
+
+守护进程启动时向 fusion-gateway 自助注册为 web-shell 模块，📦 **Artifacts** 菜单即出现在统一 Web Shell（`http://127.0.0.1:11432`），网关侧零配置改动。
+
+```yaml
+# ~/.fusion/artifacts/config.yaml
+security:
+  api_key: "<强随机key>"       # 必填 — 网关代理以 Bearer 注入
+gateway:
+  enabled: true
+  url: "http://127.0.0.1:11432"
+  module_id: "fusion-artifacts"
+  admin_key: "<网关 web_shell.admin_key>"  # 仅首次引导；此后引擎 api_key 自愈重注册
+  heartbeat_interval: 15       # 须小于网关 heartbeat_timeout（默认 30s）
+```
+
+- **自助注册**：启动时 POST shell manifest 到 `POST /api/v1/shell/manifests`（入口 `/shell/fusion-artifacts/`、健康检查 `/healthz`、upstream `http://127.0.0.1:11451`）。注册以引擎自身 `api_key` 授权（self-keyed 模式），首次引导回退 `admin_key`。
+- **心跳**：后台线程每 15s POST `…/shell/manifests/fusion-artifacts/heartbeat`；收到 404（如网关重启丢状态）自动重新注册。
+- **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <引擎 api_key>` — 即上文双通道认证的由来。
+- 注册/心跳失败**不影响服务**：网关宕机时引擎照常工作。
+
+## Web 管理界面 (v0.6.0, issue #76)
+
+内置 Web GUI（`webui/`，Vite + React 18 + Tailwind v4），由守护进程自身从 `fusion_artifacts_engine/webui_dist/` 静态服务 — 同源访问 `http://127.0.0.1:11451/`，或经 shell 代理 `/shell/fusion-artifacts/`。内核零改动：GUI 只调用既有 JSON-RPC 方法。
+
+- **库视图** — 类型标签页（全部 / HTML 应用 / 文档 / 图表 / 代码）带计数、名称+摘要搜索、排序（更新/创建/名称）、星标、来源归属（`source_module` → `metadata.source` → 会话）、已分享分组、回收站恢复。
+- **详情视图** — 三态预览：HTML/React 在沙箱 iframe 中渲染（`sandbox="allow-scripts allow-forms allow-popups"`，blob URL — 不内联回显产物字节）、markdown 经 `marked` 渲染、代码/数据以文本展示；版本时间线支持对比（统一 diff、着色）与一键回滚；引用会话反向查询（来自持久化事件）；分享创建/撤销/复制链接。
+- **暗黑/明亮主题 + 中/英双语**，localStorage 持久化；hash 路由（`#/a/<id>`）支持深链。
+- 静态服务加固：入口页 `no-store` + 严格 CSP（`frame-ancestors` 允许网关源以便 iframe 嵌入）、hash 文件名资源 `immutable`、路径穿越拒绝、dist 缺失时降级 404 不影响 RPC。
+
+```bash
+# 修改 webui/ 后重新构建
+cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/webui_dist/
+```
+
+构建产物作为 package-data 提交入库（CI 测试 `test_webui_real_dist_shipped` 缺失即失败）。
 
 ## 路线图
 
