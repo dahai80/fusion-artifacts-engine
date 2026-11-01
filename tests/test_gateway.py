@@ -204,6 +204,17 @@ def test_gateway_heartbeat_404_reregisters(tmp_path):
     assert fake.calls[1]["url"].endswith("/api/v1/shell/manifests")
 
 
+def test_gateway_heartbeat_403_reregisters(tmp_path):
+    # #75 实测回归：gateway 重启清空 manifest store 后心跳 403 heartbeat_forbidden
+    # （无该 module 的 service key 记录）→ 也要触发再注册，否则菜单消失直到引擎重启
+    client = _make_client(tmp_path)
+    fake = _FakeHttpClient([(403, '{"code":"heartbeat_forbidden"}'), (200, '{"code":"ok"}')])
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert fake.calls[0]["url"].endswith("/heartbeat")
+    assert fake.calls[1]["url"].endswith("/api/v1/shell/manifests")
+
+
 def test_gateway_start_stop(tmp_path):
     client = _make_client(tmp_path, gateway_heartbeat_interval=5)
     fake = _FakeHttpClient([(200, ""), (200, "")])
