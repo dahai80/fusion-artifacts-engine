@@ -268,9 +268,10 @@ curl -X POST http://127.0.0.1:11451 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create_share` | artifact_id, max_accesses?, expires_at? | Create share link |
+| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | Create share link (upserts permission on existing link) |
 | `artifact.get_shared` | share_id | Get shared artifact (public) |
 | `artifact.revoke_share` | share_id | Revoke share link |
+| `artifact.remix` | artifact_id, new_name? | Remix a derived copy with `parent_artifact_id` lineage |
 
 ### Snapshot Methods (P2)
 
@@ -829,6 +830,28 @@ cd webui && bun install && bun run build   # output → fusion_artifacts_engine/
 ```
 
 The compiled dist is committed as package-data (CI test `test_webui_real_dist_shipped` fails if it's missing).
+
+## Share Permissions & Remix (v0.6.0, issue #77)
+
+Claude-Artifacts-style remix + share, scoped to the intranet:
+
+- **Share permission levels** — `artifact.create_share` accepts `permission: "view" | "remix"` (default `view` = read-only). Creating a share for an artifact that already has one **upserts the permission on the same link** — changes take effect on the next open. The public payload `GET /api/v1/share/{share_id}` includes `permission`; expired/revoked/exhausted links return explicit `410 Gone` states.
+- **Remix lineage** — `artifact.remix` copies the current version into a new independent artifact with `parent_artifact_id` set (`storage.duplicate_artifact(..., parent_artifact_id=...)`). Schema columns `artifacts.parent_artifact_id` and `artifact_shares.permission` are added by idempotent migrations. The GUI shows a remix badge on cards, a "remix of `<parent>`" lineage link in the detail header, and a Remix button that deep-links into the new copy.
+- **[Continue conversation]** — the GUI detail view links to `/shell/fusion-cowork/?artifact_ref=<artifact_id>` (lightweight ~30-token ref; fusion-cowork consumes the reference, tracked cross-repo).
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.create_share",
+ "params": {"artifact_id": "art_x", "permission": "remix", "expires_at": "2026-11-09T00:00:00+08:00"}}
+{"jsonrpc": "2.0", "id": 2, "method": "artifact.remix", "params": {"artifact_id": "art_x"}}
+```
+
+## Artifact Card Deep-Link Contract (issue #78)
+
+For cowork run timelines (fusion-cowork#224) and code session streams (fusion-code#228) rendering artifact reference cards:
+
+- **Card data**: `artifact.get` / `GET /api/v1/artifacts/{id}` returns all card fields (name, type, kind, current_version, summary, source_module, is_starred). Cards stay fresh: re-fetch on render; version bumps appear on next render.
+- **Conversation payload stays a lightweight ref**: `ref_text` format `[Artifact: <name> | ID: <id> | Version: v<n> | Type: <type> | Size: <bytes> | Summary: …]` (~30 tokens, no content inflation).
+- **Deep link**: open `http://<shell-host>:11432/shell/fusion-artifacts/#/a/<artifact_id>` (hash route straight into the AR2 detail view; works cross-iframe from any shell module).
 
 ## Roadmap
 

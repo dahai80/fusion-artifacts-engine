@@ -137,9 +137,10 @@ curl -X POST http://127.0.0.1:11451 \
 
 | 方法 | 参数 | 说明 |
 |---|---|---|
-| `artifact.create_share` | artifact_id, max_accesses?, expires_at? | 创建分享链接 |
+| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | 创建分享链接（已有链接则 upsert 权限） |
 | `artifact.get_shared` | share_id | 获取分享的产物（公开） |
 | `artifact.revoke_share` | share_id | 撤销分享链接 |
+| `artifact.remix` | artifact_id, new_name? | Remix 派生副本，记录 `parent_artifact_id` 血统 |
 
 ### 快照方法 (P2)
 
@@ -667,6 +668,28 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 ```
 
 构建产物作为 package-data 提交入库（CI 测试 `test_webui_real_dist_shipped` 缺失即失败）。
+
+## 分享权限与 Remix (v0.6.0, issue #77)
+
+对标 claude.ai Artifacts 的 remix + 分享，半径限定内网：
+
+- **分享权限三态** — `artifact.create_share` 接受 `permission: "view" | "remix"`（默认 `view` 只读）。对已分享产物重复 create_share **在同一链接上 upsert 权限** — 改动下次打开即生效。公开端点 `GET /api/v1/share/{share_id}` 返回 `permission`；过期/撤销/耗尽的链接返回明确的 `410 Gone` 状态。
+- **Remix 血统** — `artifact.remix` 将当前版本复制为独立新产物并记录 `parent_artifact_id`。`artifacts.parent_artifact_id` 与 `artifact_shares.permission` 两列由幂等迁移补齐。GUI 卡片显示 remix 徽标、详情头部显示 "remix 自 `<父产物>`" 血统链接、Remix 按钮创建后直达新副本。
+- **[就此产物继续对话]** — GUI 详情页链接到 `/shell/fusion-cowork/?artifact_ref=<artifact_id>`（~30 token 轻量引用；fusion-cowork 侧消费该引用，跨仓跟进）。
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.create_share",
+ "params": {"artifact_id": "art_x", "permission": "remix", "expires_at": "2026-11-09T00:00:00+08:00"}}
+{"jsonrpc": "2.0", "id": 2, "method": "artifact.remix", "params": {"artifact_id": "art_x"}}
+```
+
+## 产物卡片深链契约 (issue #78)
+
+供 cowork 运行时间线（fusion-cowork#224）与 code 会话流（fusion-code#228）渲染产物引用卡片：
+
+- **卡片数据**：`artifact.get` / `GET /api/v1/artifacts/{id}` 返回全部卡片字段（name、type、kind、current_version、summary、source_module、is_starred）。每次渲染重新拉取，版本变更下次渲染即同步。
+- **会话载荷保持轻量引用**：`ref_text` 格式 `[Artifact: <名称> | ID: <id> | Version: v<n> | Type: <类型> | Size: <字节> | Summary: …]`（~30 token，不膨胀内容）。
+- **深链**：打开 `http://<shell主机>:11432/shell/fusion-artifacts/#/a/<artifact_id>`（hash 路由直达 AR2 详情视图；支持跨 iframe 调用）。
 
 ## 路线图
 

@@ -664,15 +664,28 @@ class ArtifactEngine:
     # ── P1: share ──────────────────────────────────────────────
 
     def create_share(
-        self,
-        artifact_id: str,
-        created_by: str | None = None,
-        expires_at: str | None = None,
-        max_accesses: int | None = None,
+        self, artifact_id: str, created_by: str | None = None,
+        expires_at: str | None = None, max_accesses: int | None = None,
+        permission: str = "view",
     ) -> ArtifactShare:
         # H7: 委托 ShareManager
         return self.share_mgr.create_share(
-            artifact_id, created_by, expires_at, max_accesses
+            artifact_id, created_by, expires_at, max_accesses, permission
+        )
+
+    def remix_artifact(
+        self, artifact_id: str, new_name: str | None = None
+    ) -> Artifact | None:
+        # #77: remix 派生副本 — 复制当前版本为独立产物，parent_artifact_id 记录血统
+        art = self.storage.get_artifact(artifact_id)
+        if art is None:
+            raise ValueError(f"Artifact not found: {artifact_id}")
+        logger.info("Remixing artifact %s", artifact_id)
+        return self.storage.duplicate_artifact(
+            artifact_id,
+            generate_artifact_id(self.config.artifact_id_prefix),
+            new_name or f"{art.name} (remix)",
+            parent_artifact_id=artifact_id,
         )
 
     def get_shared_artifact(self, share_id: str) -> dict | None:

@@ -8,8 +8,10 @@ import {
     History,
     Link2,
     MessageSquare,
+    MessagesSquare,
     RotateCcw,
     X,
+    GitFork,
 } from "lucide-react";
 import {
     createShare,
@@ -17,6 +19,7 @@ import {
     getContent,
     listEvents,
     listVersions,
+    remixArtifact,
     revokeShare,
     rollback,
     versionDiff,
@@ -54,6 +57,8 @@ export default function Detail({
     const [error, setError] = useState("");
     const [copied, setCopied] = useState(false);
     const [busy, setBusy] = useState(false);
+    const [sharePerm, setSharePerm] = useState<"view" | "remix">("view");
+    const [parentName, setParentName] = useState("");
 
     const load = async () => {
         try {
@@ -81,6 +86,17 @@ export default function Detail({
     useEffect(() => {
         load();
     }, [id]);
+
+    useEffect(() => {
+        // #77: remix lineage — fetch parent name for the header badge
+        if (!artifact?.parent_artifact_id) {
+            setParentName("");
+            return;
+        }
+        getArtifact(artifact.parent_artifact_id)
+            .then((p) => setParentName(p.name))
+            .catch(() => setParentName(artifact.parent_artifact_id || ""));
+    }, [artifact?.parent_artifact_id]);
 
     const blobUrl = useMemo(() => {
         if (!artifact || !content) return "";
@@ -131,11 +147,23 @@ export default function Detail({
     const doShare = async () => {
         setBusy(true);
         try {
-            await createShare(id);
+            await createShare(id, sharePerm);
             await load();
         } catch (e) {
             setError(`${d.loadError}: ${(e as Error).message}`);
         } finally {
+            setBusy(false);
+        }
+    };
+
+    const doRemix = async () => {
+        if (!window.confirm(d.confirmRemix)) return;
+        setBusy(true);
+        try {
+            const child = await remixArtifact(id);
+            window.location.hash = `#/a/${child.id}`;
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
             setBusy(false);
         }
     };
@@ -198,8 +226,39 @@ export default function Detail({
                         {d.source} {sourceLabel(artifact)} · {d.fromSession} {artifact.session_id} ·{" "}
                         {relTime(artifact.updated_at, lang)}
                     </p>
+                    {artifact.parent_artifact_id && (
+                        <button
+                            onClick={() => (window.location.hash = `#/a/${artifact.parent_artifact_id}`)}
+                            className="mt-1.5 flex items-center gap-1 text-xs text-indigo-500 transition hover:text-indigo-600"
+                        >
+                            <GitFork size={11} />
+                            {d.remixOf} {parentName || artifact.parent_artifact_id}
+                        </button>
+                    )}
                 </div>
                 <div className="flex items-center gap-2">
+                    <button
+                        disabled={busy}
+                        onClick={doRemix}
+                        className="flex items-center gap-1 rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        title={d.remix}
+                    >
+                        <GitFork size={12} />
+                        {d.remix}
+                    </button>
+                    <button
+                        onClick={() =>
+                            window.open(
+                                `/shell/fusion-cowork/?artifact_ref=${encodeURIComponent(id)}`,
+                                "_blank"
+                            )
+                        }
+                        className="flex items-center gap-1 rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        title={d.continueChat}
+                    >
+                        <MessagesSquare size={12} />
+                        {d.continueChat}
+                    </button>
                     {isHtml && (
                         <ModeBtn active={mode === "preview"} onClick={() => setMode("preview")}>
                             {d.runPreview}
@@ -389,13 +448,26 @@ export default function Detail({
                                 </button>
                             </div>
                         ) : (
-                            <button
-                                disabled={busy}
-                                onClick={doShare}
-                                className="w-full rounded-xl bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
-                            >
-                                {d.createShare}
-                            </button>
+                            <div className="space-y-2">
+                                <div className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                    <span className="shrink-0">{d.permission}</span>
+                                    <select
+                                        value={sharePerm}
+                                        onChange={(e) => setSharePerm(e.target.value as typeof sharePerm)}
+                                        className="flex-1 rounded-lg border border-zinc-200/80 bg-white px-2 py-1 text-xs outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+                                    >
+                                        <option value="view">{d.permView}</option>
+                                        <option value="remix">{d.permRemix}</option>
+                                    </select>
+                                </div>
+                                <button
+                                    disabled={busy}
+                                    onClick={doShare}
+                                    className="w-full rounded-xl bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                                >
+                                    {d.createShare}
+                                </button>
+                            </div>
                         )}
                     </div>
                 </aside>
