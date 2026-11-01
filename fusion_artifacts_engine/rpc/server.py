@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import queue
 import re
@@ -12,8 +13,9 @@ import time
 import typing
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from socketserver import ThreadingMixIn
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.metrics import get_metrics
@@ -35,6 +37,20 @@ logger = logging.getLogger(__name__)
 # LOW-1: share_id 公开端点格式预校验。合法 share_id 形如 shr_<12 hex>（见 share.py）。
 # 非法格式直接 400，省掉一次 DB 往返，且不泄露「该 share 是否存在」。
 _SHARE_ID_RE = re.compile(r"^shr_[A-Za-z0-9]{12}$")
+
+# #76: web GUI 静态资源目录（vite build 产物，package-data 随包分发）。
+# gateway /shell/fusion-artifacts/ 代理剥前缀后 GET / 落到这里。
+_WEBUI_DIST = Path(__file__).resolve().parent.parent / "webui_dist"
+# CSP：frame-ancestors 放行 gateway 同源 iframe（web-shell 宿主在 11432）；
+# blob: 供 GUI 详情页预览 iframe（blob URL 不继承父页 CSP，sandbox 隔离）。
+_WEBUI_CSP = (
+    "default-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-src 'self' data: blob:; "
+    "frame-ancestors 'self' http://127.0.0.1:11432 http://localhost:11432"
+)
 
 # P1-3/H12: 每请求生成 uuid4 request ID，回写 X-Request-ID 响应头 + 绑入日志 extra，
 # 让运维从客户端回溯到服务端日志行。BaseHTTPRequestHandler 每请求新建 handler 实例，
@@ -169,7 +185,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "Auth rejected: no API_KEY configured and allow_no_auth=False"
             )
             return False
+        # #75: 双通道鉴权。X-API-Key 为传统通道（fusion-studio/fusion-code 直连）；
+        # Authorization: Bearer 为 gateway /shell/<id>/ 代理注入通道（代理剥离调用方
+        # 凭据后只注入 Bearer）。两者常量时间比较，任一匹配即通过。
         provided = self.headers.get("X-API-Key", "")
+        if not provided:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                provided = auth_header[len("Bearer "):].strip()
         return hmac.compare_digest(provided, api_key)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
@@ -351,7 +374,51 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_get()
             return
+        # #76: web GUI。GET / 返回 index.html，GET /assets/* 返回构建产物。
+        # 仅在 webui_dist 存在时生效（源码安装无 dist 时保持 404，REST/RPC 不受影响）。
+        if self._try_serve_webui():
+            return
         self._send_rest_response(404, {"error": "Not found"})
+
+    def _try_serve_webui(self) -> bool:
+        # #76: 静态服务仅 GET；webui_dist 缺失（开发/最小安装）直接跳过。
+        if not _WEBUI_DIST.is_dir():
+            return False
+        path = unquote(urlparse(self.path).path)
+        if path in ("/", "/index.html"):
+            return self._serve_webui_file(_WEBUI_DIST / "index.html", no_store=True)
+        if path.startswith("/assets/") or path in ("/favicon.svg", "/favicon.ico"):
+            rel = path.lstrip("/")
+            target = (_WEBUI_DIST / rel).resolve()
+            # 路径穿越防护：解析后必须仍在 dist 目录内
+            if not str(target).startswith(str(_WEBUI_DIST.resolve())):
+                self._log.warning("webui path traversal rejected: %s", path)
+                self._send_rest_response(404, {"error": "Not found"})
+                return True
+            return self._serve_webui_file(target, no_store=False)
+        return False
+
+    def _serve_webui_file(self, target: Path, no_store: bool) -> bool:
+        if not target.is_file():
+            return False
+        ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        try:
+            data = target.read_bytes()
+        except OSError as e:
+            self._log.warning("webui read failed %s: %s", target, e)
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        # index.html 永不缓存（入口页钉死旧 bundle hash）；assets 文件名带 hash 可长期缓存
+        if no_store:
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", _WEBUI_CSP)
+        else:
+            self.send_header("Cache-Control", "public, max-age=86400, immutable")
+        self.end_headers()
+        self.wfile.write(data)
+        return True
 
     def _handle_healthz(self) -> None:
         # 运维5: liveness——进程能响应即 200。不查依赖，避免依赖抖动导致重启循环。

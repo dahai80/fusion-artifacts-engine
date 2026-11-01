@@ -52,3 +52,10 @@ metrics:
 tracing:
   enabled: false              # OTel tracing; requires pip install ".[otel]"
   service_name: "fusion-artifacts-engine"
+
+gateway:
+  enabled: false              # web-shell integration: self-register manifest + heartbeat to fusion-gateway (#75)
+  url: "http://127.0.0.1:11432"
+  module_id: "fusion-artifacts"
+  admin_key: ""               # bootstrap only (gateway web_shell.admin_key); after first registration the engine api_key self-heals
+  heartbeat_interval: 15      # seconds; keep below the gateway heartbeat_timeout (30s default)

@@ -191,9 +191,9 @@ See `audit/fusion-artifacts-audit-0824.md` §9 for the per-finding fix map.
 
 ## Authentication
 
-The engine uses API key authentication via the `X-API-Key` header.
+The engine uses API key authentication via the `X-API-Key` header (v0.6.0: `Authorization: Bearer <key>` is also accepted — the fusion-gateway shell proxy injects Bearer tokens).
 
-- If `api_key` is configured (env `FUSION_ARTIFACTS_API_KEY` or `security.api_key`), all requests must include `X-API-Key: <key>` (constant-time compare)
+- If `api_key` is configured (env `FUSION_ARTIFACTS_API_KEY` or `security.api_key`), all requests must include `X-API-Key: <key>` or `Authorization: Bearer <key>` (constant-time compare)
 - If `api_key` is **not** configured, requests are **rejected by default** (`allow_no_auth: false`, fail-closed)
 - Set `allow_no_auth: true` only for trusted single-user local use; production should set `api_key`
 
@@ -791,6 +791,44 @@ import { VisualStage, VisualEngineDispatcher } from "@fusion/artifacts-visual";
 
 Tests: `cd client && bun install && bun test` (16 tests), typecheck:
 `bunx tsc --noEmit`.
+
+## Web Shell Integration (v0.6.0, issue #75)
+
+The daemon self-registers as a fusion-gateway web-shell module at startup, so the 📦 **Artifacts** menu appears in the union web shell (`http://127.0.0.1:11432`) with zero gateway-side config changes.
+
+```yaml
+# ~/.fusion/artifacts/config.yaml
+security:
+  api_key: "<strong-key>"      # required — gateway proxy injects it as Bearer
+gateway:
+  enabled: true
+  url: "http://127.0.0.1:11432"
+  module_id: "fusion-artifacts"
+  admin_key: "<gateway web_shell.admin_key>"  # bootstrap only; the engine api_key
+                                              # self-heals re-registration afterwards
+  heartbeat_interval: 15       # keep below gateway heartbeat_timeout (30s)
+```
+
+- **Self-registration**: on start the engine POSTs its shell manifest to `POST /api/v1/shell/manifests` (id `/shell/fusion-artifacts/`, health `/healthz`, upstream `http://127.0.0.1:11451`). Registration authorizes with the engine's own `api_key` (self-keyed pattern), falling back to `admin_key` on first bootstrap.
+- **Heartbeat**: a daemon thread POSTs `…/shell/manifests/fusion-artifacts/heartbeat` every 15s; a 404 (e.g. gateway restart wiped state) triggers automatic re-registration.
+- **Proxy auth**: the gateway shell proxy strips caller credentials, forwards `/shell/fusion-artifacts/<rest>` to `upstream/<rest>`, and injects `Authorization: Bearer <engine api_key>` — hence the dual-channel auth above.
+- Registration/heartbeat failures are **non-fatal**: the daemon keeps serving even if the gateway is down.
+
+## Web GUI (v0.6.0, issue #76)
+
+A built-in web GUI (`webui/`, Vite + React 18 + Tailwind v4) served by the daemon itself from `fusion_artifacts_engine/webui_dist/` — same-origin at `http://127.0.0.1:11451/` and through the shell proxy at `/shell/fusion-artifacts/`. Kernel zero change: the GUI consumes only existing JSON-RPC methods.
+
+- **Library view** — type tabs (All / HTML apps / Documents / Charts / Code) with counts, name+summary search, sort (updated/created/name), starred indicator, source attribution (`source_module` → `metadata.source` → session), shared-links group, recycle bin with restore.
+- **Detail view** — three-state preview: HTML/React renders in a sandboxed iframe (`sandbox="allow-scripts allow-forms allow-popups"`, blob URL — no inline echo of artifact bytes), markdown renders via `marked`, code/data shown as text; version timeline with compare (unified diff, color-coded) and one-click rollback; referencing-sessions reverse lookup from persisted events; share create/revoke/copy-link.
+- **Dark/light theme + zh/en i18n**, persisted in localStorage; hash routing (`#/a/<id>`) for deep links.
+- Static serving hardening: entry served `no-store` with a strict CSP (`frame-ancestors` allows the gateway origin so iframe embedding works), hashed assets served `immutable`, path traversal rejected, missing dist degrades to 404 without touching RPC.
+
+```bash
+# Rebuild the GUI after editing webui/
+cd webui && bun install && bun run build   # output → fusion_artifacts_engine/webui_dist/
+```
+
+The compiled dist is committed as package-data (CI test `test_webui_real_dist_shipped` fails if it's missing).
 
 ## Roadmap
 

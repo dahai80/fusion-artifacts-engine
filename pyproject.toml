@@ -45,7 +45,7 @@ fusion-artifacts-engine = "fusion_artifacts_engine.__main__:main"
 include = ["fusion_artifacts_engine*"]
 
 [tool.setuptools.package-data]
-fusion_artifacts_engine = ["default_config.yaml"]
+fusion_artifacts_engine = ["default_config.yaml", "webui_dist/*", "webui_dist/assets/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

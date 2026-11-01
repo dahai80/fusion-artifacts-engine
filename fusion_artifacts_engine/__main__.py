@@ -136,6 +136,20 @@ def main():
         # 放 watch loop 外——重启不改端口，无需重复设置。
         _set_process_title(f"fusion-artifacts-engine serve :{port}")
 
+        # #75: web-shell 集成。enabled 时向 fusion-gateway 自注册 manifest + 心跳。
+        # 注册/心跳线程独立于 engine 生命周期（watch 重启不重复注册）。
+        gateway_client = None
+        if config.gateway_enabled:
+            from fusion_artifacts_engine.gateway_client import GatewayClient
+
+            gateway_client = GatewayClient(config, host, port)
+            try:
+                gateway_client.start()
+            except Exception as e:  # noqa: BLE001
+                # 增强面：gateway 不可达不阻断引擎启动
+                logger.warning("gateway client start failed (non-fatal): %s", e)
+                gateway_client = None
+
         # P1-1/H4: 限流生产告警。rps==0 表示不限流——生产环境裸奔，启动显式 WARN。
         # default_config.yaml 已设生产默认值（rps:200/burst:400，public_rps:50/burst:100），
         # 但用户自定义配置或测试环境可能回退 0，此处兜底告警。
@@ -152,16 +166,23 @@ def main():
 
         # P0-8: watch loop 包裹单次 run。--watch 时 engine 退出码非 0 则 backoff 后重启。
         # 退出码 0（优雅 stop）跳出循环。单次 run 内含信号注册与 stop_event 逻辑。
-        while True:
-            code = _run_once(config, host, port)
-            if not getattr(args, "watch", False):
-                sys.exit(code)
-            if code == 0:
-                logger.info("watch: engine exited 0 (graceful), watcher exiting")
-                sys.exit(0)
-            backoff = getattr(args, "restart_backoff", 3.0)
-            logger.warning("watch: engine crashed (code=%s), restart in %ss", code, backoff)
-            time.sleep(backoff)
+        try:
+            while True:
+                code = _run_once(config, host, port)
+                if not getattr(args, "watch", False):
+                    sys.exit(code)
+                if code == 0:
+                    logger.info("watch: engine exited 0 (graceful), watcher exiting")
+                    sys.exit(0)
+                backoff = getattr(args, "restart_backoff", 3.0)
+                logger.warning("watch: engine crashed (code=%s), restart in %ss", code, backoff)
+                time.sleep(backoff)
+        finally:
+            if gateway_client is not None:
+                try:
+                    gateway_client.stop()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("gateway client stop: %s", e)
 
     elif args.command == "status":
         import os
