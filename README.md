@@ -875,6 +875,7 @@ Share links now open a rendered read-only page instead of a JSON payload:
 - **Permission-aware**: `view` shares render read-only. `remix` shares render the same page plus a **Remix to my library** button that deep-links to the shell route `#/s/<share_id>?remix=1` — the shell prompts for login, then the GUI remixes the share into the viewer's library with `parent_artifact_id` lineage preserved.
 - **Expired/revoked/exhausted** links render a clean expired page with `410 Gone`; unknown ids return `404`; the artifact body is never emitted in either case.
 - **Link generation**: `artifact.create_share` now returns `share_url` (`<share.public_base_url>/s/<share_id>`); the GUI copy button uses it. `GET /api/v1/share-base` (authenticated) exposes the configured base for client-side link building. `share.public_base_url` defaults to `http://<server.host>:<server.port>` — set it when the daemon sits behind a reverse proxy or on a different public host.
+- **v0.6.2 hardening (#86)**: the nonce CSP meta is emitted from one place in the page wrapper, so the `data` and code-fallback branches carry it too (previously only html/markdown/svg did); when the `share-base` fetch fails the GUI copy fallback is the same-origin `/s/<id>` page route, never the raw `/api/v1/share/` JSON endpoint; the logged-in remix deep link is covered end to end by `tests/test_remix_deep_link_e2e.py` (page → public share JSON → authenticated remix with lineage) plus a live browser run through the shell session gate.
 
 ## fusion-design Save-to-Artifacts IPC (v0.6.1, issue #84)
 
