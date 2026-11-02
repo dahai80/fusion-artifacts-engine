@@ -18,9 +18,7 @@ def extract_sections(content: str, artifact_type: str) -> list[dict]:
         for m in re.finditer(r"^(#{1,6})\s+(.+)$", content, re.MULTILINE):
             sections.append({"anchor": m.group(2).strip(), "level": len(m.group(1))})
     elif artifact_type == "code":
-        for m in re.finditer(
-            r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", content, re.MULTILINE
-        ):
+        for m in re.finditer(r"^(?:async\s+)?(?:def|class|func)\s+(\w+)", content, re.MULTILINE):
             sections.append({"anchor": m.group(1), "level": 1})
     return sections
 
@@ -28,9 +26,7 @@ def extract_sections(content: str, artifact_type: str) -> list[dict]:
 # H7: 以下 section 边界/patch 逻辑从 engine.py 抽出。纯函数无状态，行为不变。
 
 
-def all_section_bounds(
-    content: str, artifact_type: str
-) -> list[tuple[int, int, int, str]]:
+def all_section_bounds(content: str, artifact_type: str) -> list[tuple[int, int, int, str]]:
     # P-1: 一次线性扫预计算所有标题位置 + section 边界，避免 O(n^2)。
     # 返回 (start, end, level, anchor) 列表，end 为下一同级/更高级标题行号。
     lines = content.split("\n")
@@ -111,8 +107,7 @@ def replace_section(
     matches = find_section_bounds(content, anchor, artifact_type)
     if len(matches) > 1:
         raise ValueError(
-            f"Multiple matches for anchor '{anchor}': "
-            f"found at lines {[m[0] + 1 for m in matches]}"
+            f"Multiple matches for anchor '{anchor}': found at lines {[m[0] + 1 for m in matches]}"
         )
     if not matches:
         raise ValueError(f"Anchor '{anchor}' not found in content")
@@ -124,14 +119,11 @@ def replace_section(
     return "\n".join(new_lines), replaced_content
 
 
-def delete_section(
-    content: str, anchor: str, artifact_type: str
-) -> tuple[str, str]:
+def delete_section(content: str, anchor: str, artifact_type: str) -> tuple[str, str]:
     matches = find_section_bounds(content, anchor, artifact_type)
     if len(matches) > 1:
         raise ValueError(
-            f"Multiple matches for anchor '{anchor}': "
-            f"found at lines {[m[0] + 1 for m in matches]}"
+            f"Multiple matches for anchor '{anchor}': found at lines {[m[0] + 1 for m in matches]}"
         )
     if not matches:
         raise ValueError(f"Anchor '{anchor}' not found in content")
@@ -141,3 +133,57 @@ def delete_section(
     replaced_content = "\n".join(replaced_lines)
     new_lines = lines[:start] + lines[end:]
     return "\n".join(new_lines), replaced_content
+
+
+def build_toc(content: str, artifact_type: str) -> list[dict]:
+    # v0.7.1 #90: 结构化目录。每 section 带 1-based 行区间 + 字节数 + token 数，
+    # 供 artifact.toc 返回；调用方按 start_line/end_line 分块按需加载。
+    lines = content.split("\n")
+    toc = []
+    for start, end, level, anchor in all_section_bounds(content, artifact_type):
+        section_text = "\n".join(lines[start:end])
+        toc.append(
+            {
+                "anchor": anchor,
+                "level": level,
+                "start_line": start + 1,
+                "end_line": end,
+                "lines": end - start,
+                "chars": len(section_text),
+                "tokens": count_tokens(section_text),
+            }
+        )
+    return toc
+
+
+def read_line_range(content: str, offset: int = 0, limit: int | None = None) -> dict:
+    # v0.7.1 #90: 行区间分块读。offset 0-based 行号；limit None/<=0 = 读到结尾。
+    # 只 join 请求的行，不做全量切片拷贝。
+    lines = content.split("\n")
+    total_lines = len(lines)
+    total_bytes = len(content.encode("utf-8"))
+    if offset < 0:
+        offset = 0
+    if offset >= total_lines:
+        return {
+            "content": "",
+            "offset": offset,
+            "lines": 0,
+            "total_lines": total_lines,
+            "total_bytes": total_bytes,
+            "truncated": False,
+        }
+    if limit is None or limit <= 0:
+        selected = lines[offset:]
+        truncated = False
+    else:
+        selected = lines[offset : offset + limit]
+        truncated = offset + limit < total_lines
+    return {
+        "content": "\n".join(selected),
+        "offset": offset,
+        "lines": len(selected),
+        "total_lines": total_lines,
+        "total_bytes": total_bytes,
+        "truncated": truncated,
+    }

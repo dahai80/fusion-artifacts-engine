@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from fusion_artifacts_engine import long_context
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.office_ingest import maybe_write_back
 from fusion_artifacts_engine.rpc.errors import (
@@ -10,6 +12,11 @@ from fusion_artifacts_engine.rpc.errors import (
     NotImplementedError,
     PermissionError,
     RpcError,
+)
+from fusion_artifacts_engine.section_index import (
+    build_toc,
+    find_section_bounds,
+    read_line_range,
 )
 from fusion_artifacts_engine.utils import get_package_version
 
@@ -20,6 +27,23 @@ class RPCHandler:
     def __init__(self, engine: ArtifactEngine):
         self.engine = engine
         self._method_map = self._build_methods()
+        # v0.7.1 #90: artifact.toc 每版本缓存（key=(artifact_id, version_num)），
+        # 新版本=新 key 自动失效；LRU 上限防多产物撑爆内存。
+        self._toc_cache: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
+        # v0.7.1 #91: 后台长上下文任务强引用集（防 create_task 被 GC）
+        self._bg_tasks: set[asyncio.Task] = set()
+
+    def _spawn_long_context(self, pre, version_num: int) -> None:
+        # #91: 滚动摘要 + RAG 归档均为后台任务——mlx 60s/rag 30s 超时绝不能
+        # 阻塞 patch/update 响应。失败在任务内记日志，永不影响 RPC 结果。
+        superseded = pre.current_version
+        for coro in (
+            long_context.maybe_archive_superseded(self.engine, pre, superseded),
+            long_context.maybe_generate_summary(self.engine, pre, version_num),
+        ):
+            task = asyncio.create_task(coro)
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
 
     async def dispatch(self, method: str, params: dict) -> Any:
         # P2-5/H12(trace): rpc.server.duration span 覆盖整个方法执行（含 storage I/O）。
@@ -134,6 +158,9 @@ class RPCHandler:
             "artifact.list_by_source": self._list_by_source,
             # AE-1: patch_artifact
             "artifact.patch": self._patch,
+            # v0.7.1 #90: 分块读路径（TOC + 行区间/section 视图）
+            "artifact.toc": self._toc,
+            "artifact.view": self._view,
             # AE-2: load_artifact
             "artifact.load": self._load,
             # AE-6: context_budget
@@ -285,6 +312,7 @@ class RPCHandler:
         # v0.7.0: office 来源产物更新后写回 .outbox（失败仅记日志，不影响结果）
         if pre is not None:
             await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
+            self._spawn_long_context(pre, version.version_num)
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
@@ -891,7 +919,97 @@ class RPCHandler:
         # v0.7.0: office 来源产物 patch 后写回 .outbox（失败仅记日志，不影响结果）
         if pre is not None:
             await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
+            self._spawn_long_context(pre, version.version_num)
         return {"version": version.model_dump(), "patch_info": patch_info}
+
+    def _resolve_version_sync(self, artifact_id: str, version_num: int | None):
+        # v0.7.1 #90: version 缺省=当前版本；指定版本不存在 → NotFoundError
+        if version_num is not None:
+            version = self.engine.storage.get_version(artifact_id, version_num)
+            if version is None:
+                raise NotFoundError(f"version {version_num} of {artifact_id} not found")
+            return version
+        artifact = self.engine.storage.get_artifact(artifact_id)
+        if artifact is None:
+            raise NotFoundError(f"artifact {artifact_id} not found")
+        version = self.engine.storage.get_version(artifact_id, artifact.current_version)
+        if version is None:
+            raise NotFoundError(f"current version of {artifact_id} not found")
+        return version
+
+    async def _toc(self, params: dict) -> dict:
+        artifact_id = params["artifact_id"]
+        version_num = params.get("version")
+        # P2-2/M1+F2: 读经 to_thread 卸载
+        version = await asyncio.to_thread(
+            self._resolve_version_sync, artifact_id, version_num
+        )
+        artifact = await asyncio.to_thread(self.engine.storage.get_artifact, artifact_id)
+        art_type = artifact.type if artifact else "text"
+        key = (artifact_id, version.version_num)
+        cached = self._toc_cache.get(key)
+        if cached is None:
+            cached = await asyncio.to_thread(build_toc, version.content, art_type)
+            self._toc_cache[key] = cached
+            self._toc_cache.move_to_end(key)
+            while len(self._toc_cache) > 128:
+                self._toc_cache.popitem(last=False)
+        return {
+            "artifact_id": artifact_id,
+            "version": version.version_num,
+            "type": art_type,
+            "toc": cached,
+            "total_lines": version.content.count("\n") + 1,
+            "total_bytes": len(version.content.encode("utf-8")),
+            "tokens": version.token_count,
+        }
+
+    async def _view(self, params: dict) -> dict:
+        artifact_id = params["artifact_id"]
+        version_num = params.get("version")
+        section = params.get("section")
+        offset = params.get("offset")
+        limit = params.get("limit")
+        if section is None and offset is None:
+            raise ValueError("artifact.view requires 'section' or 'offset' (+optional 'limit')")
+        version = await asyncio.to_thread(
+            self._resolve_version_sync, artifact_id, version_num
+        )
+        if section is not None:
+            # #90: section 视图——O(section) 而非 O(artifact)，只 join 命中行
+            content = version.content
+            artifact = await asyncio.to_thread(
+                self.engine.storage.get_artifact, artifact_id
+            )
+            art_type = artifact.type if artifact else "text"
+            bounds = await asyncio.to_thread(
+                find_section_bounds, content, section, art_type
+            )
+            if not bounds:
+                raise NotFoundError(f"section '{section}' not found in {artifact_id}")
+            start, end, _lvl = bounds[0]
+            lines = content.split("\n")
+            body = "\n".join(lines[start:end])
+            return {
+                "artifact_id": artifact_id,
+                "version": version.version_num,
+                "section": section,
+                "content": body,
+                "start_line": start + 1,
+                "end_line": end,
+                "lines": end - start,
+                "total_lines": content.count("\n") + 1,
+                "total_bytes": len(content.encode("utf-8")),
+                "tokens": version.token_count,
+            }
+        # #90: 行区间视图。limit 空=读到结尾（调用方按 total_lines 翻页）
+        chunk = await asyncio.to_thread(
+            read_line_range, version.content, int(offset or 0), int(limit) if limit else None
+        )
+        chunk["artifact_id"] = artifact_id
+        chunk["version"] = version.version_num
+        chunk["tokens"] = version.token_count
+        return chunk
 
     async def _load(self, params: dict) -> dict:
         # P2-2/M1+F2: 读经 to_thread 卸载

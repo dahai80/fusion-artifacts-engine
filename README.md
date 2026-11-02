@@ -229,6 +229,8 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | Create new version (optimistic lock) |
 | `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | Patch artifact (replace_section/append/prepend/delete_section) |
 | `artifact.load` | artifact_id, preview_only?, section? | Load artifact (preview/section/full, per-section token counts) |
+| `artifact.toc` | artifact_id, version? | Structured outline (anchor/level/line-range/chars/tokens), per-version cached |
+| `artifact.view` | artifact_id, version?, section? \| offset?, limit? | Chunk read — O(section) or O(chunk), with totals for pagination |
 | `context.budget` | session_id, context_window? | Session token budget summary |
 | `artifact.auto_compact` | artifact_id, token_budget | Auto-compress artifact to fit token budget; returns `reason` on no-op (`already_within_budget`/`could_not_reduce`) |
 | `artifact.version_diff` | artifact_id, from_version, to_version | Unified diff between two versions |
@@ -699,6 +701,16 @@ ipc:                     # #84 fusion-design / v0.7.0 fusion-office save_artifac
   office_dir: ""         # default <FUSION_OFFICE_DATA_DIR or ~/.fusion-office>/fusion-artifacts-engine
   poll_interval: 3.0
 
+long_context:            # v0.7.1 #91 rolling summary + rag archival (compactor stays last-resort)
+  summary_threshold: 5   # versions before mlx summary kicks in; 0=disabled
+  summary_model: ""      # empty = mlx default model
+  mlx_url: "http://127.0.0.1:11434"
+  mlx_api_key: ""        # empty = FUSION_MLX_API_KEY env
+  rag_enabled: true
+  rag_url: "http://127.0.0.1:11436"
+  rag_api_key: ""        # empty = FUSION_RAG_API_KEY env
+  rag_kb_id: "fusion-artifacts"
+
 rate_limit:              # Ops-1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
   rps: 0                 # default JSON-RPC bucket
   burst: 0
@@ -907,6 +919,29 @@ The engine consumes office documents from fusion-office through the same file-IP
             "anchor": "Findings", "content": "### Findings\n\npatched body"}}
 # → .outbox/art_x_v2.docx regenerated with the patched section
 ```
+
+## Long-Context Read Path & Hierarchical Compression (v0.7.1, issues #90/#91)
+
+Two long-context mechanisms layered on top of the existing compactor (which stays as the last-resort budget guard):
+
+**Read path (#90)** — consumers no longer choose between a ~30-token ref and a full-content `get`:
+
+- **`artifact.toc`** — structured outline per version: `{anchor, level, start_line, end_line, lines, chars, tokens}` (1-based, markdown headings / code defs). Cached per `(artifact_id, version)` (LRU 128) — a new version is a new cache key, so invalidation is automatic.
+- **`artifact.view`** — chunk read: `section` (returns only the matched section body with `start_line`/`end_line`/totals) or `offset`+`limit` line-range (with `total_lines`/`total_bytes`/`truncated` for pagination). O(section), not O(artifact) — a multi-MB artifact costs one section's bytes per read. Out-of-bounds offsets return an empty chunk with totals; missing sections raise `-32001`.
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.toc", "params": {"artifact_id": "art_x"}}
+{"jsonrpc": "2.0", "id": 2, "method": "artifact.view", "params": {"artifact_id": "art_x", "section": "Findings"}}
+{"jsonrpc": "2.0", "id": 3, "method": "artifact.view", "params": {"artifact_id": "art_x", "offset": 40, "limit": 80}}
+```
+
+Consumer contract (cowork/design/code): prompt assembly should carry the ref + TOC, and load chunks on demand via `artifact.view` instead of full `artifact.get`.
+
+**Hierarchical compression (#91)** — background tasks after every `artifact.update`/`artifact.patch` (never block the RPC response; failures log only):
+
+- **Rolling summary**: when an artifact's version count reaches `long_context.summary_threshold` (default 5), the engine asks fusion-mlx (`/v1/chat/completions`, ≤120 words) to summarize the version-change digest, writes it to `artifact.summary` (so every subsequent `ref_text` carries it), and stamps `metadata.summary_version` for per-version idempotency. Threshold `0` disables.
+- **RAG archival**: when a new version supersedes the current one, the superseded version's content is pushed to fusion-rag (`POST /bases/{kb}/documents/ingest`, `doc_name=<artifact_id>_v<N>.txt`, metadata `artifact_id`/`artifact_version`/`artifact_type`). `metadata.archived_versions` guarantees one archive per version. fusion-rag unreachable/4xx → warning log, version creation unaffected. Old versions stay queryable: `POST /bases/fusion-artifacts/search` filtered by `artifact_id`.
+- **Config** (`long_context` section): `summary_threshold` (5), `summary_model` ("" = mlx default), `mlx_url`, `mlx_api_key` ("" = `FUSION_MLX_API_KEY`), `rag_enabled` (true), `rag_url` (11436), `rag_api_key` ("" = `FUSION_RAG_API_KEY`), `rag_kb_id` (`fusion-artifacts`). Env overrides: `FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`, `_LC_RAG_ENABLED`, `_LC_MLX_URL`, `_LC_RAG_URL`.
 
 ## Artifact Card Deep-Link Contract (issue #78)
 

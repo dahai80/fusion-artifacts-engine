@@ -98,6 +98,8 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.update` | artifact_id, content, change_log?, source?, expected_content_hash? | 创建新版本（乐观锁） |
 | `artifact.patch` | artifact_id, operation, anchor?, content?, expected_version? | 补丁更新（replace_section/append/prepend/delete_section） |
 | `artifact.load` | artifact_id, preview_only?, section? | 加载产物（预览/章节/全文，含章节token数） |
+| `artifact.toc` | artifact_id, version? | 结构化目录（anchor/层级/行区间/字节/token），按版本缓存 |
+| `artifact.view` | artifact_id, version?, section? 或 offset?, limit? | 分块读——O(section) 或 O(chunk)，带总量信息供翻页 |
 | `context.budget` | session_id, context_window? | 会话令牌预算汇总 |
 | `artifact.auto_compact` | artifact_id, token_budget | 自动压缩产物至令牌预算内 |
 | `artifact.version_diff` | artifact_id, from_version, to_version | 两版本间统一差异对比 |
@@ -734,6 +736,29 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
             "anchor": "Findings", "content": "### Findings\n\npatched body"}}
 # → .outbox/art_x_v2.docx 携带 patch 后段落重新生成
 ```
+
+## 长上下文读路径与分层压缩 (v0.7.1, issues #90/#91)
+
+叠加在既有 compactor（保留为最后兜底）之上的两层长上下文机制：
+
+**读路径 (#90)**——消费者不再只有 ~30 token 引用和全文 `get` 两个选择：
+
+- **`artifact.toc`**——按版本的结构化目录：`{anchor, level, start_line, end_line, lines, chars, tokens}`（行号 1-based，markdown 标题 / code 定义）。按 `(artifact_id, version)` 缓存（LRU 128）——新版本=新 key，失效自动完成。
+- **`artifact.view`**——分块读：`section`（只返回命中 section 正文 + `start_line`/`end_line`/总量）或 `offset`+`limit` 行区间（带 `total_lines`/`total_bytes`/`truncated` 供翻页）。O(section) 而非 O(artifact)——多 MB 产物一次读只花一个 section 的字节。越界 offset 返回空 chunk 带总量；缺 section 抛 `-32001`。
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.toc", "params": {"artifact_id": "art_x"}}
+{"jsonrpc": "2.0", "id": 2, "method": "artifact.view", "params": {"artifact_id": "art_x", "section": "Findings"}}
+{"jsonrpc": "2.0", "id": 3, "method": "artifact.view", "params": {"artifact_id": "art_x", "offset": 40, "limit": 80}}
+```
+
+消费者契约（cowork/design/code）：提示词组装携带 ref + TOC，按需经 `artifact.view` 加载分块，不再全文 `artifact.get`。
+
+**分层压缩 (#91)**——每次 `artifact.update`/`artifact.patch` 后的后台任务（绝不阻塞 RPC 响应；失败只记日志）：
+
+- **滚动摘要**：版本数达 `long_context.summary_threshold`（默认 5）后，引擎调 fusion-mlx（`/v1/chat/completions`，≤120 词）对版本变更摘要生成滚动 changelog，写回 `artifact.summary`（后续所有 `ref_text` 自动携带），并盖 `metadata.summary_version` 按版本幂等。阈值 `0` 禁用。
+- **RAG 归档**：新版本取代当前版本时，把被取代版本的全文推入 fusion-rag（`POST /bases/{kb}/documents/ingest`，`doc_name=<artifact_id>_v<N>.txt`，metadata `artifact_id`/`artifact_version`/`artifact_type`）。`metadata.archived_versions` 保证每版本只归档一次。fusion-rag 不可达/4xx → 告警日志，版本创建不受影响。旧版本可查：`POST /bases/fusion-artifacts/search` 按 `artifact_id` 过滤。
+- **配置**（`long_context` 段）：`summary_threshold`（5）、`summary_model`（空 = mlx 默认）、`mlx_url`、`mlx_api_key`（空 = `FUSION_MLX_API_KEY`）、`rag_enabled`（true）、`rag_url`（11436）、`rag_api_key`（空 = `FUSION_RAG_API_KEY`）、`rag_kb_id`（`fusion-artifacts`）。env 覆盖：`FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`、`_LC_RAG_ENABLED`、`_LC_MLX_URL`、`_LC_RAG_URL`。
 
 ## 产物卡片深链契约 (issue #78)
 

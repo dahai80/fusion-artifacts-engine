@@ -157,6 +157,16 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "office_enabled": ("ipc_office_enabled", None),
             "office_dir": ("ipc_office_dir", _expanduser_path),
         },
+        "long_context": {
+            "summary_threshold": ("long_context_summary_threshold", None),
+            "summary_model": ("long_context_summary_model", None),
+            "mlx_url": ("long_context_mlx_url", None),
+            "mlx_api_key": ("long_context_mlx_api_key", None),
+            "rag_enabled": ("long_context_rag_enabled", None),
+            "rag_url": ("long_context_rag_url", None),
+            "rag_api_key": ("long_context_rag_api_key", None),
+            "rag_kb_id": ("long_context_rag_kb_id", None),
+        },
     }
     flat: dict[str, Any] = {}
     for section, field_map in section_map.items():
@@ -232,6 +242,11 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         # v0.7.0: fusion-office 文件摄取 (docx/xlsx/pptx → 分段 markdown)
         "FUSION_ARTIFACTS_IPC_OFFICE_ENABLED": ("ipc_office_enabled", _parse_bool),
         "FUSION_ARTIFACTS_IPC_OFFICE_DIR": ("ipc_office_dir", _expanduser_path),
+        # v0.7.1 #91: 滚动摘要 + RAG 归档
+        "FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD": ("long_context_summary_threshold", int),
+        "FUSION_ARTIFACTS_LC_RAG_ENABLED": ("long_context_rag_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_LC_MLX_URL": ("long_context_mlx_url", None),
+        "FUSION_ARTIFACTS_LC_RAG_URL": ("long_context_rag_url", None),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -349,6 +364,15 @@ class ArtifactEngineConfig(BaseModel):
     # v0.7.0: fusion-office 文件摄取（目录缺省=~/.fusion-office/fusion-artifacts-engine）
     ipc_office_enabled: bool = Field(default=True)
     ipc_office_dir: str | None = Field(default=None)
+    # v0.7.1 #91: 分层上下文压缩——滚动摘要（fusion-mlx）+ 旧版本归档（fusion-rag）
+    long_context_summary_threshold: int = Field(default=5)
+    long_context_summary_model: str = Field(default="")
+    long_context_mlx_url: str = Field(default="http://127.0.0.1:11434")
+    long_context_mlx_api_key: str = Field(default="")
+    long_context_rag_enabled: bool = Field(default=True)
+    long_context_rag_url: str = Field(default="http://127.0.0.1:11436")
+    long_context_rag_api_key: str = Field(default="")
+    long_context_rag_kb_id: str = Field(default="fusion-artifacts")
 
     @property
     def gateway_service_key_path(self) -> Path:

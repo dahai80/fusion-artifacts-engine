@@ -255,6 +255,11 @@ class StorageDriver(ABC):
 
     # ── maintenance ────────────────────────────────────────────
     @abstractmethod
+    def update_artifact_summary(
+        self, artifact_id: str, summary: str, metadata_patch: dict | None = None
+    ) -> bool: ...
+
+    @abstractmethod
     def gc_orphan_files(self) -> int: ...
 
     @abstractmethod
