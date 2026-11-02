@@ -151,7 +151,7 @@ export default function Detail({
     const shareUrl = artifact?.share_id
         ? shareBase
             ? `${shareBase}/s/${artifact.share_id}`
-            : `${window.location.origin}/api/v1/share/${artifact.share_id}`
+            : `${window.location.origin}/s/${artifact.share_id}`
         : "";
 
     const doShare = async () => {

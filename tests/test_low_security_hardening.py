@@ -226,5 +226,19 @@ def test_render_share_data_has_style_nonce():
 
     art = types.SimpleNamespace(type="data", name="t")
     out = render_share_html(art, '{"a": 1}')
-    # data 分支无 CSP meta，但 style 标签仍带 nonce（如被嵌入 srcdoc 也不破 CSP）
+    # R2 (#86): 所有分支统一带 nonce CSP meta（page wrapper 单点注入）
+    assert "Content-Security-Policy" in out
+    assert '<style nonce="' in out
+
+
+def test_render_share_code_fallback_has_csp_meta():
+    import types
+
+    from fusion_artifacts_engine.render import render_share_html
+
+    art = types.SimpleNamespace(type="python", name="t")
+    out = render_share_html(art, "print('hi')")
+    # R2 (#86): fallback code 分支此前漏 CSP meta，现在由 wrapper 统一注入
+    assert "Content-Security-Policy" in out
+    assert "style-src 'nonce-" in out
     assert '<style nonce="' in out

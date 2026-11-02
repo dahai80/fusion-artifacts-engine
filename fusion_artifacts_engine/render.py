@@ -138,76 +138,47 @@ def render_share_html(
 
 
 def _render_share_body(artifact, content: str) -> tuple[str, str]:
+    # R2 (#86): CSP meta emitted once here — every render branch inherits it.
     atype = artifact.type
     title = _html_escape(artifact.name or "Shared Artifact")
     nonce = _gen_nonce()
     csp = _SHARE_DOC_CSP_TMPL.format(nonce=nonce)
-    if atype in ("html", "react"):
+    if atype in ("html", "react", "svg"):
         iframe_doc = _html_escape(_sanitize_html(content))
-        doc = (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
-            f"<style nonce=\"{nonce}\">html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
-            f"</head><body>"
-            f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
-            f"</body></html>"
-        )
-        return doc, nonce
-    if atype == "markdown":
+        style = "html,body,iframe{margin:0;padding:0;height:100%;border:0}"
+        body = f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
+    elif atype == "markdown":
         import markdown
 
         rendered = markdown.markdown(content, extensions=["fenced_code", "tables"])
-        rendered = _sanitize_html(rendered)
-        doc = (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
-            f"<style nonce=\"{nonce}\">body{{font-family:system-ui,sans-serif;max-width:900px;"
-            f"margin:2rem auto;padding:0 1rem;line-height:1.6}}"
-            f"pre{{background:#f4f4f4;padding:1rem;overflow:auto;border-radius:4px}}"
-            f"code{{background:#f4f4f4;padding:2px 6px;border-radius:3px}}</style>"
-            f"</head><body>{rendered}</body></html>"
+        body = _sanitize_html(rendered)
+        style = (
+            "body{font-family:system-ui,sans-serif;max-width:900px;"
+            "margin:2rem auto;padding:0 1rem;line-height:1.6}"
+            "pre{background:#f4f4f4;padding:1rem;overflow:auto;border-radius:4px}"
+            "code{background:#f4f4f4;padding:2px 6px;border-radius:3px}"
         )
-        return doc, nonce
-    if atype == "data":
+    elif atype == "data":
         import json as _json
 
         if content.strip():
             try:
-                pretty = _html_escape(
-                    _json.dumps(_json.loads(content), indent=2, ensure_ascii=False)
-                )
+                pretty = _json.dumps(_json.loads(content), indent=2, ensure_ascii=False)
             except (ValueError, TypeError):
                 logger.warning("data share content not valid JSON, render escaped raw")
-                pretty = _html_escape(content)
+                pretty = content
         else:
-            pretty = _html_escape(content)
-        doc = (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
-            f"</head><body>{pretty}</body></html>"
-        )
-        return doc, nonce
-    if atype == "svg":
-        iframe_doc = _html_escape(_sanitize_html(content))
-        doc = (
-            f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            f"<title>{title}</title>"
-            f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
-            f"<style nonce=\"{nonce}\">html,body,iframe{{margin:0;padding:0;height:100%;border:0}}</style>"
-            f"</head><body>"
-            f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
-            f"</body></html>"
-        )
-        return doc, nonce
-    escaped = _html_escape(content)
+            pretty = content
+        style = "body{font-family:monospace;white-space:pre;padding:1rem}"
+        body = _html_escape(pretty)
+    else:
+        style = "body{font-family:monospace;white-space:pre-wrap;padding:1rem;overflow:auto}"
+        body = _html_escape(content)
     doc = (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<title>{title}</title>"
-        f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre-wrap;"
-        f"padding:1rem;overflow:auto}}</style>"
-        f"</head><body>{escaped}</body></html>"
+        f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
+        f"<style nonce=\"{nonce}\">{style}</style>"
+        f"</head><body>{body}</body></html>"
     )
     return doc, nonce

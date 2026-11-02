@@ -704,6 +704,7 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 - **权限感知**：`view` 分享只读渲染；`remix` 分享在同一页面追加 **Remix 到我的库** 按钮，深链到 shell 路由 `#/s/<share_id>?remix=1` — shell 先引导登录，登录后 GUI 将分享 remix 进查看者库，保留 `parent_artifact_id` 血统。
 - **过期/撤销/耗尽**链接渲染干净的失效页并返回 `410 Gone`；未知 id 返回 `404`；两种情况都不会输出产物正文。
 - **链接生成**：`artifact.create_share` 新增返回 `share_url`（`<share.public_base_url>/s/<share_id>`），GUI 复制按钮直接使用。`GET /api/v1/share-base`（需鉴权）暴露配置的 base 供客户端拼接。`share.public_base_url` 默认 `http://<server.host>:<server.port>` — 反向代理或对外域名部署时显式设置。
+- **v0.6.2 加固 (#86)**：nonce CSP meta 收敛到页面 wrapper 单点注入，`data` 与代码兜底分支同样携带（此前仅 html/markdown/svg 有）；`share-base` 获取失败时 GUI 复制回退为同源 `/s/<id>` 页面路由，不再暴露 `/api/v1/share/` 原始 JSON 端点；登录态 remix 深链由 `tests/test_remix_deep_link_e2e.py`（页面 → 公开分享 JSON → 鉴权 remix 血统）加真实浏览器过 shell 会话门全流程覆盖。
 
 ## fusion-design 保存到产物 IPC (v0.6.1, issue #84)
 
