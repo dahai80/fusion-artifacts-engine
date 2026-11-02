@@ -10,11 +10,20 @@ import {
     Layers,
     Link2,
     PackageOpen,
+    Palette,
+    Presentation,
     RotateCcw,
     Search,
     Star,
 } from "lucide-react";
-import { getContent, listArtifacts, listRecycle, restoreArtifact, type Artifact } from "../api";
+import {
+    createArtifact,
+    getContent,
+    listArtifacts,
+    listRecycle,
+    restoreArtifact,
+    type Artifact,
+} from "../api";
 import { t, type Lang } from "../i18n";
 
 type TabKey = "all" | "htmlApp" | "document" | "chart" | "code";
@@ -272,6 +281,55 @@ function timeBucket(ts: number): TimeBucket {
 
 const BUCKET_ORDER: TimeBucket[] = ["today", "yesterday", "week", "earlier"];
 
+// 新建模板：类型映射 文档=markdown / PPT=html(自包含幻灯) / 设计=data(JSON 画布)
+const DOC_TEMPLATE = `# 未命名文档
+
+在这里开始写正文。
+
+## 第一节
+
+- 要点一
+- 要点二
+`;
+
+const PPT_TEMPLATE = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,sans-serif;background:#18181b;color:#fafafa;overflow:hidden}
+.slide{display:none;width:100vw;height:100vh;padding:80px 96px;flex-direction:column;justify-content:center;gap:24px}
+.slide.active{display:flex}
+h1{font-size:56px;letter-spacing:-0.02em}
+h2{font-size:40px;letter-spacing:-0.02em}
+p,li{font-size:22px;line-height:1.6;color:#a1a1aa}
+ul{padding-left:28px;display:flex;flex-direction:column;gap:12px}
+.page{position:fixed;right:32px;bottom:24px;font-size:14px;color:#52525b}
+</style>
+</head>
+<body>
+<section class="slide active"><h1>未命名演示</h1><p>点击或按方向键翻页</p></section>
+<section class="slide"><h2>要点页</h2><ul><li>要点一</li><li>要点二</li><li>要点三</li></ul></section>
+<section class="slide"><h2>结束页</h2><p>谢谢观看</p></section>
+<div class="page" id="page"></div>
+<script>
+var s=document.querySelectorAll('.slide'),i=0;
+function show(n){i=(n+s.length)%s.length;for(var k=0;k<s.length;k++)s[k].classList.toggle('active',k===i);document.getElementById('page').textContent=(i+1)+' / '+s.length}
+document.addEventListener('click',function(){show(i+1)});
+document.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key===' ')show(i+1);if(e.key==='ArrowLeft')show(i-1)});
+show(0);
+</script>
+</body>
+</html>
+`;
+
+const DESIGN_TEMPLATE = JSON.stringify(
+    { title: "未命名设计", canvas: { width: 1280, height: 720 }, elements: [] },
+    null,
+    4
+);
+
 export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: string) => void }) {
     const d = t(lang);
     const [artifacts, setArtifacts] = useState<Artifact[] | null>(null);
@@ -281,6 +339,21 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
     const [sort, setSort] = useState<"updated_at" | "created_at" | "name">("updated_at");
     const [error, setError] = useState("");
     const [recycleOpen, setRecycleOpen] = useState(false);
+    const [creating, setCreating] = useState<string | null>(null);
+
+    const doCreate = async (key: string, name: string, type: string, content: string) => {
+        if (creating) return;
+        setCreating(key);
+        try {
+            const art = await createArtifact(name, type, content);
+            await reload();
+            onOpen(art.id);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setCreating(null);
+        }
+    };
 
     const reload = async () => {
         try {
@@ -371,15 +444,6 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                         {(artifacts || []).length} {d.totalArtifacts} · {totalVersions} {d.totalVersions}
                     </p>
                 </div>
-                <div className="relative w-full max-w-xs">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-                    <input
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder={d.search}
-                        className="w-full rounded-md border border-zinc-200/80 bg-white py-2 pl-9 pr-3 text-sm outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-zinc-800 dark:bg-zinc-900"
-                    />
-                </div>
             </div>
 
             <div className="sticky top-0 z-10 mt-4 flex flex-wrap items-center gap-2 border-b border-zinc-200/70 bg-zinc-50/95 py-2 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95">
@@ -408,6 +472,15 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                     ))}
                 </div>
                 <div className="ml-auto flex items-center gap-2">
+                    <div className="relative w-40 xl:w-48">
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+                        <input
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder={d.search}
+                            className="w-full rounded-md border border-zinc-200/80 bg-white py-2 pl-9 pr-3 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/10 dark:border-zinc-800 dark:bg-zinc-900"
+                        />
+                    </div>
                     <select
                         value={sort}
                         onChange={(e) => setSort(e.target.value as typeof sort)}
@@ -434,6 +507,35 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                         )}
                     </button>
                 </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-4">
+                {(
+                    [
+                        { key: "doc", label: d.newDocument, icon: FileText, tile: "bg-violet-500/10 text-violet-600 dark:text-violet-400", tpl: DOC_TEMPLATE, type: "markdown" },
+                        { key: "ppt", label: d.newPPT, icon: Presentation, tile: "bg-sky-500/10 text-sky-600 dark:text-sky-400", tpl: PPT_TEMPLATE, type: "html" },
+                        { key: "design", label: d.newDesign, icon: Palette, tile: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400", tpl: DESIGN_TEMPLATE, type: "data" },
+                    ] as const
+                ).map(({ key, label, icon: Icon, tile, tpl, type }) => (
+                    <button
+                        key={key}
+                        disabled={creating !== null}
+                        onClick={() =>
+                            doCreate(
+                                key,
+                                type === "markdown" ? d.untitledDoc : type === "html" ? d.untitledPPT : d.untitledDesign,
+                                type,
+                                tpl
+                            )
+                        }
+                        className="flex items-center gap-3 rounded-lg border border-dashed border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-500 transition hover:border-indigo-400 hover:text-indigo-600 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-indigo-500/60 dark:hover:text-indigo-400"
+                    >
+                        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${tile}`}>
+                            <Icon size={20} />
+                        </span>
+                        {creating === key ? d.creating : label}
+                    </button>
+                ))}
             </div>
 
             {error && (
