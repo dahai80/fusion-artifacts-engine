@@ -25,6 +25,13 @@ _MAX_PARSE_ATTEMPTS = 3
 
 
 class DesignIPCConsumer:
+    # v0.7.0: 参数化为通用 file-IPC 消费端，子类只覆写来源与 _ingest。
+    _source_module = "fusion-design"
+    _thread_name = "fae-design-ipc"
+    _log_tag = "design IPC"
+    _session_key = "design_session"
+    _version_key = "design_version"
+
     def __init__(
         self,
         engine,
@@ -44,25 +51,25 @@ class DesignIPCConsumer:
 
     def start(self) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        self._thread = threading.Thread(
-            target=self._loop, name="fae-design-ipc", daemon=True
-        )
+        self._thread = threading.Thread(target=self._loop, name=self._thread_name, daemon=True)
         self._thread.start()
-        logger.info("design IPC consumer started (dir=%s interval=%.1fs)", self._dir, self._interval)
+        logger.info(
+            "%s consumer started (dir=%s interval=%.1fs)", self._log_tag, self._dir, self._interval
+        )
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self._interval + 2)
             self._thread = None
-        logger.info("design IPC consumer stopped")
+        logger.info("%s consumer stopped", self._log_tag)
 
     def _loop(self) -> None:
         while not self._stop.wait(self._interval):
             try:
                 self.process_once()
             except Exception:  # noqa: BLE001
-                logger.exception("design IPC poll failed")
+                logger.exception("%s poll failed", self._log_tag)
 
     def process_once(self) -> int:
         if not self._dir.is_dir():
@@ -75,14 +82,16 @@ class DesignIPCConsumer:
                 if self._process_file(path):
                     ingested += 1
             except Exception:  # noqa: BLE001
-                logger.exception("design IPC file failed: %s", path)
+                logger.exception("%s file failed: %s", self._log_tag, path)
                 self._archive(path, self._failed_dir)
         return ingested
 
     def _process_file(self, path: Path) -> bool:
         size = path.stat().st_size
         if size > self._max_bytes:
-            logger.warning("design IPC message too large (%d bytes), rejecting: %s", size, path)
+            logger.warning(
+                "%s message too large (%d bytes), rejecting: %s", self._log_tag, size, path
+            )
             self._archive(path, self._failed_dir)
             return False
         try:
@@ -91,26 +100,34 @@ class DesignIPCConsumer:
             attempts = self._attempts.get(str(path), 0) + 1
             self._attempts[str(path)] = attempts
             logger.warning(
-                "design IPC unreadable message (%d/%d): %s: %s",
-                attempts, _MAX_PARSE_ATTEMPTS, path, e,
+                "%s unreadable message (%d/%d): %s: %s",
+                self._log_tag,
+                attempts,
+                _MAX_PARSE_ATTEMPTS,
+                path,
+                e,
             )
             if attempts >= _MAX_PARSE_ATTEMPTS:
                 self._archive(path, self._failed_dir)
             return False
         self._attempts.pop(str(path), None)
         if not self._is_save_artifact(data):
-            logger.warning("design IPC unsupported message (action=%r), archiving", data.get("action"))
+            logger.warning(
+                "%s unsupported message (action=%r), archiving", self._log_tag, data.get("action")
+            )
             self._archive(path, self._processed_dir)
             return False
         payload = data.get("payload") or {}
         try:
             created = self._ingest(payload)
         except Exception:  # noqa: BLE001
-            logger.exception("design IPC ingest failed: %s", path)
+            logger.exception("%s ingest failed: %s", self._log_tag, path)
             self._archive(path, self._failed_dir)
             return False
         self._archive(path, self._processed_dir)
-        logger.info("design IPC ingested %s (%s)", path.name, "created" if created else "skipped")
+        logger.info(
+            "%s ingested %s (%s)", self._log_tag, path.name, "created" if created else "skipped"
+        )
         return created
 
     def _is_save_artifact(self, data: dict) -> bool:
@@ -133,16 +150,16 @@ class DesignIPCConsumer:
         if not isinstance(document, str) or not document:
             raise ValueError("save_artifact payload missing document")
         metadata_common = {
-            "source": _SOURCE_MODULE,
-            "design_session": session,
-            "design_version": version,
+            "source": self._source_module,
+            self._session_key: session,
+            self._version_key: version,
         }
 
         existing = self._find_artifact(session)
         if existing is None:
             artifact, _version, _ref = asyncio.run(
                 self._engine.create_external_artifact(
-                    _SOURCE_MODULE,
+                    self._source_module,
                     session,
                     title,
                     "data",
@@ -151,14 +168,23 @@ class DesignIPCConsumer:
                 )
             )
             self._publish("artifact.created", artifact.id, artifact.kind)
-            logger.info("design IPC created artifact %s for session %s v%d", artifact.id, session, version)
+            logger.info(
+                "%s created artifact %s for session %s v%d",
+                self._log_tag,
+                artifact.id,
+                session,
+                version,
+            )
             return True
 
-        stored_version = int((existing.metadata or {}).get("design_version") or 0)
+        stored_version = int((existing.metadata or {}).get(self._version_key) or 0)
         if version <= stored_version:
             logger.info(
-                "design IPC skip duplicate: session=%s version=%d <= stored=%d",
-                session, version, stored_version,
+                "%s skip duplicate: session=%s version=%d <= stored=%d",
+                self._log_tag,
+                session,
+                version,
+                stored_version,
             )
             return False
         asyncio.run(
@@ -176,25 +202,20 @@ class DesignIPCConsumer:
             refreshed.metadata = merged
             self._engine.storage.save_artifact(refreshed)
         self._publish("artifact.version_created", existing.id, existing.kind)
-        logger.info("design IPC bumped artifact %s to design v%d", existing.id, version)
+        logger.info("%s bumped artifact %s to v%d", self._log_tag, existing.id, version)
         return True
 
     def _publish(self, event_type: str, artifact_id: str, kind: str | None) -> None:
         # SSE 订阅方按 kind 过滤：缺 kind 的事件会被静默丢弃（与 RPC _publish 同契约）
         try:
-            self._engine.event_bus.publish(
-                event_type, {"kind": kind, "artifact_id": artifact_id}
-            )
+            self._engine.event_bus.publish(event_type, {"kind": kind, "artifact_id": artifact_id})
         except Exception:  # noqa: BLE001
-            logger.exception("design IPC event publish failed: %s", event_type)
+            logger.exception("%s event publish failed: %s", self._log_tag, event_type)
 
     def _find_artifact(self, session: str):
-        session_id = f"ext_{_SOURCE_MODULE}_{session}"
+        session_id = f"ext_{self._source_module}_{session}"
         artifacts = self._engine.storage.list_artifacts(session_id)
-        matches = [
-            a for a in artifacts
-            if (a.metadata or {}).get("design_session") == session
-        ]
+        matches = [a for a in artifacts if (a.metadata or {}).get(self._session_key) == session]
         if not matches:
             return None
         matches.sort(key=lambda a: a.updated_at, reverse=True)
@@ -207,6 +228,90 @@ class DesignIPCConsumer:
             if target.exists():
                 target = target_dir / f"{int(time.time() * 1000)}_{path.name}"
             shutil.move(str(path), str(target))
-            logger.info("design IPC archived %s -> %s", path.name, target_dir.name)
+            logger.info("%s archived %s -> %s", self._log_tag, path.name, target_dir.name)
         except OSError as e:
-            logger.error("design IPC archive failed %s: %s", path, e)
+            logger.error("%s archive failed %s: %s", self._log_tag, path, e)
+
+
+class OfficeIPCConsumer(DesignIPCConsumer):
+    # v0.7.0: fusion-office 文件摄取。payload 带 file_path（office 二进制不进
+    # JSON），解析为带 # 标题的 markdown（section_index 可寻址），元数据记
+    # office_format/office_source_path 供写回定位。
+    _source_module = "fusion-office"
+    _thread_name = "fae-office-ipc"
+    _log_tag = "office IPC"
+    _session_key = "office_session"
+    _version_key = "office_version"
+
+    def _ingest(self, payload: dict) -> bool:
+        from fusion_artifacts_engine.office_ingest import parse_office
+
+        session = str(payload.get("session") or "default")
+        version = int(payload.get("version") or 1)
+        title = str(payload.get("title") or "Document")
+        file_path = str(payload.get("file_path") or "")
+        if not file_path:
+            raise ValueError("office save_artifact payload missing file_path")
+        path = Path(file_path).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"office file not found: {file_path}")
+        content, fmt, stats = parse_office(path)
+        metadata_common = {
+            "source": self._source_module,
+            self._session_key: session,
+            self._version_key: version,
+            "office_format": fmt,
+            "office_source_path": str(path),
+            "office_stats": stats,
+        }
+
+        existing = self._find_artifact(session)
+        if existing is None:
+            artifact, _version, _ref = asyncio.run(
+                self._engine.create_external_artifact(
+                    self._source_module,
+                    session,
+                    title,
+                    "markdown",
+                    content,
+                    metadata=metadata_common,
+                )
+            )
+            self._publish("artifact.created", artifact.id, artifact.kind)
+            logger.info(
+                "%s created artifact %s for session %s v%d (%s)",
+                self._log_tag,
+                artifact.id,
+                session,
+                version,
+                fmt,
+            )
+            return True
+
+        stored_version = int((existing.metadata or {}).get(self._version_key) or 0)
+        if version <= stored_version:
+            logger.info(
+                "%s skip duplicate: session=%s version=%d <= stored=%d",
+                self._log_tag,
+                session,
+                version,
+                stored_version,
+            )
+            return False
+        asyncio.run(
+            self._engine.create_version(
+                existing.id,
+                content,
+                change_log=f"Office save v{version}",
+                source="ai_generation",
+            )
+        )
+        refreshed = self._engine.storage.get_artifact(existing.id)
+        if refreshed is not None:
+            merged = dict(refreshed.metadata or {})
+            merged.update(metadata_common)
+            refreshed.metadata = merged
+            self._engine.storage.save_artifact(refreshed)
+        self._publish("artifact.version_created", existing.id, existing.kind)
+        logger.info("%s bumped artifact %s to v%d", self._log_tag, existing.id, version)
+        return True

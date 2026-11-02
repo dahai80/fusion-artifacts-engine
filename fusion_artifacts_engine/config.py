@@ -154,6 +154,8 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "enabled": ("ipc_enabled", None),
             "design_dir": ("ipc_design_dir", _expanduser_path),
             "poll_interval": ("ipc_poll_interval", None),
+            "office_enabled": ("ipc_office_enabled", None),
+            "office_dir": ("ipc_office_dir", _expanduser_path),
         },
     }
     flat: dict[str, Any] = {}
@@ -168,7 +170,10 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             val = section_data[yaml_key]
             # 空字符串归一为 None：路径类缺省值由代码推导（sync_root 禁用 /
             # gateway_key_file 用 storage_root 默认 / ipc_design_dir 用 convention 目录）
-            if field_name in ("sync_root", "gateway_key_file", "ipc_design_dir") and not val:
+            if (
+                field_name in ("sync_root", "gateway_key_file", "ipc_design_dir", "ipc_office_dir")
+                and not val
+            ):
                 flat[field_name] = None
                 continue
             if converter is not None:
@@ -224,6 +229,9 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_IPC_ENABLED": ("ipc_enabled", _parse_bool),
         "FUSION_ARTIFACTS_IPC_DESIGN_DIR": ("ipc_design_dir", _expanduser_path),
         "FUSION_ARTIFACTS_IPC_POLL_INTERVAL": ("ipc_poll_interval", float),
+        # v0.7.0: fusion-office 文件摄取 (docx/xlsx/pptx → 分段 markdown)
+        "FUSION_ARTIFACTS_IPC_OFFICE_ENABLED": ("ipc_office_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_IPC_OFFICE_DIR": ("ipc_office_dir", _expanduser_path),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -338,6 +346,9 @@ class ArtifactEngineConfig(BaseModel):
     ipc_enabled: bool = Field(default=True)
     ipc_design_dir: str | None = Field(default=None)
     ipc_poll_interval: float = Field(default=3.0)
+    # v0.7.0: fusion-office 文件摄取（目录缺省=~/.fusion-office/fusion-artifacts-engine）
+    ipc_office_enabled: bool = Field(default=True)
+    ipc_office_dir: str | None = Field(default=None)
 
     @property
     def gateway_service_key_path(self) -> Path:
@@ -358,6 +369,18 @@ class ArtifactEngineConfig(BaseModel):
         base = os.environ.get("FUSION_DESIGN_DATA_DIR", "")
         root = Path(base).expanduser() if base else Path.home() / ".fusion-design"
         return root / "fusion-artifacts-engine"
+
+    @property
+    def ipc_office_path(self) -> Path:
+        if self.ipc_office_dir:
+            return Path(self.ipc_office_dir).expanduser()
+        base = os.environ.get("FUSION_OFFICE_DATA_DIR", "")
+        root = Path(base).expanduser() if base else Path.home() / ".fusion-office"
+        return root / "fusion-artifacts-engine"
+
+    @property
+    def ipc_office_outbox_path(self) -> Path:
+        return self.ipc_office_path / ".outbox"
 
     @property
     def db_path(self) -> Path:

@@ -108,4 +108,9 @@ ipc:
   design_dir: ""
   # 轮询间隔秒
   poll_interval: 3.0
+  # v0.7.0: fusion-office 文件摄取（docx/xlsx/pptx → 分段 markdown，section 可寻址；
+  # patch/update 后写回导出到 <office_dir>/.outbox/）
+  office_enabled: true
+  # 消息目录；空= <FUSION_OFFICE_DATA_DIR 或 ~/.fusion-office>/fusion-artifacts-engine
+  office_dir: ""
 

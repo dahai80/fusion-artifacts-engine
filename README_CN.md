@@ -602,7 +602,8 @@ tracing:
     ├─ section_index.py 段落边界 + patch（替换/删除段落）
     ├─ render.py        分享 HTML 渲染（lxml Cleaner + 权限页脚）
     ├─ gateway_client.py shell manifest 自助注册 + fm- service key 生命周期
-    ├─ ipc_consumer.py  fusion-design save_artifact file-IPC 监听
+    ├─ ipc_consumer.py  fusion-design / fusion-office save_artifact file-IPC 监听
+    ├─ office_ingest.py office (docx/xlsx/pptx) → 分段 markdown 解析 + 写回
     └─ auto_identifier.py should_create_artifact（阈值 + 可渲染类型）
 ---------------------------------------------------------
 存储层: SQLite (WAL) + 文件系统
@@ -715,6 +716,24 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 - **入库**：每个设计 `session` 归并为一个产物（`session_id=ext_fusion-design_<session>`、类型 `data`、`source_module=fusion-design`、metadata `design_session`/`design_version`）。更高 `version` 追加新版本；相同或更低版本跳过（重启幂等）。库卡片来源显示 **Design**。
 - **文件生命周期**：处理成功移入 `.processed/`；无法解析的消息重试 3 次后移入 `.failed/`；超 8MB 直接拒绝到 `.failed/`。重启不会重复摄入。
 - 关闭：`ipc.enabled: false`（或 `FUSION_ARTIFACTS_IPC_ENABLED=false`）。
+
+## fusion-office 文件摄取与写回 (v0.7.0)
+
+引擎通过与设计集成相同的 file-IPC 模式消费 fusion-office 的办公文档，把二进制转为长上下文友好的 markdown——并在 patch 后把内容写回为再生的 office 文件：
+
+- **读路径（摄取）**：监听目录 `<FUSION_OFFICE_DATA_DIR 或 ~/.fusion-office>/fusion-artifacts-engine/*.json`（可用 `ipc.office_dir` 覆盖；同一 `ipc.poll_interval`）。消息契约：`{"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact","payload":{"source":"fusion-office","title":...,"session":...,"version":...,"file_path":"<.docx/.xlsx/.pptx 绝对路径>"}}`——office 二进制按路径引用，绝不内联进 JSON。
+- **解析**：`docx`（段落、`Heading N` 样式 → markdown `#`*(N+1)、表格 → 管道行），`xlsx`（每个工作表 → `## <表名>` + markdown 表格，首行作表头，单表上限 500 行/64 列并附截断说明，空表渲染 `(empty sheet)`），`pptx`（`## Slide N` + 文本 run）。不支持的后缀将消息打入 `.failed/`。
+- **段落寻址免费获得**：内容是带 `#` 标题的 markdown，既有 `section_index` 管道直接可寻址（docx=标题、xlsx=工作表、pptx=页）——patch/预算/引用流程零改动。
+- **幂等**：每个 office `session` 归并为一个产物（`session_id=ext_fusion-office_<session>`、类型 `markdown`、`source_module=fusion-office`、metadata `office_format`/`office_session`/`office_version`/`office_source_path`/`office_stats`）。更高版本追加；相同或更低跳过。库卡片来源显示 **Office**。
+- **写回**：对 office 来源产物执行 `artifact.update` 或 `artifact.patch` 后，引擎把 patch 后的 markdown 重新生成为 office 二进制（`markdown_to_docx` / `markdown_to_xlsx`，单元格还原数值类型），导出到 `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` 由 fusion-office 取走。**引擎永不覆写用户原始文件。** `pptx` 写回显式不支持（`NotImplementedError`）——pptx 只读。写回失败仅记日志，绝不影响 RPC 结果。
+- **配置**（`ipc` 段）：`office_enabled: true`、`office_dir: ""`（空 = 派生默认）。环境变量覆盖：`FUSION_ARTIFACTS_IPC_OFFICE_ENABLED`、`FUSION_ARTIFACTS_IPC_OFFICE_DIR`。
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.patch",
+ "params": {"artifact_id": "art_x", "operation": "replace_section",
+            "anchor": "Findings", "content": "### Findings\n\npatched body"}}
+# → .outbox/art_x_v2.docx 携带 patch 后段落重新生成
+```
 
 ## 产物卡片深链契约 (issue #78)
 
