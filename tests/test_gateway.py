@@ -6,10 +6,11 @@ import urllib.request
 
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.gateway_client import GatewayClient
+from fusion_artifacts_engine.gateway_client import GatewayClient, load_service_key
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 
 API_KEY = "fae-gw-test-key-abcdef0123456789"
+SERVICE_KEY = "fm-fusion-artifacts-0123456789abcdef0123456789abcdef"
 
 
 class _FakeResponse:
@@ -96,6 +97,33 @@ def test_bearer_auth_wrong_key_rejected(tmp_path):
         eng.close()
 
 
+def test_gateway_issued_service_key_accepted(tmp_path):
+    # #82: gateway 签发的 fm- key 是代理注入凭据，引擎鉴权层必须接受
+    port = _ephemeral_port()
+    config = ArtifactEngineConfig(
+        storage_root=tmp_path / "artifacts",
+        server_host="127.0.0.1",
+        server_port=port,
+        api_key=API_KEY,
+    )
+    key_path = config.gateway_service_key_path
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(SERVICE_KEY, encoding="utf-8")
+    eng = ArtifactEngine(config)
+    server = ArtifactRPCServer(eng, port=port)
+    server.start_async()
+    time.sleep(0.5)
+    try:
+        status, data = _post_ping(port, {"Authorization": f"Bearer {SERVICE_KEY}"})
+        assert status == 200
+        assert data["result"]["pong"] is True
+        status, _ = _post_ping(port, {"Authorization": "Bearer fm-other-module-ffff"})
+        assert status == 401
+    finally:
+        server.stop()
+        eng.close()
+
+
 def test_x_api_key_still_works(tmp_path):
     # 向后兼容：传统 X-API-Key 通道不受 #75 改动影响
     port = _ephemeral_port()
@@ -130,35 +158,62 @@ def _make_client(tmp_path, **overrides):
     return GatewayClient(config, "127.0.0.1", 11451)
 
 
-def test_gateway_register_self_key_success(tmp_path):
+def _write_service_key(client, raw_key=SERVICE_KEY):
+    client._key_path.parent.mkdir(parents=True, exist_ok=True)
+    client._key_path.write_text(raw_key, encoding="utf-8")
+    client._service_key = raw_key
+
+
+def test_gateway_register_admin_bootstrap_issues_key(tmp_path):
+    # #82: 注册体不带 api_key → gateway 签发 fm- key（raw_key 一次返回）
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient([(200, '{"code":"ok"}')])
+    fake = _FakeHttpClient(
+        [(200, json.dumps({"code": "ok", "key_id": "abc", "raw_key": SERVICE_KEY}))]
+    )
     client._client = fake
     assert client.register() is True
     call = fake.calls[0]
     assert call["url"].endswith("/api/v1/shell/manifests")
-    assert call["headers"]["Authorization"] == f"Bearer {API_KEY}"
+    assert call["headers"]["Authorization"] == "Bearer gw-admin-key"
     body = call["json"]
     assert body["id"] == "fusion-artifacts"
     assert body["entry"] == "/shell/fusion-artifacts/"
     assert body["upstream"] == "http://127.0.0.1:11451"
     assert body["health"] == "http://127.0.0.1:11451/healthz"
-    assert body["api_key"] == API_KEY
+    assert "api_key" not in body
     assert body["icon"] == "Package"
     assert body["devices"] == ["desktop"]
+    assert client._service_key == SERVICE_KEY
+    assert load_service_key(client._key_path) == SERVICE_KEY
+
+
+def test_gateway_register_prefers_stored_service_key(tmp_path):
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok"}))])
+    client._client = fake
+    assert client.register() is True
+    assert fake.calls[0]["headers"]["Authorization"] == f"Bearer {SERVICE_KEY}"
 
 
 def test_gateway_register_falls_back_to_admin_key(tmp_path):
-    # 首次注册：自身 key 被 401（registry 里还没有它）→ admin_key 引导
+    # 存有 fm- key 但 gateway 侧已失效（重启）→ admin key 引导
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient([(401, "unauthorized"), (200, '{"code":"ok"}')])
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [
+            (403, "forbidden"),
+            (200, json.dumps({"code": "ok", "raw_key": SERVICE_KEY + "b"})),
+        ]
+    )
     client._client = fake
     assert client.register() is True
-    assert fake.calls[0]["headers"]["Authorization"] == f"Bearer {API_KEY}"
+    assert fake.calls[0]["headers"]["Authorization"] == f"Bearer {SERVICE_KEY}"
     assert fake.calls[1]["headers"]["Authorization"] == "Bearer gw-admin-key"
+    assert client._service_key == SERVICE_KEY + "b"
 
 
-def test_gateway_register_no_admin_key_fails(tmp_path):
+def test_gateway_register_no_credentials_fails(tmp_path):
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
         api_key=API_KEY,
@@ -169,35 +224,38 @@ def test_gateway_register_no_admin_key_fails(tmp_path):
     fake = _FakeHttpClient([(401, "unauthorized")])
     client._client = fake
     assert client.register() is False
-
-
-def test_gateway_register_skipped_without_api_key(tmp_path):
-    config = ArtifactEngineConfig(
-        storage_root=tmp_path / "artifacts",
-        gateway_module_id="fusion-artifacts",
-        gateway_admin_key="gw-admin-key",
-    )
-    client = GatewayClient(config, "127.0.0.1", 11451)
-    fake = _FakeHttpClient([])
-    client._client = fake
-    assert client.register() is False
     assert fake.calls == []
 
 
-def test_gateway_heartbeat_ok(tmp_path):
+def test_gateway_heartbeat_uses_service_key(tmp_path):
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient([(200, '{"code":"ok"}')])
+    _write_service_key(client)
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok"}))])
     client._client = fake
     assert client.heartbeat_once() is True
     call = fake.calls[0]
     assert call["url"].endswith("/api/v1/shell/manifests/fusion-artifacts/heartbeat")
-    assert call["headers"]["Authorization"] == f"Bearer {API_KEY}"
+    assert call["headers"]["Authorization"] == f"Bearer {SERVICE_KEY}"
+
+
+def test_gateway_heartbeat_without_key_registers(tmp_path):
+    client = _make_client(tmp_path)
+    fake = _FakeHttpClient(
+        [(200, json.dumps({"code": "ok", "raw_key": SERVICE_KEY}))]
+    )
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert fake.calls[0]["url"].endswith("/api/v1/shell/manifests")
+    assert client._service_key == SERVICE_KEY
 
 
 def test_gateway_heartbeat_404_reregisters(tmp_path):
     # #369 self-heal：心跳 404 manifest_unknown → 再注册
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient([(404, "manifest_unknown"), (200, '{"code":"ok"}')])
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [(404, "manifest_unknown"), (200, json.dumps({"code": "ok"}))]
+    )
     client._client = fake
     assert client.heartbeat_once() is True
     assert fake.calls[0]["url"].endswith("/heartbeat")
@@ -208,11 +266,32 @@ def test_gateway_heartbeat_403_reregisters(tmp_path):
     # #75 实测回归：gateway 重启清空 manifest store 后心跳 403 heartbeat_forbidden
     # （无该 module 的 service key 记录）→ 也要触发再注册，否则菜单消失直到引擎重启
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient([(403, '{"code":"heartbeat_forbidden"}'), (200, '{"code":"ok"}')])
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [(403, '{"code":"heartbeat_forbidden"}'), (200, json.dumps({"code": "ok"}))]
+    )
     client._client = fake
     assert client.heartbeat_once() is True
     assert fake.calls[0]["url"].endswith("/heartbeat")
     assert fake.calls[1]["url"].endswith("/api/v1/shell/manifests")
+
+
+def test_gateway_heartbeat_403_cooldown_no_loop(tmp_path):
+    # #82 验收：连续 403 只触发一次再注册，之后冷却期内心跳失败不再打注册接口
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [
+            (403, '{"code":"heartbeat_forbidden"}'),
+            (200, json.dumps({"code": "ok"})),
+            (403, '{"code":"heartbeat_forbidden"}'),
+        ]
+    )
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert client.heartbeat_once() is False
+    assert len(fake.calls) == 3
+    assert fake.calls[-1]["url"].endswith("/heartbeat")
 
 
 def test_gateway_start_stop(tmp_path):

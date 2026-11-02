@@ -63,7 +63,10 @@ export function relTime(ts: number, lang: Lang): string {
     return `${Math.floor(diff / 86400)} ${d.daysAgo}`;
 }
 
-export function sourceLabel(a: Artifact): string {
+export function sourceLabel(a: Artifact, lang: Lang = "zh"): string {
+    const d = t(lang);
+    const raw = a.source_module || (a.metadata || {}).source;
+    if (raw === "fusion-design") return d.sourceDesign;
     if (a.source_module) return a.source_module;
     const meta = a.metadata || {};
     if (typeof meta.source === "string") return meta.source;
@@ -106,7 +109,7 @@ function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: strin
             </div>
             <div className="flex items-center justify-between text-xs text-zinc-400 dark:text-zinc-500">
                 <span className="line-clamp-1">
-                    {relTime(a.updated_at, lang)} · {d.source} {sourceLabel(a)}
+                    {relTime(a.updated_at, lang)} · {d.source} {sourceLabel(a, lang)}
                 </span>
                 <span className="flex shrink-0 items-center gap-1">
                     <Layers size={11} />

@@ -18,9 +18,11 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, unquote, urlparse
 
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.gateway_client import load_service_key
 from fusion_artifacts_engine.metrics import get_metrics
 from fusion_artifacts_engine.models import ArtifactKind
 from fusion_artifacts_engine.rate_limiter import RateLimiter
+from fusion_artifacts_engine.render import render_share_html
 from fusion_artifacts_engine.rpc.errors import (
     BusinessRuleError,
     ConflictError,
@@ -37,6 +39,25 @@ logger = logging.getLogger(__name__)
 # LOW-1: share_id 公开端点格式预校验。合法 share_id 形如 shr_<12 hex>（见 share.py）。
 # 非法格式直接 400，省掉一次 DB 往返，且不泄露「该 share 是否存在」。
 _SHARE_ID_RE = re.compile(r"^shr_[A-Za-z0-9]{12}$")
+
+
+def _share_notice_page(title: str, message: str) -> str:
+    # #83: 过期/已撤销/不存在页 —— 静态文案，无脚本，纯内联样式（无外部资源）。
+    import html as _html
+
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<title>Artifacts</title>"
+        "<meta http-equiv='Content-Security-Policy' "
+        "content=\"default-src 'none'; style-src 'unsafe-inline'\">"
+        "<style>body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;"
+        "align-items:center;justify-content:center;margin:0;background:#fafafa;color:#18181b}"
+        "main{max-width:380px;padding:28px 32px;border:1px solid #e4e4e7;border-radius:16px;"
+        "background:#fff;box-shadow:0 1px 2px rgba(24,24,27,.05)}"
+        "h1{font-size:17px;margin:0 0 8px}p{font-size:13px;color:#52525b;margin:0}</style>"
+        f"</head><body><main><h1>{_html.escape(title)}</h1>"
+        f"<p>{_html.escape(message)}</p></main></body></html>"
+    )
 
 # #76: web GUI 静态资源目录（vite build 产物，package-data 随包分发）。
 # gateway /shell/fusion-artifacts/ 代理剥前缀后 GET / 落到这里。
@@ -193,7 +214,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             auth_header = self.headers.get("Authorization", "")
             if auth_header.startswith("Bearer "):
                 provided = auth_header[len("Bearer "):].strip()
-        return hmac.compare_digest(provided, api_key)
+        if hmac.compare_digest(provided, api_key):
+            return True
+        # #82: gateway 签发的 fm- service key 是代理注入凭据（gateway #294 契约：
+        # 模块须校验该 key）。从持久化文件读取（mtime 缓存），缺失即跳过。
+        service_key = load_service_key(engine.config.gateway_service_key_path)
+        return bool(service_key) and hmac.compare_digest(provided, service_key)
 
     def _send_auth_denied(self, jsonrpc: bool = True) -> None:
         if jsonrpc:
@@ -374,6 +400,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_get()
             return
+        # #83: 公开 share 页面（无鉴权，公开限流桶）。/s/<share_id> 渲染只读预览，
+        # remix 权限时附带「Remix to my library」入口（跳 gateway shell 登录流）。
+        sp = [p for p in parsed_get.path.split("/") if p]
+        if len(sp) == 2 and sp[0] == "s":
+            self._handle_share_page(sp[1])
+            return
         # #76: web GUI。GET / 返回 index.html，GET /assets/* 返回构建产物。
         # 仅在 webui_dist 存在时生效（源码安装无 dist 时保持 404，REST/RPC 不受影响）。
         if self._try_serve_webui():
@@ -474,6 +506,61 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _handle_share_page(self, share_id: str) -> None:
+        # #83: 公开 share 页。渲染管道复用 share.get_public_share（权限/过期/
+        # 访问计数判定）与 render.render_share_html（净化 + nonce CSP）。
+        engine = self.server._rpc_handler.engine
+        if not self.server._rate_limiter.check_public():
+            self._send_share_html(429, _share_notice_page("Too many requests", "Please retry shortly."))
+            return
+        if not _SHARE_ID_RE.fullmatch(share_id):
+            self._send_share_html(404, _share_notice_page("Not found", "This share link is not valid."))
+            return
+        result = engine.get_public_share(share_id)
+        status = result.get("status")
+        if status == "gone":
+            reason = result.get("reason", "unavailable")
+            logger.info("share page %s gone: %s", share_id, reason)
+            self._send_share_html(
+                410, _share_notice_page("Link expired", f"This share link is {reason}.")
+            )
+            return
+        if status != "ok":
+            self._send_share_html(404, _share_notice_page("Not found", "This share link does not exist."))
+            return
+        artifact_id = result["artifact"]["id"]
+        artifact = engine.get_artifact(artifact_id)
+        version = engine.get_version_content(artifact_id)
+        cfg = engine.config
+        remix_url = ""
+        if cfg.gateway_enabled:
+            remix_url = (
+                f"{cfg.gateway_url.rstrip('/')}/shell/{cfg.gateway_module_id}/"
+                f"#/s/{share_id}?remix=1"
+            )
+        html = render_share_html(
+            artifact,
+            version.content if version else "",
+            remix_url=remix_url or None,
+            permission=result["share"]["permission"],
+        )
+        logger.info("share page %s served artifact %s", share_id, artifact_id)
+        self._send_share_html(200, html)
+
+    def _send_share_html(self, status: int, html_body: str) -> None:
+        body = html_body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        rid = getattr(self, "_request_id", None)
+        if rid:
+            self.send_header(_REQUEST_ID_HEADER, rid)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _handle_rest_v1_get(self) -> None:
         engine = self.server._rpc_handler.engine
         parsed = urlparse(self.path)
@@ -508,6 +595,11 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=False)
+            return
+
+        # #83: GUI 分享链接拼接用的公开页面 base URL（鉴权，仅返回配置值）
+        if len(path_parts) == 3 and path_parts[2] == "share-base":
+            self._send_rest_response(200, {"base_url": engine.config.share_base_url})
             return
 
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":

@@ -64,6 +64,7 @@ fusion-artifacts-engine status
 引擎通过 `X-API-Key` 请求头进行 API Key 认证（v0.6.0 起同时接受 `Authorization: Bearer <key>` — fusion-gateway shell 代理注入的是 Bearer）。
 
 - 若配置了 `api_key`，所有请求必须包含 `X-API-Key: <key>` 或 `Authorization: Bearer <key>`
+- 网关签发的 `fm-fusion-artifacts-<hex>` service key（持久化于 `gateway.key_file`）同样以 `Authorization: Bearer <key>` 接受（v0.6.1，#82）— 即 shell 代理注入的凭据
 - 若**未**配置 `api_key`，默认**拒绝**所有请求（fail-closed，`allow_no_auth: false`）
 - 生产环境：设置 `api_key`（env `FUSION_ARTIFACTS_API_KEY` 或 `security.api_key`）强制认证
 - 本地单机受信网络：可显式 `allow_no_auth: true` 跳过鉴权（不推荐公网/多租户）
@@ -137,7 +138,7 @@ curl -X POST http://127.0.0.1:11451 \
 
 | 方法 | 参数 | 说明 |
 |---|---|---|
-| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | 创建分享链接（已有链接则 upsert 权限） |
+| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | 创建分享链接（已有链接则 upsert 权限）；返回 `share_url`（`/s/<share_id>`） |
 | `artifact.get_shared` | share_id | 获取分享的产物（公开） |
 | `artifact.revoke_share` | share_id | 撤销分享链接 |
 | `artifact.remix` | artifact_id, new_name? | Remix 派生副本，记录 `parent_artifact_id` 血统 |
@@ -289,6 +290,8 @@ GET /api/v1/tags               # 列出标签
 GET /api/v1/events             # 列出事件
 GET /api/v1/recycle            # 列出回收站
 GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；share_id 格式非法返回 400，已撤销/过期/耗尽返回 410 Gone，不存在返回 404）
+GET /api/v1/share-base        # 需鉴权：配置的分享页 base URL（#83）
+GET /s/{share_id}             # 公开渲染分享页（免鉴权；410 失效页，404 未知）（#83）
 ```
 
 `GET /api/v1/share/{share_id}` 在访问 DB 前先校验 `share_id` 格式（`shr_<12>`；LOW-1）——格式非法立即返回 `400`，格式合法但不存在返回 `404`，不泄露该分享是否存在。
@@ -593,6 +596,14 @@ tracing:
 产品层: Fusion Code (tool_use) | Fusion Studio (GUI)
 ---------------------------------------------------------
 中间件: Artifacts Engine (Python 守护进程, JSON-RPC 2.0 + REST /api/v1 + SSE)
+  engine.py (领域核心, 委托给各模块)
+    ├─ share.py         ShareManager — 分享访问控制 + R2 访问缓冲
+    ├─ token_budget.py  context_budget / check_safety / inject
+    ├─ section_index.py 段落边界 + patch（替换/删除段落）
+    ├─ render.py        分享 HTML 渲染（lxml Cleaner + 权限页脚）
+    ├─ gateway_client.py shell manifest 自助注册 + fm- service key 生命周期
+    ├─ ipc_consumer.py  fusion-design save_artifact file-IPC 监听
+    └─ auto_identifier.py should_create_artifact（阈值 + 可渲染类型）
 ---------------------------------------------------------
 存储层: SQLite (WAL) + 文件系统
 ```
@@ -639,18 +650,20 @@ import { VisualStage } from "@fusion/artifacts-visual";
 ```yaml
 # ~/.fusion/artifacts/config.yaml
 security:
-  api_key: "<强随机key>"       # 必填 — 网关代理以 Bearer 注入
+  api_key: "<强随机key>"       # 直连调用方凭据（fusion-studio / fusion-code）
 gateway:
   enabled: true
   url: "http://127.0.0.1:11432"
   module_id: "fusion-artifacts"
-  admin_key: "<网关 web_shell.admin_key>"  # 仅首次引导；此后引擎 api_key 自愈重注册
+  admin_key: "<网关 master/admin key>"  # 仅首次引导
+  key_file: ""                 # 默认 <storage_root>/gateway_service_key（权限 600）
   heartbeat_interval: 15       # 须小于网关 heartbeat_timeout（默认 30s）
 ```
 
-- **自助注册**：启动时 POST shell manifest 到 `POST /api/v1/shell/manifests`（入口 `/shell/fusion-artifacts/`、健康检查 `/healthz`、upstream `http://127.0.0.1:11451`）。注册以引擎自身 `api_key` 授权（self-keyed 模式），首次引导回退 `admin_key`。
-- **心跳**：后台线程每 15s POST `…/shell/manifests/fusion-artifacts/heartbeat`；收到 404（如网关重启丢状态）自动重新注册。
-- **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <引擎 api_key>` — 即上文双通道认证的由来。
+- **自助注册**：启动时 POST shell manifest 到 `POST /api/v1/shell/manifests`（入口 `/shell/fusion-artifacts/`、健康检查 `/healthz`、upstream `http://127.0.0.1:11451`）。注册体**不带 `api_key`**，网关据此签发 `fm-fusion-artifacts-<hex>` service key 并一次性返回明文（`raw_key`）。首次引导用 `gateway.admin_key`，之后用已存 service key 完成再注册。
+- **Service key 持久化** (#82)：`raw_key` 原子写入 `gateway.key_file`（默认 `<storage_root>/gateway_service_key`，权限 600）。心跳只用它、不再用 admin key — 稳态下无 admin 面调用，日志为平稳心跳节奏。
+- **心跳**：后台线程每 15s POST `…/shell/manifests/fusion-artifacts/heartbeat`。`404 manifest_unknown`（网关重启丢 store）或 `403 heartbeat_forbidden`（无匹配 service key 记录）触发一次再注册，网关签发新 key 并持久化继续使用。再注册限频 5 分钟一次，被撤销的 key 不会造成 15s 循环。
+- **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <fm- service key>`。引擎 `_is_authed` 同时接受配置的 `api_key`（X-API-Key / Bearer）与该 service key（Bearer），符合网关 #294 契约（模块须校验签发 key）。
 - 注册/心跳失败**不影响服务**：网关宕机时引擎照常工作。
 
 ## Web 管理界面 (v0.6.0, issue #76)
@@ -682,6 +695,25 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
  "params": {"artifact_id": "art_x", "permission": "remix", "expires_at": "2026-11-09T00:00:00+08:00"}}
 {"jsonrpc": "2.0", "id": 2, "method": "artifact.remix", "params": {"artifact_id": "art_x"}}
 ```
+
+## 公开分享页 (v0.6.1, issue #83)
+
+分享链接不再是一个 JSON 端点，而是渲染后的只读页面：
+
+- **`GET /s/<share_id>`** — 无鉴权公开页（走公开限流桶）。markdown/HTML/SVG/data 内容经既有净化管道渲染（lxml Cleaner + 单次 nonce CSP），接收方看到的是产物本身，而不是 `{"status":"ok",...}`。
+- **权限感知**：`view` 分享只读渲染；`remix` 分享在同一页面追加 **Remix 到我的库** 按钮，深链到 shell 路由 `#/s/<share_id>?remix=1` — shell 先引导登录，登录后 GUI 将分享 remix 进查看者库，保留 `parent_artifact_id` 血统。
+- **过期/撤销/耗尽**链接渲染干净的失效页并返回 `410 Gone`；未知 id 返回 `404`；两种情况都不会输出产物正文。
+- **链接生成**：`artifact.create_share` 新增返回 `share_url`（`<share.public_base_url>/s/<share_id>`），GUI 复制按钮直接使用。`GET /api/v1/share-base`（需鉴权）暴露配置的 base 供客户端拼接。`share.public_base_url` 默认 `http://<server.host>:<server.port>` — 反向代理或对外域名部署时显式设置。
+
+## fusion-design 保存到产物 IPC (v0.6.1, issue #84)
+
+引擎消费 fusion-design **[保存到产物]** 按钮产生的冻结 file-IPC 契约（`fd-ecosystem EcosystemLink::send`；上游 dahai80/fusion-design#33）：
+
+- **监听目录**：`<FUSION_DESIGN_DATA_DIR 或 ~/.fusion-design>/fusion-artifacts-engine/*.json`（可用 `ipc.design_dir` 覆盖；轮询间隔 `ipc.poll_interval`，默认 3s）。
+- **消息**：`{"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact","payload":{"source":"fusion-design","title":...,"session":...,"version":...,"document":"<PenDocument JSON>"}}`。
+- **入库**：每个设计 `session` 归并为一个产物（`session_id=ext_fusion-design_<session>`、类型 `data`、`source_module=fusion-design`、metadata `design_session`/`design_version`）。更高 `version` 追加新版本；相同或更低版本跳过（重启幂等）。库卡片来源显示 **Design**。
+- **文件生命周期**：处理成功移入 `.processed/`；无法解析的消息重试 3 次后移入 `.failed/`；超 8MB 直接拒绝到 `.failed/`。重启不会重复摄入。
+- 关闭：`ipc.enabled: false`（或 `FUSION_ARTIFACTS_IPC_ENABLED=false`）。
 
 ## 产物卡片深链契约 (issue #78)
 
