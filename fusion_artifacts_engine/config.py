@@ -144,7 +144,16 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             "url": ("gateway_url", None),
             "module_id": ("gateway_module_id", None),
             "admin_key": ("gateway_admin_key", None),
+            "key_file": ("gateway_key_file", _expanduser_path),
             "heartbeat_interval": ("gateway_heartbeat_interval", None),
+        },
+        "share": {
+            "public_base_url": ("share_public_base_url", None),
+        },
+        "ipc": {
+            "enabled": ("ipc_enabled", None),
+            "design_dir": ("ipc_design_dir", _expanduser_path),
+            "poll_interval": ("ipc_poll_interval", None),
         },
     }
     flat: dict[str, Any] = {}
@@ -157,8 +166,9 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             if yaml_key not in section_data:
                 continue
             val = section_data[yaml_key]
-            # 空字符串归一为 None：sync_root（禁用 sync）
-            if field_name == "sync_root" and not val:
+            # 空字符串归一为 None：路径类缺省值由代码推导（sync_root 禁用 /
+            # gateway_key_file 用 storage_root 默认 / ipc_design_dir 用 convention 目录）
+            if field_name in ("sync_root", "gateway_key_file", "ipc_design_dir") and not val:
                 flat[field_name] = None
                 continue
             if converter is not None:
@@ -203,10 +213,17 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_GATEWAY_URL": ("gateway_url", str),
         "FUSION_ARTIFACTS_GATEWAY_MODULE_ID": ("gateway_module_id", str),
         "FUSION_ARTIFACTS_GATEWAY_ADMIN_KEY": ("gateway_admin_key", str),
+        "FUSION_ARTIFACTS_GATEWAY_KEY_FILE": ("gateway_key_file", _expanduser_path),
         "FUSION_ARTIFACTS_GATEWAY_HEARTBEAT_INTERVAL": (
             "gateway_heartbeat_interval",
             int,
         ),
+        # #83: 公开 share 页面 base URL（空=按 server host/port 推导）
+        "FUSION_ARTIFACTS_SHARE_PUBLIC_BASE_URL": ("share_public_base_url", str),
+        # #84: fusion-design save_artifact file-IPC 消费
+        "FUSION_ARTIFACTS_IPC_ENABLED": ("ipc_enabled", _parse_bool),
+        "FUSION_ARTIFACTS_IPC_DESIGN_DIR": ("ipc_design_dir", _expanduser_path),
+        "FUSION_ARTIFACTS_IPC_POLL_INTERVAL": ("ipc_poll_interval", float),
     }
     for env_key, (field_name, converter) in env_map.items():
         val = os.environ.get(env_key)
@@ -312,7 +329,35 @@ class ArtifactEngineConfig(BaseModel):
     # 首次注册引导用（gateway web_shell.admin_key）；注册成功后凭引擎自身 api_key
     # 完成心跳与 #369 self-heal 再注册，admin_key 可从配置中移除。
     gateway_admin_key: str | None = Field(default=None)
+    # #82: gateway 签发的 fm- service key 持久化文件（空=storage_root/gateway_service_key）
+    gateway_key_file: str | None = Field(default=None)
     gateway_heartbeat_interval: int = Field(default=15)
+    # #83: 公开 share 页面 base URL（空=按 server host/port 推导）
+    share_public_base_url: str = Field(default="")
+    # #84: fusion-design save_artifact file-IPC 消费（目录缺省=~/.fusion-design/fusion-artifacts-engine）
+    ipc_enabled: bool = Field(default=True)
+    ipc_design_dir: str | None = Field(default=None)
+    ipc_poll_interval: float = Field(default=3.0)
+
+    @property
+    def gateway_service_key_path(self) -> Path:
+        if self.gateway_key_file:
+            return Path(self.gateway_key_file).expanduser()
+        return self.storage_root / "gateway_service_key"
+
+    @property
+    def share_base_url(self) -> str:
+        if self.share_public_base_url:
+            return self.share_public_base_url.rstrip("/")
+        return f"http://{self.server_host}:{self.server_port}"
+
+    @property
+    def ipc_design_path(self) -> Path:
+        if self.ipc_design_dir:
+            return Path(self.ipc_design_dir).expanduser()
+        base = os.environ.get("FUSION_DESIGN_DATA_DIR", "")
+        root = Path(base).expanduser() if base else Path.home() / ".fusion-design"
+        return root / "fusion-artifacts-engine"
 
     @property
     def db_path(self) -> Path:

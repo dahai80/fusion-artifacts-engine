@@ -111,3 +111,39 @@ export async function remixArtifact(id: string): Promise<Artifact> {
 export async function restoreArtifact(id: string): Promise<void> {
     await rpc("artifact.restore", { artifact_id: id });
 }
+
+export interface PublicShare {
+    status: "ok" | "gone" | "not_found";
+    reason?: string;
+    share?: { share_id: string; permission: "view" | "remix"; expires_at: number | null };
+    artifact?: { id: string; name: string; type: string; kind: string | null; summary: string; updated_at: number };
+    rendered_html?: string;
+}
+
+export async function getPublicShare(shareId: string): Promise<PublicShare> {
+    const resp = await fetch(`${BASE}api/v1/share/${encodeURIComponent(shareId)}`);
+    if (resp.status === 410) {
+        const body = await resp.json().catch(() => ({}));
+        return { status: "gone", reason: body.reason };
+    }
+    if (!resp.ok) return { status: "not_found" };
+    return resp.json();
+}
+
+let shareBasePromise: Promise<string> | null = null;
+
+export async function getShareBase(): Promise<string> {
+    if (!shareBasePromise) {
+        shareBasePromise = fetch(`${BASE}api/v1/share-base`)
+            .then(async (resp) => {
+                if (!resp.ok) throw new Error(`share-base ${resp.status}`);
+                const body = await resp.json();
+                return String(body.base_url || "").replace(/\/$/, "");
+            })
+            .catch((e) => {
+                shareBasePromise = null;
+                throw e;
+            });
+    }
+    return shareBasePromise;
+}

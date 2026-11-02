@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Moon, Package, Sun } from "lucide-react";
 import Library from "./components/Library";
 import Detail from "./components/Detail";
+import Share from "./components/Share";
 import type { Lang } from "./i18n";
 
 function useTheme() {
@@ -13,9 +14,11 @@ function useTheme() {
     return { dark, toggle: () => setDark((d) => !d) };
 }
 
-function parseRoute(): { view: "library" | "detail"; id?: string } {
+function parseRoute(): { view: "library" | "detail" | "share"; id?: string } {
     const h = window.location.hash;
-    const m = h.match(/^#\/a\/(.+)$/);
+    const s = h.match(/^#\/s\/([^?]+)/);
+    if (s) return { view: "share", id: decodeURIComponent(s[1]) };
+    const m = h.match(/^#\/a\/([^?]+)/);
     if (m) return { view: "detail", id: decodeURIComponent(m[1]) };
     return { view: "library" };
 }
@@ -73,7 +76,9 @@ export default function App() {
                 </div>
             </header>
             <main className="flex-1 overflow-y-auto">
-                {route.view === "detail" && route.id ? (
+                {route.view === "share" && route.id ? (
+                    <Share key={route.id} id={route.id} lang={lang} onBack={backToLibrary} />
+                ) : route.view === "detail" && route.id ? (
                     <Detail key={route.id} id={route.id} lang={lang} onBack={backToLibrary} />
                 ) : (
                     <Library lang={lang} onOpen={openArtifact} />

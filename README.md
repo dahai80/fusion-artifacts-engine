@@ -194,6 +194,7 @@ See `audit/fusion-artifacts-audit-0824.md` §9 for the per-finding fix map.
 The engine uses API key authentication via the `X-API-Key` header (v0.6.0: `Authorization: Bearer <key>` is also accepted — the fusion-gateway shell proxy injects Bearer tokens).
 
 - If `api_key` is configured (env `FUSION_ARTIFACTS_API_KEY` or `security.api_key`), all requests must include `X-API-Key: <key>` or `Authorization: Bearer <key>` (constant-time compare)
+- The gateway-issued `fm-fusion-artifacts-<hex>` service key persisted at `gateway.key_file` is also accepted as `Authorization: Bearer <key>` (v0.6.1, #82) — this is the credential the shell proxy injects
 - If `api_key` is **not** configured, requests are **rejected by default** (`allow_no_auth: false`, fail-closed)
 - Set `allow_no_auth: true` only for trusted single-user local use; production should set `api_key`
 
@@ -268,7 +269,7 @@ curl -X POST http://127.0.0.1:11451 \
 
 | Method | Params | Description |
 |---|---|---|
-| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | Create share link (upserts permission on existing link) |
+| `artifact.create_share` | artifact_id, max_accesses?, expires_at?, permission? (view/remix) | Create share link (upserts permission on existing link); returns `share_url` (`/s/<share_id>`) |
 | `artifact.get_shared` | share_id | Get shared artifact (public) |
 | `artifact.revoke_share` | share_id | Revoke share link |
 | `artifact.remix` | artifact_id, new_name? | Remix a derived copy with `parent_artifact_id` lineage |
@@ -419,6 +420,8 @@ GET /api/v1/artifacts/{artifact_id}                  # Get artifact metadata
 GET /api/v1/artifacts/{artifact_id}/versions         # List artifact versions
 GET /api/v1/artifacts/{artifact_id}/versions/{num}   # Get a specific version's content
 GET /api/v1/share/{share_id}                         # Public share access (no auth; 400 if malformed share_id, 410 Gone if revoked/expired/exhausted, 404 if not found)
+GET /api/v1/share-base                               # Authenticated: configured share page base URL (#83)
+GET /s/{share_id}                                    # Public rendered share page (no auth; 410 expired page, 404 unknown) (#83)
 ```
 
 `GET /api/v1/share/{share_id}` validates the `share_id` format (`shr_<12>`; LOW-1) before
@@ -678,6 +681,22 @@ security:
   allow_no_auth: false   # fail-closed default; set true only for trusted single-user local use
   recycle_retention_days: 7
 
+share:
+  public_base_url: ""    # #83: public base for /s/<share_id> links (empty → http://host:port)
+
+gateway:                 # #75/#82 web-shell integration
+  enabled: false
+  url: "http://127.0.0.1:11432"
+  module_id: "fusion-artifacts"
+  admin_key: ""          # bootstrap only; fm- service key persisted after first register
+  key_file: ""           # default <storage_root>/gateway_service_key (mode 600)
+  heartbeat_interval: 15
+
+ipc:                     # #84 fusion-design save_artifact consumer
+  enabled: true
+  design_dir: ""         # default <FUSION_DESIGN_DATA_DIR or ~/.fusion-design>/fusion-artifacts-engine
+  poll_interval: 3.0
+
 rate_limit:              # Ops-1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
   rps: 0                 # default JSON-RPC bucket
   burst: 0
@@ -742,7 +761,9 @@ Middleware: Artifacts Engine (Python daemon, JSON-RPC 2.0 + REST /api/v1 + SSE)
     ├─ share.py        ShareManager — share access control + R2 access buffer
     ├─ token_budget.py context_budget / check_safety / inject
     ├─ section_index.py section bounds + patch (replace/delete section)
-    ├─ render.py       share HTML render (lxml Cleaner)
+    ├─ render.py       share HTML render (lxml Cleaner + permission footer)
+    ├─ gateway_client.py shell manifest self-registration + fm- service key lifecycle
+    ├─ ipc_consumer.py fusion-design save_artifact file-IPC watcher
     └─ auto_identifier.py should_create_artifact (threshold + renderable-type)
   async engine methods offload blocking storage calls via asyncio.to_thread
 ---------------------------------------------------------
@@ -800,19 +821,20 @@ The daemon self-registers as a fusion-gateway web-shell module at startup, so th
 ```yaml
 # ~/.fusion/artifacts/config.yaml
 security:
-  api_key: "<strong-key>"      # required — gateway proxy injects it as Bearer
+  api_key: "<strong-key>"      # direct-caller credential (fusion-studio / fusion-code)
 gateway:
   enabled: true
   url: "http://127.0.0.1:11432"
   module_id: "fusion-artifacts"
-  admin_key: "<gateway web_shell.admin_key>"  # bootstrap only; the engine api_key
-                                              # self-heals re-registration afterwards
+  admin_key: "<gateway master/admin key>"  # bootstrap only
+  key_file: ""                 # default: <storage_root>/gateway_service_key (mode 600)
   heartbeat_interval: 15       # keep below gateway heartbeat_timeout (30s)
 ```
 
-- **Self-registration**: on start the engine POSTs its shell manifest to `POST /api/v1/shell/manifests` (id `/shell/fusion-artifacts/`, health `/healthz`, upstream `http://127.0.0.1:11451`). Registration authorizes with the engine's own `api_key` (self-keyed pattern), falling back to `admin_key` on first bootstrap.
-- **Heartbeat**: a daemon thread POSTs `…/shell/manifests/fusion-artifacts/heartbeat` every 15s; a 404 (e.g. gateway restart wiped state) triggers automatic re-registration.
-- **Proxy auth**: the gateway shell proxy strips caller credentials, forwards `/shell/fusion-artifacts/<rest>` to `upstream/<rest>`, and injects `Authorization: Bearer <engine api_key>` — hence the dual-channel auth above.
+- **Self-registration**: on start the engine POSTs its shell manifest to `POST /api/v1/shell/manifests` (id `/shell/fusion-artifacts/`, health `/healthz`, upstream `http://127.0.0.1:11451`). The body **omits `api_key`**, so the gateway issues an `fm-fusion-artifacts-<hex>` service key and returns the plaintext exactly once (`raw_key`). The first bootstrap authenticates with `gateway.admin_key`; afterwards the stored service key authenticates re-registration.
+- **Service key persistence** (#82): `raw_key` is written atomically to `gateway.key_file` (default `<storage_root>/gateway_service_key`, mode 600). Heartbeats use it — never the admin key — so steady-state operation makes no admin-plane calls and the log shows a steady heartbeat cadence.
+- **Heartbeat**: a daemon thread POSTs `…/shell/manifests/fusion-artifacts/heartbeat` every 15s. `404 manifest_unknown` (gateway restart with a wiped store) or `403 heartbeat_forbidden` (no matching service-key record) triggers one re-registration; the gateway issues a fresh key, which is persisted and used from then on. Re-registration is rate-limited to once per 5 minutes, so a permanently revoked key cannot produce a 15s re-register loop.
+- **Proxy auth**: the gateway shell proxy strips caller credentials, forwards `/shell/fusion-artifacts/<rest>` to `upstream/<rest>`, and injects `Authorization: Bearer <fm- service key>`. The engine's `_is_authed` accepts both its configured `api_key` (X-API-Key / Bearer) and the persisted service key (Bearer), matching the gateway #294 contract that modules validate the issued key.
 - Registration/heartbeat failures are **non-fatal**: the daemon keeps serving even if the gateway is down.
 
 ## Web GUI (v0.6.0, issue #76)
@@ -844,6 +866,25 @@ Claude-Artifacts-style remix + share, scoped to the intranet:
  "params": {"artifact_id": "art_x", "permission": "remix", "expires_at": "2026-11-09T00:00:00+08:00"}}
 {"jsonrpc": "2.0", "id": 2, "method": "artifact.remix", "params": {"artifact_id": "art_x"}}
 ```
+
+## Public Share Page (v0.6.1, issue #83)
+
+Share links now open a rendered read-only page instead of a JSON payload:
+
+- **`GET /s/<share_id>`** — unauthenticated public page (public rate-limit bucket). Markdown/HTML/SVG/data content is rendered through the existing sanitizer (lxml Cleaner + per-render nonce CSP), so the recipient sees the artifact, not `{"status":"ok",...}`.
+- **Permission-aware**: `view` shares render read-only. `remix` shares render the same page plus a **Remix to my library** button that deep-links to the shell route `#/s/<share_id>?remix=1` — the shell prompts for login, then the GUI remixes the share into the viewer's library with `parent_artifact_id` lineage preserved.
+- **Expired/revoked/exhausted** links render a clean expired page with `410 Gone`; unknown ids return `404`; the artifact body is never emitted in either case.
+- **Link generation**: `artifact.create_share` now returns `share_url` (`<share.public_base_url>/s/<share_id>`); the GUI copy button uses it. `GET /api/v1/share-base` (authenticated) exposes the configured base for client-side link building. `share.public_base_url` defaults to `http://<server.host>:<server.port>` — set it when the daemon sits behind a reverse proxy or on a different public host.
+
+## fusion-design Save-to-Artifacts IPC (v0.6.1, issue #84)
+
+The engine consumes the frozen file-IPC contract produced by fusion-design's **[Save to Artifacts]** button (`fd-ecosystem EcosystemLink::send`; upstream dahai80/fusion-design#33):
+
+- **Watch directory**: `<FUSION_DESIGN_DATA_DIR or ~/.fusion-design>/fusion-artifacts-engine/*.json` (override with `ipc.design_dir`; polling interval `ipc.poll_interval`, default 3s).
+- **Message**: `{"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact","payload":{"source":"fusion-design","title":...,"session":...,"version":...,"document":"<PenDocument JSON>"}}`.
+- **Ingestion**: one artifact per design `session` (`session_id=ext_fusion-design_<session>`, type `data`, `source_module=fusion-design`, metadata `design_session`/`design_version`). A higher `version` appends a new artifact version; the same or lower version is a no-op (restart-safe idempotency). The Library card shows source **Design**.
+- **File lifecycle**: handled messages move to `.processed/`; unparseable messages are retried 3 polls then moved to `.failed/`; oversized messages (>8MB) are rejected to `.failed/`. Nothing is re-ingested after restart.
+- Disable with `ipc.enabled: false` (or `FUSION_ARTIFACTS_IPC_ENABLED=false`).
 
 ## Artifact Card Deep-Link Contract (issue #78)
 

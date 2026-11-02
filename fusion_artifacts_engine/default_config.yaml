@@ -46,6 +46,11 @@ security:
   # L-6: share expires_at 最大 TTL（天），0=不限；过去日期一律拒绝
   share_max_ttl_days: 90
 
+share:
+  # #83: 公开 share 页面 base URL（/s/<share_id>）。空=按 server.host/port 推导
+  # （如 http://127.0.0.1:11451）。反向代理/公网部署时设为外部可达地址。
+  public_base_url: ""
+
 sse:
   heartbeat_interval: 30
   # P1-7/M7: SSE 单连接最大存活秒。0=不限。超时服务端主动关流促重连，防僵尸长连接占线程
@@ -83,13 +88,24 @@ tracing:
 gateway:
   # #75: web-shell 集成。enabled=true 时启动时向 fusion-gateway 自注册 shell
   # manifest（侧栏 Artifacts 菜单 + /shell/<module_id>/ 代理路由）并周期心跳。
-  # 需要同时配置 security.api_key（注册与心跳凭它，#296 self-keyed 模式）。
+  # #82: 注册体不带 api_key —— gateway 签发 fm- service key（raw_key 仅返回一次），
+  # 引擎持久化到关键文件并用它心跳；引擎同时接受该 key 的 Bearer（代理注入通道）。
   enabled: false
   url: "http://127.0.0.1:11432"
   module_id: "fusion-artifacts"
-  # 首次注册引导用（gateway web_shell.admin_key）；注册成功后凭引擎自身
-  # api_key 心跳 + self-heal 再注册，此后可从配置移除。
+  # 首次注册引导用（gateway web_shell.admin_key）；签发 fm- key 后不再需要。
   admin_key: ""
+  # gateway 签发 key 的持久化文件；空=storage.root/gateway_service_key（权限 600）
+  key_file: ""
   # 心跳间隔秒（gateway heartbeat_timeout 默认 30s，须小于它）
   heartbeat_interval: 15
+
+ipc:
+  # #84: fusion-design [Save to Artifacts] 文件 IPC 消费。enabled=true 时轮询
+  # <base>/fusion-artifacts-engine/*.json，save_artifact 消息落库后归档。
+  enabled: true
+  # 消息目录；空= <FUSION_DESIGN_DATA_DIR 或 ~/.fusion-design>/fusion-artifacts-engine
+  design_dir: ""
+  # 轮询间隔秒
+  poll_interval: 3.0
 

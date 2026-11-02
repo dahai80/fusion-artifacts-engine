@@ -51,6 +51,21 @@ def _run_once(config, host, port) -> int:
     engine = ArtifactEngine(config)
     server = ArtifactRPCServer(engine, host=host, port=port)
 
+    # #84: fusion-design [Save to Artifacts] file-IPC 消费。engine 生命周期内运行；
+    # watch 重启后按新 engine 重建（consumer 持有 engine 引用）。
+    ipc_consumer = None
+    if getattr(config, "ipc_enabled", True):
+        from fusion_artifacts_engine.ipc_consumer import DesignIPCConsumer
+
+        try:
+            ipc_consumer = DesignIPCConsumer(
+                engine, config.ipc_design_path, config.ipc_poll_interval
+            )
+            ipc_consumer.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("design IPC consumer start failed (non-fatal): %s", e)
+            ipc_consumer = None
+
     # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
     # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
     # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
@@ -82,6 +97,8 @@ def _run_once(config, host, port) -> int:
         code = 1
     finally:
         try:
+            if ipc_consumer is not None:
+                ipc_consumer.stop()
             server.stop()
             engine.close()
         except Exception as e:  # noqa: BLE001

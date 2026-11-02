@@ -17,6 +17,7 @@ import {
     createShare,
     getArtifact,
     getContent,
+    getShareBase,
     listEvents,
     listVersions,
     remixArtifact,
@@ -58,7 +59,14 @@ export default function Detail({
     const [copied, setCopied] = useState(false);
     const [busy, setBusy] = useState(false);
     const [sharePerm, setSharePerm] = useState<"view" | "remix">("view");
+    const [shareBase, setShareBase] = useState("");
     const [parentName, setParentName] = useState("");
+
+    useEffect(() => {
+        getShareBase()
+            .then(setShareBase)
+            .catch(() => setShareBase(""));
+    }, []);
 
     const load = async () => {
         try {
@@ -141,7 +149,9 @@ export default function Detail({
     };
 
     const shareUrl = artifact?.share_id
-        ? `${window.location.origin}/api/v1/share/${artifact.share_id}`
+        ? shareBase
+            ? `${shareBase}/s/${artifact.share_id}`
+            : `${window.location.origin}/api/v1/share/${artifact.share_id}`
         : "";
 
     const doShare = async () => {
@@ -223,7 +233,7 @@ export default function Detail({
                 <div>
                     <h1 className="text-xl font-semibold">{artifact.name}</h1>
                     <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-                        {d.source} {sourceLabel(artifact)} · {d.fromSession} {artifact.session_id} ·{" "}
+                        {d.source} {sourceLabel(artifact, lang)} · {d.fromSession} {artifact.session_id} ·{" "}
                         {relTime(artifact.updated_at, lang)}
                     </p>
                     {artifact.parent_artifact_id && (

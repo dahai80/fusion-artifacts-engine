@@ -95,16 +95,56 @@ def _sanitize_html(html_str: str) -> str:
     return _sanitize_html_regex(html_str)
 
 
-def render_share_html(artifact, content: str) -> str:
+def _share_footer(nonce: str, permission: str, remix_url: str | None) -> str:
+    # #83: 公开 share 页脚 —— 权限标识 + remix 入口。CSP 只放行带 nonce 的
+    # <style>，故样式与文档共用同一 nonce（内联 style 属性会被阻断）。
+    if remix_url:
+        action = (
+            f"<a class='btn' href=\"{_html_escape(remix_url)}\">"
+            f"{'Remix to my library' if permission == 'remix' else 'Open in library'}</a>"
+        )
+    else:
+        action = ""
+    return (
+        f"<style nonce=\"{nonce}\">.fae-share-bar{{position:fixed;bottom:0;left:0;right:0;"
+        f"display:flex;gap:12px;align-items:center;justify-content:space-between;"
+        f"padding:10px 16px;background:rgba(24,24,27,.92);color:#e4e4e7;"
+        f"font:13px/1.4 system-ui,sans-serif}}.fae-share-bar .perm{{opacity:.75}}"
+        f".fae-share-bar .btn{{background:#6366f1;color:#fff;text-decoration:none;"
+        f"padding:6px 14px;border-radius:10px;font-weight:600}}"
+        f"body{{padding-bottom:56px}}</style>"
+        f"<div class='fae-share-bar'><span>Shared artifact · "
+        f"<span class='perm'>{_html_escape(permission)}</span></span>{action}</div>"
+    )
+
+
+def _append_share_footer(
+    doc: str, nonce: str, permission: str, remix_url: str | None
+) -> str:
+    if not remix_url and permission == "view":
+        return doc
+    footer = _share_footer(nonce, permission, remix_url)
+    return doc.replace("</body>", footer + "</body>", 1)
+
+
+def render_share_html(
+    artifact, content: str, remix_url: str | None = None, permission: str = "view"
+) -> str:
     # H7: 从 engine.py 抽出的分享渲染层。iframe sandbox + CSP + 净化。
     # LOW-5: 单次渲染 nonce，去掉 style-src 'unsafe-inline'，CSP 与 <style> 共用同一 nonce。
+    # #83: remix_url 非空时追加权限页脚（view/remix 与 remix 入口）。
+    doc, nonce = _render_share_body(artifact, content)
+    return _append_share_footer(doc, nonce, permission, remix_url)
+
+
+def _render_share_body(artifact, content: str) -> tuple[str, str]:
     atype = artifact.type
     title = _html_escape(artifact.name or "Shared Artifact")
     nonce = _gen_nonce()
     csp = _SHARE_DOC_CSP_TMPL.format(nonce=nonce)
     if atype in ("html", "react"):
         iframe_doc = _html_escape(_sanitize_html(content))
-        return (
+        doc = (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
             f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
@@ -113,12 +153,13 @@ def render_share_html(artifact, content: str) -> str:
             f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
             f"</body></html>"
         )
+        return doc, nonce
     if atype == "markdown":
         import markdown
 
         rendered = markdown.markdown(content, extensions=["fenced_code", "tables"])
         rendered = _sanitize_html(rendered)
-        return (
+        doc = (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
             f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
@@ -128,6 +169,7 @@ def render_share_html(artifact, content: str) -> str:
             f"code{{background:#f4f4f4;padding:2px 6px;border-radius:3px}}</style>"
             f"</head><body>{rendered}</body></html>"
         )
+        return doc, nonce
     if atype == "data":
         import json as _json
 
@@ -141,15 +183,16 @@ def render_share_html(artifact, content: str) -> str:
                 pretty = _html_escape(content)
         else:
             pretty = _html_escape(content)
-        return (
+        doc = (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
             f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre;padding:1rem}}</style>"
             f"</head><body>{pretty}</body></html>"
         )
+        return doc, nonce
     if atype == "svg":
         iframe_doc = _html_escape(_sanitize_html(content))
-        return (
+        doc = (
             f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
             f"<title>{title}</title>"
             f"<meta http-equiv='Content-Security-Policy' content=\"{csp}\">"
@@ -158,11 +201,13 @@ def render_share_html(artifact, content: str) -> str:
             f"<iframe sandbox srcdoc=\"{iframe_doc}\"></iframe>"
             f"</body></html>"
         )
+        return doc, nonce
     escaped = _html_escape(content)
-    return (
+    doc = (
         f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
         f"<title>{title}</title>"
         f"<style nonce=\"{nonce}\">body{{font-family:monospace;white-space:pre-wrap;"
         f"padding:1rem;overflow:auto}}</style>"
         f"</head><body>{escaped}</body></html>"
     )
+    return doc, nonce

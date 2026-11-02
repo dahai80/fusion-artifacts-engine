@@ -643,7 +643,9 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             share_id=share.share_id,
         )
-        return {"share": share.model_dump()}
+        # #83: 返回可直接打开的公开页面 URL（不是 JSON 端点）
+        share_url = f"{self.engine.config.share_base_url}/s/{share.share_id}"
+        return {"share": share.model_dump(), "share_url": share_url}
 
     async def _get_shared(self, params: dict) -> dict:
         # P2-2/M1+F2: 读经 to_thread 卸载
