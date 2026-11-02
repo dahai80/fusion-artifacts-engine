@@ -707,7 +707,7 @@ long_context:            # v0.7.1 #91 rolling summary + rag archival (compactor 
   mlx_url: "http://127.0.0.1:11434"
   mlx_api_key: ""        # empty = FUSION_MLX_API_KEY env
   rag_enabled: true
-  rag_url: "http://127.0.0.1:11436"
+  rag_url: "http://127.0.0.1:11436/kb"   # /kb prefix = fusion-rag app-level route
   rag_api_key: ""        # empty = FUSION_RAG_API_KEY env
   rag_kb_id: "fusion-artifacts"
 
@@ -941,7 +941,7 @@ Consumer contract (cowork/design/code): prompt assembly should carry the ref + T
 
 - **Rolling summary**: when an artifact's version count reaches `long_context.summary_threshold` (default 5), the engine asks fusion-mlx (`/v1/chat/completions`, ≤120 words) to summarize the version-change digest, writes it to `artifact.summary` (so every subsequent `ref_text` carries it), and stamps `metadata.summary_version` for per-version idempotency. Threshold `0` disables.
 - **RAG archival**: when a new version supersedes the current one, the superseded version's content is pushed to fusion-rag (`POST /bases/{kb}/documents/ingest`, `doc_name=<artifact_id>_v<N>.txt`, metadata `artifact_id`/`artifact_version`/`artifact_type`). `metadata.archived_versions` guarantees one archive per version. fusion-rag unreachable/4xx → warning log, version creation unaffected. Old versions stay queryable: `POST /bases/fusion-artifacts/search` filtered by `artifact_id`.
-- **Config** (`long_context` section): `summary_threshold` (5), `summary_model` ("" = mlx default), `mlx_url`, `mlx_api_key` ("" = `FUSION_MLX_API_KEY`), `rag_enabled` (true), `rag_url` (11436), `rag_api_key` ("" = `FUSION_RAG_API_KEY`), `rag_kb_id` (`fusion-artifacts`). Env overrides: `FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`, `_LC_RAG_ENABLED`, `_LC_MLX_URL`, `_LC_RAG_URL`.
+- **Config** (`long_context` section): `summary_threshold` (5), `summary_model` ("" = mlx default), `mlx_url`, `mlx_api_key` ("" = `FUSION_MLX_API_KEY`), `rag_enabled` (true), `rag_url` (`http://127.0.0.1:11436/kb` — the `/kb` prefix is fusion-rag's app-level route), `rag_api_key` ("" = `FUSION_RAG_API_KEY`), `rag_kb_id` (`fusion-artifacts`). Env overrides: `FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`, `_LC_RAG_ENABLED`, `_LC_MLX_URL`, `_LC_RAG_URL`.
 
 ## Artifact Card Deep-Link Contract (issue #78)
 

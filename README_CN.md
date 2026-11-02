@@ -758,7 +758,7 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 
 - **滚动摘要**：版本数达 `long_context.summary_threshold`（默认 5）后，引擎调 fusion-mlx（`/v1/chat/completions`，≤120 词）对版本变更摘要生成滚动 changelog，写回 `artifact.summary`（后续所有 `ref_text` 自动携带），并盖 `metadata.summary_version` 按版本幂等。阈值 `0` 禁用。
 - **RAG 归档**：新版本取代当前版本时，把被取代版本的全文推入 fusion-rag（`POST /bases/{kb}/documents/ingest`，`doc_name=<artifact_id>_v<N>.txt`，metadata `artifact_id`/`artifact_version`/`artifact_type`）。`metadata.archived_versions` 保证每版本只归档一次。fusion-rag 不可达/4xx → 告警日志，版本创建不受影响。旧版本可查：`POST /bases/fusion-artifacts/search` 按 `artifact_id` 过滤。
-- **配置**（`long_context` 段）：`summary_threshold`（5）、`summary_model`（空 = mlx 默认）、`mlx_url`、`mlx_api_key`（空 = `FUSION_MLX_API_KEY`）、`rag_enabled`（true）、`rag_url`（11436）、`rag_api_key`（空 = `FUSION_RAG_API_KEY`）、`rag_kb_id`（`fusion-artifacts`）。env 覆盖：`FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`、`_LC_RAG_ENABLED`、`_LC_MLX_URL`、`_LC_RAG_URL`。
+- **配置**（`long_context` 段）：`summary_threshold`（5）、`summary_model`（空 = mlx 默认）、`mlx_url`、`mlx_api_key`（空 = `FUSION_MLX_API_KEY`）、`rag_enabled`（true）、`rag_url`（`http://127.0.0.1:11436/kb`——`/kb` 前缀是 fusion-rag 应用层路由）、`rag_api_key`（空 = `FUSION_RAG_API_KEY`）、`rag_kb_id`（`fusion-artifacts`）。env 覆盖：`FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD`、`_LC_RAG_ENABLED`、`_LC_MLX_URL`、`_LC_RAG_URL`。
 
 ## 产物卡片深链契约 (issue #78)
 
