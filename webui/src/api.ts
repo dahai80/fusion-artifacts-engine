@@ -63,6 +63,22 @@ export async function listRecycle(): Promise<{ artifacts: Artifact[]; total: num
     return rpc("artifact.list_recycle", { page: 1, page_size: 50 });
 }
 
+export async function createArtifact(
+    name: string,
+    artifactType: string,
+    content: string,
+    sessionId = "webui-created"
+): Promise<Artifact> {
+    const r = await rpc("artifact.create", {
+        session_id: sessionId,
+        name,
+        type: artifactType,
+        content,
+        metadata: { source: "webui" },
+    });
+    return r.artifact;
+}
+
 export async function getArtifact(id: string): Promise<Artifact> {
     const r = await rpc("artifact.get", { artifact_id: id });
     return r.artifact;
