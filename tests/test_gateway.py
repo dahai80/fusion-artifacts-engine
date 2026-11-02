@@ -227,6 +227,31 @@ def test_gateway_register_no_credentials_fails(tmp_path):
     assert fake.calls == []
 
 
+def test_gateway_register_no_raw_key_retains_persisted_key(tmp_path):
+    # v0.7.3: gateway upsert 再注册不签发 raw_key（保留已存记录）——
+    # 引擎内存 key 为空时应回读 key 文件自检复用，不得误报 "no stored key"
+    client = _make_client(tmp_path)
+    client._key_path.parent.mkdir(parents=True, exist_ok=True)
+    client._key_path.write_text(SERVICE_KEY, encoding="utf-8")
+    client._service_key = ""
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok"}))])
+    client._client = fake
+    assert client.register() is True
+    assert fake.calls[0]["headers"]["Authorization"] == "Bearer gw-admin-key"
+    assert client._service_key == SERVICE_KEY
+
+
+def test_gateway_heartbeat_empty_key_cooldown(tmp_path):
+    # v0.7.3: 无 key 心跳走注册路径也受冷却窗口约束——防 15s 注册+告警循环
+    client = _make_client(tmp_path)
+    client._service_key = ""
+    client._last_reregister = time.time()
+    fake = _FakeHttpClient([])
+    client._client = fake
+    assert client.heartbeat_once() is False
+    assert fake.calls == []
+
+
 def test_gateway_heartbeat_uses_service_key(tmp_path):
     client = _make_client(tmp_path)
     _write_service_key(client)

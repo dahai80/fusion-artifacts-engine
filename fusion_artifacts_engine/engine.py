@@ -50,6 +50,9 @@ _SUMMARY_MAX_LEN = 200
 
 
 def _truncate_summary(content: str) -> str:
+    # JSON 结构化内容截断即文本墙，非人类摘要——返回空（GUI 类型图标兜底）
+    if content.lstrip()[:1] in ("{", "["):
+        return ""
     return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
 
 

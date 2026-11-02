@@ -5,13 +5,57 @@ import Detail from "./components/Detail";
 import Share from "./components/Share";
 import type { Lang } from "./i18n";
 
+// S7: 经 gateway /shell/<id>/ 代理或 ?embedded=1 时为内嵌模式——
+// 自有顶部导航/主题/语言控件隐藏（Shell 管外壳，§2.1/§4.1）
+const EMBEDDED =
+    window.location.pathname.includes("/shell/") ||
+    new URLSearchParams(window.location.search).has("embedded");
+
+function readShellPref(key: string): string | null {
+    try {
+        return window.parent.localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+// §3.1: 暗色为默认主题；内嵌模式跟随 Shell（fusion.shell.theme + fusion:theme 事件），
+// 模块禁止自行检测（SDK theme API 就绪前以同源 storage/事件桥接过渡）
 function useTheme() {
-    const [dark, setDark] = useState(() => localStorage.getItem("fae-theme") === "dark");
+    const [dark, setDark] = useState(() => {
+        if (EMBEDDED) return readShellPref("fusion.shell.theme") !== "light";
+        return localStorage.getItem("fae-theme") !== "light";
+    });
     useEffect(() => {
         document.documentElement.classList.toggle("dark", dark);
-        localStorage.setItem("fae-theme", dark ? "dark" : "light");
+        document.documentElement.classList.toggle("light", !dark);
+        if (!EMBEDDED) localStorage.setItem("fae-theme", dark ? "dark" : "light");
     }, [dark]);
+    useEffect(() => {
+        if (!EMBEDDED) return;
+        const onTheme = (e: Event) => setDark((e as CustomEvent).detail !== "light");
+        window.parent.addEventListener("fusion:theme", onTheme);
+        return () => window.parent.removeEventListener("fusion:theme", onTheme);
+    }, []);
     return { dark, toggle: () => setDark((d) => !d) };
+}
+
+// §9.1: 界面文案跟随 Shell 语言（fusion.shell.lang + fusion:lang 事件）
+function useLang() {
+    const [lang, setLang] = useState<Lang>(() => {
+        if (EMBEDDED) return readShellPref("fusion.shell.lang") === "en" ? "en" : "zh";
+        return (localStorage.getItem("fae-lang") as Lang) || "zh";
+    });
+    useEffect(() => {
+        if (!EMBEDDED) localStorage.setItem("fae-lang", lang);
+    }, [lang]);
+    useEffect(() => {
+        if (!EMBEDDED) return;
+        const onLang = (e: Event) => setLang((e as CustomEvent).detail === "en" ? "en" : "zh");
+        window.parent.addEventListener("fusion:lang", onLang);
+        return () => window.parent.removeEventListener("fusion:lang", onLang);
+    }, []);
+    return { lang, setLang };
 }
 
 function parseRoute(): { view: "library" | "detail" | "share"; id?: string } {
@@ -25,9 +69,7 @@ function parseRoute(): { view: "library" | "detail" | "share"; id?: string } {
 
 export default function App() {
     const theme = useTheme();
-    const [lang, setLang] = useState<Lang>(
-        () => (localStorage.getItem("fae-lang") as Lang) || "zh"
-    );
+    const { lang, setLang } = useLang();
     const [route, setRoute] = useState(parseRoute);
 
     useEffect(() => {
@@ -35,10 +77,6 @@ export default function App() {
         window.addEventListener("hashchange", onHash);
         return () => window.removeEventListener("hashchange", onHash);
     }, []);
-
-    useEffect(() => {
-        localStorage.setItem("fae-lang", lang);
-    }, [lang]);
 
     const openArtifact = (id: string) => {
         window.location.hash = `#/a/${encodeURIComponent(id)}`;
@@ -49,32 +87,37 @@ export default function App() {
 
     return (
         <div className="flex h-full flex-col">
-            <header className="flex items-center justify-between border-b border-zinc-200/80 bg-white/80 px-6 py-3 shadow-sm shadow-zinc-900/5 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80">
-                <div className="flex items-center gap-2.5">
-                    <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-500/10 text-indigo-500">
-                        <Package size={18} />
-                    </div>
-                    <div>
-                        <h1 className="text-base font-semibold leading-tight">Artifacts</h1>
-                        <p className="text-xs text-zinc-500 dark:text-zinc-400">Fusion</p>
-                    </div>
-                </div>
-                <div className="flex items-center gap-2">
+            {!EMBEDDED && (
+                <header className="flex items-center justify-between border-b border-zinc-200/80 bg-white/80 px-6 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/80">
                     <button
-                        onClick={() => setLang(lang === "zh" ? "en" : "zh")}
-                        className="rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        onClick={backToLibrary}
+                        className="flex items-center gap-3 rounded-md text-left transition hover:opacity-80"
                     >
-                        {lang === "zh" ? "EN" : "中文"}
+                        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-500 text-white">
+                            <Package size={20} />
+                        </div>
+                        <div>
+                            <h1 className="text-lg font-semibold leading-tight">Artifacts</h1>
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400">Fusion</p>
+                        </div>
                     </button>
-                    <button
-                        onClick={theme.toggle}
-                        aria-label="theme"
-                        className="rounded-xl border border-zinc-200/80 p-2 text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                    >
-                        {theme.dark ? <Sun size={14} /> : <Moon size={14} />}
-                    </button>
-                </div>
-            </header>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+                            className="rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        >
+                            {lang === "zh" ? "EN" : "中文"}
+                        </button>
+                        <button
+                            onClick={theme.toggle}
+                            aria-label="theme"
+                            className="rounded-md border border-zinc-200/80 p-2 text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        >
+                            {theme.dark ? <Sun size={16} /> : <Moon size={16} />}
+                        </button>
+                    </div>
+                </header>
+            )}
             <main className="flex-1 overflow-y-auto">
                 {route.view === "share" && route.id ? (
                     <Share key={route.id} id={route.id} lang={lang} onBack={backToLibrary} />

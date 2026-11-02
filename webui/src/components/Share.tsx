@@ -36,7 +36,7 @@ export default function Share({
 
     const doRemix = async () => {
         if (!data?.artifact) return;
-        if (!window.confirm(d.confirmRemix)) return;
+        // S6: 禁原生 confirm——remix 非破坏性，直接执行（误建副本可在库中删除）
         setBusy(true);
         try {
             const child = await remixArtifact(data.artifact.id);
@@ -62,9 +62,9 @@ export default function Share({
     const back = (
         <button
             onClick={onBack}
-            className="flex items-center gap-1.5 rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            className="flex items-center gap-2 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
         >
-            <ArrowLeft size={13} />
+            <ArrowLeft size={16} />
             {d.back}
         </button>
     );
@@ -74,8 +74,8 @@ export default function Share({
         return (
             <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-4 px-6 py-6">
                 {back}
-                <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-2xl border border-zinc-200/80 bg-white p-10 text-center shadow-sm shadow-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-900">
-                    <Clock size={28} className="text-zinc-400" />
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-zinc-200/80 bg-white p-10 text-center dark:border-zinc-800 dark:bg-zinc-900">
+                    <Clock size={24} className="text-zinc-400" />
                     <p className="text-sm font-semibold">
                         {gone ? d.shareExpired : d.shareNotFound}
                     </p>
@@ -91,7 +91,7 @@ export default function Share({
         return (
             <div className="mx-auto flex h-full w-full max-w-3xl flex-col gap-4 px-6 py-6">
                 {back}
-                <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
                     {error}
                 </p>
             </div>
@@ -116,10 +116,10 @@ export default function Share({
                         <h1 className="text-sm font-semibold leading-tight">{data.artifact?.name}</h1>
                         <p className="flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
                             <span className="flex items-center gap-1">
-                                <Link2 size={11} />
+                                <Link2 size={16} />
                                 {data.artifact?.type}
                             </span>
-                            <span className="rounded-md bg-indigo-500/10 px-1.5 py-0.5 font-medium text-indigo-600 dark:text-indigo-400">
+                            <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 font-medium text-indigo-600 dark:text-indigo-400">
                                 {permission === "remix" ? d.permRemix : d.permView}
                             </span>
                         </p>
@@ -129,19 +129,19 @@ export default function Share({
                     <button
                         disabled={busy}
                         onClick={doRemix}
-                        className="flex items-center gap-1.5 rounded-xl bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        className="flex items-center gap-2 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
                     >
-                        <GitFork size={13} />
+                        <GitFork size={16} />
                         {d.remixShared}
                     </button>
                 )}
             </div>
             {error && (
-                <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                <p className="rounded-md border border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
                     {error}
                 </p>
             )}
-            <div className="min-h-[420px] flex-1 overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm shadow-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="min-h-[420px] flex-1 overflow-hidden rounded-lg border border-zinc-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                 <iframe
                     sandbox=""
                     srcDoc={data.rendered_html || ""}
