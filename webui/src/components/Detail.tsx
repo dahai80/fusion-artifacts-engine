@@ -61,6 +61,8 @@ export default function Detail({
     const [sharePerm, setSharePerm] = useState<"view" | "remix">("view");
     const [shareBase, setShareBase] = useState("");
     const [parentName, setParentName] = useState("");
+    // S6: 禁原生 confirm——阻断确认走自实现 Modal（ConfirmDialog 组件就绪前过渡）
+    const [confirm, setConfirm] = useState<{ msg: string; action: () => void } | null>(null);
 
     useEffect(() => {
         getShareBase()
@@ -133,19 +135,23 @@ export default function Detail({
         setMode("diff");
     };
 
-    const doRestore = async (targetVersion: number) => {
-        if (!window.confirm(d.confirmRestore)) return;
-        setBusy(true);
-        try {
-            await rollback(id, targetVersion);
-            setMode("preview");
-            setDiffFrom(null);
-            await load();
-        } catch (e) {
-            setError(`${d.loadError}: ${(e as Error).message}`);
-        } finally {
-            setBusy(false);
-        }
+    const doRestore = (targetVersion: number) => {
+        setConfirm({
+            msg: d.confirmRestore,
+            action: async () => {
+                setBusy(true);
+                try {
+                    await rollback(id, targetVersion);
+                    setMode("preview");
+                    setDiffFrom(null);
+                    await load();
+                } catch (e) {
+                    setError(`${d.loadError}: ${(e as Error).message}`);
+                } finally {
+                    setBusy(false);
+                }
+            },
+        });
     };
 
     const shareUrl = artifact?.share_id
@@ -166,16 +172,20 @@ export default function Detail({
         }
     };
 
-    const doRemix = async () => {
-        if (!window.confirm(d.confirmRemix)) return;
-        setBusy(true);
-        try {
-            const child = await remixArtifact(id);
-            window.location.hash = `#/a/${child.id}`;
-        } catch (e) {
-            setError(`${d.loadError}: ${(e as Error).message}`);
-            setBusy(false);
-        }
+    const doRemix = () => {
+        setConfirm({
+            msg: d.confirmRemix,
+            action: async () => {
+                setBusy(true);
+                try {
+                    const child = await remixArtifact(id);
+                    window.location.hash = `#/a/${child.id}`;
+                } catch (e) {
+                    setError(`${d.loadError}: ${(e as Error).message}`);
+                    setBusy(false);
+                }
+            },
+        });
     };
 
     const doRevoke = async () => {
@@ -200,7 +210,7 @@ export default function Detail({
     if (error && !artifact) {
         return (
             <div className="mx-auto w-full max-w-5xl px-6 py-6">
-                <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                <p className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
                     {error}
                 </p>
             </div>
@@ -223,9 +233,9 @@ export default function Detail({
         <div className="mx-auto w-full max-w-5xl px-6 py-6">
             <button
                 onClick={onBack}
-                className="mb-4 flex items-center gap-1.5 text-sm text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
+                className="mb-4 flex items-center gap-2 text-sm text-zinc-500 transition hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"
             >
-                <ArrowLeft size={14} />
+                <ArrowLeft size={16} />
                 {d.back}
             </button>
 
@@ -239,9 +249,9 @@ export default function Detail({
                     {artifact.parent_artifact_id && (
                         <button
                             onClick={() => (window.location.hash = `#/a/${artifact.parent_artifact_id}`)}
-                            className="mt-1.5 flex items-center gap-1 text-xs text-indigo-500 transition hover:text-indigo-600"
+                            className="mt-1 flex items-center gap-1 text-xs text-indigo-500 transition hover:text-indigo-600"
                         >
-                            <GitFork size={11} />
+                            <GitFork size={16} />
                             {d.remixOf} {parentName || artifact.parent_artifact_id}
                         </button>
                     )}
@@ -250,10 +260,10 @@ export default function Detail({
                     <button
                         disabled={busy}
                         onClick={doRemix}
-                        className="flex items-center gap-1 rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                         title={d.remix}
                     >
-                        <GitFork size={12} />
+                        <GitFork size={16} />
                         {d.remix}
                     </button>
                     <button
@@ -263,10 +273,10 @@ export default function Detail({
                                 "_blank"
                             )
                         }
-                        className="flex items-center gap-1 rounded-xl border border-zinc-200/80 px-3 py-1.5 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                         title={d.continueChat}
                     >
-                        <MessagesSquare size={12} />
+                        <MessagesSquare size={16} />
                         {d.continueChat}
                     </button>
                     {isHtml && (
@@ -285,7 +295,7 @@ export default function Detail({
                     {mode === "diff" && (
                         <ModeBtn active onClick={() => { setMode("preview"); setDiffFrom(null); }}>
                             <span className="flex items-center gap-1">
-                                <X size={12} /> {d.close}
+                                <X size={16} /> {d.close}
                             </span>
                         </ModeBtn>
                     )}
@@ -293,14 +303,14 @@ export default function Detail({
             </div>
 
             {error && (
-                <p className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
+                <p className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
                     {error}
                 </p>
             )}
 
             <div className="flex flex-col gap-4 lg:flex-row">
                 <div className="min-w-0 flex-1">
-                    <div className="overflow-hidden rounded-2xl border border-zinc-200/80 bg-white shadow-sm shadow-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-900">
+                    <div className="overflow-hidden rounded-lg border border-zinc-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900">
                         {mode === "preview" && isHtml && blobUrl && (
                             <iframe
                                 src={blobUrl}
@@ -343,14 +353,14 @@ export default function Detail({
                     </div>
                     {diffFrom !== null && mode === "diff" && (
                         <p className="mt-2 text-xs text-zinc-400">
-                            <GitCompare size={11} className="mr-1 inline" />
+                            <GitCompare size={16} className="mr-1 inline" />
                             v{diffFrom} → v{current}
                         </p>
                     )}
 
                     <section className="mt-6">
-                        <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-zinc-500 dark:text-zinc-400">
-                            <MessageSquare size={13} />
+                        <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-500 dark:text-zinc-400">
+                            <MessageSquare size={16} />
                             {d.referencing} ({sessions.length})
                         </h2>
                         {sessions.length === 0 ? (
@@ -371,9 +381,9 @@ export default function Detail({
                 </div>
 
                 <aside className="w-full shrink-0 space-y-4 lg:w-72">
-                    <div className="rounded-2xl border border-zinc-200/80 bg-white p-4 shadow-sm shadow-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-900">
-                        <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold">
-                            <History size={13} className="text-zinc-400" />
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <History size={16} className="text-zinc-400" />
                             {d.versions} ({versions.length})
                         </h2>
                         <div className="max-h-72 space-y-1 overflow-y-auto">
@@ -382,7 +392,7 @@ export default function Detail({
                                 .map((v) => (
                                     <div
                                         key={v.version_num}
-                                        className={`flex items-center justify-between rounded-xl px-2.5 py-2 text-xs ${
+                                        className={`flex items-center justify-between rounded-md px-2 py-2 text-xs ${
                                             v.version_num === current
                                                 ? "bg-indigo-500/10"
                                                 : "hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
@@ -409,7 +419,7 @@ export default function Detail({
                                                     className="rounded-lg p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
                                                     title={d.compare}
                                                 >
-                                                    <GitCompare size={12} />
+                                                    <GitCompare size={16} />
                                                 </button>
                                                 <button
                                                     disabled={busy}
@@ -417,7 +427,7 @@ export default function Detail({
                                                     className="rounded-lg p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-zinc-800"
                                                     title={d.restore}
                                                 >
-                                                    <RotateCcw size={12} />
+                                                    <RotateCcw size={16} />
                                                 </button>
                                             </div>
                                         )}
@@ -426,33 +436,33 @@ export default function Detail({
                         </div>
                     </div>
 
-                    <div className="rounded-2xl border border-zinc-200/80 bg-white p-4 shadow-sm shadow-zinc-900/5 dark:border-zinc-800 dark:bg-zinc-900">
-                        <h2 className="mb-3 flex items-center gap-1.5 text-sm font-semibold">
-                            <Link2 size={13} className="text-zinc-400" />
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <Link2 size={16} className="text-zinc-400" />
                             {d.share}
                         </h2>
                         {artifact.share_id ? (
                             <div className="space-y-2">
                                 <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                                    <Check size={11} />
+                                    <Check size={16} />
                                     {d.sharedLink}
                                 </p>
-                                <div className="flex items-center gap-1.5">
-                                    <code className="min-w-0 flex-1 truncate rounded-lg bg-zinc-100 px-2 py-1.5 font-mono text-xs dark:bg-zinc-800">
+                                <div className="flex items-center gap-2">
+                                    <code className="min-w-0 flex-1 truncate rounded-lg bg-zinc-100 px-2 py-1 font-mono text-xs dark:bg-zinc-800">
                                         {shareUrl}
                                     </code>
                                     <button
                                         onClick={copyLink}
-                                        className="rounded-lg border border-zinc-200/80 p-1.5 text-zinc-500 transition hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                                        className="rounded-lg border border-zinc-200/80 p-1 text-zinc-500 transition hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
                                         title={d.copy}
                                     >
-                                        {copied ? <Check size={12} /> : <Copy size={12} />}
+                                        {copied ? <Check size={16} /> : <Copy size={16} />}
                                     </button>
                                 </div>
                                 <button
                                     disabled={busy}
                                     onClick={doRevoke}
-                                    className="w-full rounded-xl border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/50"
+                                    className="w-full rounded-md border border-red-200 px-3 py-2 text-xs font-medium text-red-600 transition hover:bg-red-50 disabled:opacity-40 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/50"
                                 >
                                     {d.revoke}
                                 </button>
@@ -473,7 +483,7 @@ export default function Detail({
                                 <button
                                     disabled={busy}
                                     onClick={doShare}
-                                    className="w-full rounded-xl bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                                    className="w-full rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
                                 >
                                     {d.createShare}
                                 </button>
@@ -482,6 +492,34 @@ export default function Detail({
                     </div>
                 </aside>
             </div>
+
+            {confirm && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/40 p-4">
+                    <div className="w-full max-w-sm rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <p className="text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">
+                            {confirm.msg}
+                        </p>
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button
+                                onClick={() => setConfirm(null)}
+                                className="rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            >
+                                {d.close}
+                            </button>
+                            <button
+                                onClick={() => {
+                                    const act = confirm.action;
+                                    setConfirm(null);
+                                    act();
+                                }}
+                                className="rounded-md bg-red-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-red-700"
+                            >
+                                {d.confirm}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -498,7 +536,7 @@ function ModeBtn({
     return (
         <button
             onClick={onClick}
-            className={`rounded-xl border px-3 py-1.5 text-xs font-medium transition ${
+            className={`rounded-md border px-3 py-2 text-xs font-medium transition ${
                 active
                     ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
                     : "border-zinc-200/80 text-zinc-500 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"

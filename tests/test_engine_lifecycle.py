@@ -38,6 +38,16 @@ async def test_truncate_summary():
 
 
 @pytest.mark.asyncio
+async def test_truncate_summary_json_content():
+    from fusion_artifacts_engine.engine import _truncate_summary
+
+    assert _truncate_summary('{"schema_version":1,"pages":[1,2,3]}') == ""
+    assert _truncate_summary('  [1, 2, 3]') == ""
+    assert _truncate_summary('{"a":1}\ntrailing') == ""
+    assert _truncate_summary("plain text {not json}") == "plain text {not json}"
+
+
+@pytest.mark.asyncio
 async def test_auto_changelog():
     from fusion_artifacts_engine.engine import _auto_changelog
 

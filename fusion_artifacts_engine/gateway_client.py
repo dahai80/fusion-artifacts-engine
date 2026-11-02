@@ -156,17 +156,34 @@ class GatewayClient:
             except OSError as e:
                 logger.error("gateway service key persist failed %s: %s", self._key_path, e)
         elif not self._service_key:
-            logger.warning(
-                "gateway registered (%s) but returned no raw_key and no stored key — "
-                "heartbeat will fail; ask an admin to rotate the service key",
-                label,
-            )
+            # 网关 upsert 再注册可能不签发新 key（保留已存记录）——先回读 key 文件
+            # 自检（先前实例可能已持久化有效 key），有效则直接复用，不告警
+            stored = load_service_key(self._key_path)
+            if stored:
+                self._service_key = stored
+                logger.info(
+                    "gateway registered (%s) without raw_key; retained persisted key from %s",
+                    label,
+                    self._key_path,
+                )
+            else:
+                logger.warning(
+                    "gateway registered (%s) but returned no raw_key and no stored key — "
+                    "heartbeat will fail; ask an admin to rotate the service key",
+                    label,
+                )
         else:
             logger.info("gateway registration accepted (%s, existing key retained)", label)
 
     def heartbeat_once(self) -> bool:
         if not self._service_key:
-            # 首次引导或 key 文件丢失：注册即保活（Upsert 刷新 lastHeartbeat）
+            # 首次引导或 key 文件丢失：注册即保活（Upsert 刷新 lastHeartbeat）。
+            # 无 key 注册若拿不到 raw_key 会原地空转——套用同一冷却窗口，
+            # 防止每 interval 刷一轮注册+告警（v0.7.3 线上实测 15s 循环）。
+            now = time.time()
+            if now - self._last_reregister < _REREGISTER_COOLDOWN_SECONDS:
+                return False
+            self._last_reregister = now
             return self.register()
         url = f"{self._base_url}/api/v1/shell/manifests/{self._module_id}/heartbeat"
         try:
