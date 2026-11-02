@@ -670,7 +670,7 @@ gateway:
 
 内置 Web GUI（`webui/`，Vite + React 18 + Tailwind v4），由守护进程自身从 `fusion_artifacts_engine/webui_dist/` 静态服务 — 同源访问 `http://127.0.0.1:11451/`，或经 shell 代理 `/shell/fusion-artifacts/`。内核零改动：GUI 只调用既有 JSON-RPC 方法。
 
-- **库视图** — 类型标签页（全部 / HTML 应用 / 文档 / 图表 / 代码）带计数、名称+摘要搜索、排序（更新/创建/名称）、星标、来源归属（`source_module` → `metadata.source` → 会话）、已分享分组、回收站恢复。
+- **库视图** — 对标 claude.ai Artifacts 画廊 (v0.6.3)：产物按来源会话分组，组按最近更新排序，卡片带实时预览缩略图（html/react/svg 用免脚本沙箱 iframe，markdown 渲染预览，data/code 显示文本片段 — 滚动时懒加载并缓存）、类型标签页（全部 / HTML 应用 / 文档 / 图表 / 代码）带计数、名称+摘要搜索、排序（更新/创建/名称，作用于组内）、星标、来源归属（`source_module` → `metadata.source` → 会话）、分享/remix 徽标、回收站恢复。
 - **详情视图** — 三态预览：HTML/React 在沙箱 iframe 中渲染（`sandbox="allow-scripts allow-forms allow-popups"`，blob URL — 不内联回显产物字节）、markdown 经 `marked` 渲染、代码/数据以文本展示；版本时间线支持对比（统一 diff、着色）与一键回滚；引用会话反向查询（来自持久化事件）；分享创建/撤销/复制链接。
 - **暗黑/明亮主题 + 中/英双语**，localStorage 持久化；hash 路由（`#/a/<id>`）支持深链。
 - 静态服务加固：入口页 `no-store` + 严格 CSP（`frame-ancestors` 允许网关源以便 iframe 嵌入）、hash 文件名资源 `immutable`、路径穿越拒绝、dist 缺失时降级 404 不影响 RPC。

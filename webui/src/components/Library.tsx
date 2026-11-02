@@ -1,18 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { marked } from "marked";
 import {
+    BarChart3,
     Code2,
     FileText,
-    BarChart3,
     GitFork,
     Globe,
+    Layers,
     Link2,
+    MessageSquare,
     Package,
     RotateCcw,
     Search,
     Star,
-    Layers,
 } from "lucide-react";
-import { listArtifacts, listRecycle, restoreArtifact, type Artifact } from "../api";
+import { getContent, listArtifacts, listRecycle, restoreArtifact, type Artifact } from "../api";
 import { t, type Lang } from "../i18n";
 
 type TabKey = "all" | "htmlApp" | "document" | "chart" | "code";
@@ -74,6 +76,95 @@ export function sourceLabel(a: Artifact, lang: Lang = "zh"): string {
     return a.session_id;
 }
 
+const contentCache = new Map<string, Promise<string>>();
+
+function fetchContent(id: string): Promise<string> {
+    let p = contentCache.get(id);
+    if (!p) {
+        p = getContent(id).catch((e) => {
+            contentCache.delete(id);
+            throw e;
+        });
+        contentCache.set(id, p);
+    }
+    return p;
+}
+
+function useInView() {
+    const ref = useRef<HTMLDivElement | null>(null);
+    const [seen, setSeen] = useState(false);
+    useEffect(() => {
+        const el = ref.current;
+        if (!el || seen) return;
+        const obs = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((e) => e.isIntersecting)) {
+                    setSeen(true);
+                    obs.disconnect();
+                }
+            },
+            { rootMargin: "300px" }
+        );
+        obs.observe(el);
+        return () => obs.disconnect();
+    }, [seen]);
+    return { ref, seen };
+}
+
+function Thumb({ a }: { a: Artifact }) {
+    const { ref, seen } = useInView();
+    const [srcDoc, setSrcDoc] = useState<string | null>(null);
+    const [text, setText] = useState<string | null>(null);
+    const visual = a.type === "html" || a.type === "react" || a.type === "svg";
+
+    useEffect(() => {
+        if (!seen) return;
+        let alive = true;
+        fetchContent(a.id)
+            .then(async (c) => {
+                if (!alive) return;
+                if (a.type === "markdown") {
+                    const html = marked.parse(c, { async: false }) as string;
+                    setSrcDoc(
+                        `<!DOCTYPE html><html><head><style>body{font-family:system-ui,sans-serif;padding:10px;line-height:1.55;font-size:15px}pre{background:#f4f4f4;padding:6px;border-radius:6px;overflow:hidden}code{background:#f4f4f4;padding:1px 4px;border-radius:4px}img{max-width:100%}</style></head><body>${html}</body></html>`
+                    );
+                } else if (visual) {
+                    setSrcDoc(c);
+                } else {
+                    setText(c.slice(0, 600));
+                }
+            })
+            .catch(() => {});
+        return () => {
+            alive = false;
+        };
+    }, [seen, a.id, a.type, visual]);
+
+    return (
+        <div
+            ref={ref}
+            className="relative aspect-video w-full overflow-hidden rounded-xl border border-zinc-100 bg-white dark:border-zinc-800 dark:bg-zinc-950"
+        >
+            {srcDoc !== null ? (
+                <iframe
+                    title={a.name}
+                    sandbox=""
+                    srcDoc={srcDoc}
+                    className="pointer-events-none absolute left-0 top-0 h-[200%] w-[200%] origin-top-left border-0"
+                />
+            ) : text !== null ? (
+                <pre className="h-full w-full overflow-hidden whitespace-pre-wrap break-all p-3 text-[10px] leading-tight text-zinc-500 dark:text-zinc-400">
+                    {text}
+                </pre>
+            ) : (
+                <div className="flex h-full items-center justify-center text-zinc-300 dark:text-zinc-700">
+                    {typeIcon(a)}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: string) => void }) {
     const d = t(lang);
     return (
@@ -81,6 +172,7 @@ function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: strin
             onClick={() => onOpen(a.id)}
             className="group flex w-full flex-col gap-3 rounded-2xl border border-zinc-200/80 bg-white p-4 text-left shadow-sm shadow-zinc-900/5 transition hover:border-indigo-300 hover:shadow-md hover:shadow-indigo-500/5 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-500/50"
         >
+            <Thumb a={a} />
             <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-2 text-sm font-semibold">
                     <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
@@ -162,14 +254,31 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                 (a) => a.name.toLowerCase().includes(q) || (a.summary || "").toLowerCase().includes(q)
             );
         }
-        const sorted = [...list].sort((x, y) => {
-            if (sort === "name") return x.name.localeCompare(y.name);
-            return (y[sort] as number) - (x[sort] as number);
-        });
-        return sorted;
-    }, [artifacts, tab, query, sort]);
+        return list;
+    }, [artifacts, tab, query]);
 
-    const sharedOnes = useMemo(() => artifacts.filter((a) => a.share_id), [artifacts]);
+    // claude.ai gallery style: group by originating conversation, groups by
+    // most recent update, items within a group by the chosen sort
+    const groups = useMemo(() => {
+        const map = new Map<string, Artifact[]>();
+        for (const a of shown) {
+            const list = map.get(a.session_id);
+            if (list) list.push(a);
+            else map.set(a.session_id, [a]);
+        }
+        const entries = [...map.entries()];
+        entries.sort(
+            (x, y) =>
+                Math.max(...y[1].map((a) => a.updated_at)) - Math.max(...x[1].map((a) => a.updated_at))
+        );
+        for (const [, items] of entries) {
+            items.sort((x, y) => {
+                if (sort === "name") return x.name.localeCompare(y.name);
+                return (y[sort] as number) - (x[sort] as number);
+            });
+        }
+        return entries;
+    }, [shown, sort]);
 
     const tabLabels: Record<TabKey, string> = {
         all: d.all,
@@ -231,24 +340,26 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                     <p className="text-sm">{d.empty}</p>
                 </div>
             ) : (
-                <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {shown.map((a) => (
-                        <Card key={a.id} a={a} lang={lang} onOpen={onOpen} />
+                <div className="mt-5 flex flex-col gap-7">
+                    {groups.map(([sid, items]) => (
+                        <section key={sid}>
+                            <h2 className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-zinc-400 dark:text-zinc-500">
+                                <MessageSquare size={12} className="shrink-0" />
+                                <span className="line-clamp-1 normal-case tracking-normal">
+                                    {sourceLabel(items[0], lang)}
+                                </span>
+                                <span className="font-normal">
+                                    · {items.length} · {relTime(Math.max(...items.map((a) => a.updated_at)), lang)}
+                                </span>
+                            </h2>
+                            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                                {items.map((a) => (
+                                    <Card key={a.id} a={a} lang={lang} onOpen={onOpen} />
+                                ))}
+                            </div>
+                        </section>
                     ))}
                 </div>
-            )}
-
-            {sharedOnes.length > 0 && tab === "all" && !query && (
-                <section className="mt-8">
-                    <h2 className="mb-3 text-sm font-semibold text-zinc-500 dark:text-zinc-400">
-                        {d.sharedGroup} ({sharedOnes.length})
-                    </h2>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                        {sharedOnes.map((a) => (
-                            <Card key={a.id} a={a} lang={lang} onOpen={onOpen} />
-                        ))}
-                    </div>
-                </section>
             )}
 
             <section className="mt-8">
