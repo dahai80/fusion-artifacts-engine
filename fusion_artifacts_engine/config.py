@@ -370,7 +370,8 @@ class ArtifactEngineConfig(BaseModel):
     long_context_mlx_url: str = Field(default="http://127.0.0.1:11434")
     long_context_mlx_api_key: str = Field(default="")
     long_context_rag_enabled: bool = Field(default=True)
-    long_context_rag_url: str = Field(default="http://127.0.0.1:11436")
+    # /kb 前缀是 fusion-rag 应用层路由（openapi: /kb/bases/...）
+    long_context_rag_url: str = Field(default="http://127.0.0.1:11436/kb")
     long_context_rag_api_key: str = Field(default="")
     long_context_rag_kb_id: str = Field(default="fusion-artifacts")
 
