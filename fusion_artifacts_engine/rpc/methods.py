@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from fusion_artifacts_engine.engine import ArtifactEngine
+from fusion_artifacts_engine.office_ingest import maybe_write_back
 from fusion_artifacts_engine.rpc.errors import (
     NotFoundError,
     NotImplementedError,
@@ -281,6 +282,9 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             kind=pre.kind if pre is not None else None,
         )
+        # v0.7.0: office 来源产物更新后写回 .outbox（失败仅记日志，不影响结果）
+        if pre is not None:
+            await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
@@ -884,6 +888,9 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             kind=pre.kind if pre is not None else None,
         )
+        # v0.7.0: office 来源产物 patch 后写回 .outbox（失败仅记日志，不影响结果）
+        if pre is not None:
+            await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
         return {"version": version.model_dump(), "patch_info": patch_info}
 
     async def _load(self, params: dict) -> dict:

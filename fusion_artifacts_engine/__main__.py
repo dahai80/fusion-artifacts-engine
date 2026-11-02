@@ -66,6 +66,20 @@ def _run_once(config, host, port) -> int:
             logger.warning("design IPC consumer start failed (non-fatal): %s", e)
             ipc_consumer = None
 
+    # v0.7.0: fusion-office 文件摄取（read 路径）+ .outbox 写回目录。同样非致命。
+    office_consumer = None
+    if getattr(config, "ipc_enabled", True) and getattr(config, "ipc_office_enabled", True):
+        from fusion_artifacts_engine.ipc_consumer import OfficeIPCConsumer
+
+        try:
+            office_consumer = OfficeIPCConsumer(
+                engine, config.ipc_office_path, config.ipc_poll_interval
+            )
+            office_consumer.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("office IPC consumer start failed (non-fatal): %s", e)
+            office_consumer = None
+
     # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
     # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
     # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
@@ -97,6 +111,8 @@ def _run_once(config, host, port) -> int:
         code = 1
     finally:
         try:
+            if office_consumer is not None:
+                office_consumer.stop()
             if ipc_consumer is not None:
                 ipc_consumer.stop()
             server.stop()

@@ -692,9 +692,11 @@ gateway:                 # #75/#82 web-shell integration
   key_file: ""           # default <storage_root>/gateway_service_key (mode 600)
   heartbeat_interval: 15
 
-ipc:                     # #84 fusion-design save_artifact consumer
+ipc:                     # #84 fusion-design / v0.7.0 fusion-office save_artifact consumer
   enabled: true
   design_dir: ""         # default <FUSION_DESIGN_DATA_DIR or ~/.fusion-design>/fusion-artifacts-engine
+  office_enabled: true   # v0.7.0 office ingest + .outbox write-back
+  office_dir: ""         # default <FUSION_OFFICE_DATA_DIR or ~/.fusion-office>/fusion-artifacts-engine
   poll_interval: 3.0
 
 rate_limit:              # Ops-1: token bucket (rps=0 / burst=0 = unlimited, backward-compat default)
@@ -763,7 +765,8 @@ Middleware: Artifacts Engine (Python daemon, JSON-RPC 2.0 + REST /api/v1 + SSE)
     ├─ section_index.py section bounds + patch (replace/delete section)
     ├─ render.py       share HTML render (lxml Cleaner + permission footer)
     ├─ gateway_client.py shell manifest self-registration + fm- service key lifecycle
-    ├─ ipc_consumer.py fusion-design save_artifact file-IPC watcher
+    ├─ ipc_consumer.py fusion-design / fusion-office save_artifact file-IPC watcher
+    ├─ office_ingest.py office (docx/xlsx/pptx) → sectioned markdown parse + write-back
     └─ auto_identifier.py should_create_artifact (threshold + renderable-type)
   async engine methods offload blocking storage calls via asyncio.to_thread
 ---------------------------------------------------------
@@ -886,6 +889,24 @@ The engine consumes the frozen file-IPC contract produced by fusion-design's **[
 - **Ingestion**: one artifact per design `session` (`session_id=ext_fusion-design_<session>`, type `data`, `source_module=fusion-design`, metadata `design_session`/`design_version`). A higher `version` appends a new artifact version; the same or lower version is a no-op (restart-safe idempotency). The Library card shows source **Design**.
 - **File lifecycle**: handled messages move to `.processed/`; unparseable messages are retried 3 polls then moved to `.failed/`; oversized messages (>8MB) are rejected to `.failed/`. Nothing is re-ingested after restart.
 - Disable with `ipc.enabled: false` (or `FUSION_ARTIFACTS_IPC_ENABLED=false`).
+
+## fusion-office File Ingest & Write-back (v0.7.0)
+
+The engine consumes office documents from fusion-office through the same file-IPC pattern as the design integration, turning binaries into long-context-friendly markdown — and writes patched content back as regenerated office files:
+
+- **Read path (ingest)**: watch directory `<FUSION_OFFICE_DATA_DIR or ~/.fusion-office>/fusion-artifacts-engine/*.json` (override with `ipc.office_dir`; same `ipc.poll_interval`). Message contract: `{"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact","payload":{"source":"fusion-office","title":...,"session":...,"version":...,"file_path":"<absolute path to .docx/.xlsx/.pptx>"}}` — the office binary is referenced by path, never inlined in JSON.
+- **Parsing**: `docx` (paragraphs, `Heading N` styles → markdown `#`*(N+1), tables → pipe rows), `xlsx` (each sheet → `## <sheet title>` + a markdown table, first row as header, capped at 500 rows/64 cols per sheet with a truncation note, empty sheets render `(empty sheet)`), `pptx` (`## Slide N` + text runs). Unsupported suffixes fail the message to `.failed/`.
+- **Section addressing for free**: because content is markdown with `#` headings, the existing `section_index` pipeline addresses sections directly (docx headings, xlsx sheets, pptx slides) — patch/budget/reference flows are untouched.
+- **Idempotency**: one artifact per office `session` (`session_id=ext_fusion-office_<session>`, type `markdown`, `source_module=fusion-office`, metadata `office_format`/`office_session`/`office_version`/`office_source_path`/`office_stats`). Higher version appends; same/lower skips. Library card shows source **Office**.
+- **Write-back**: after `artifact.update` or `artifact.patch` on an office-sourced artifact, the engine regenerates the office binary from the patched markdown (`markdown_to_docx` / `markdown_to_xlsx`, cells coerced back to numeric types) and exports it to `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` for fusion-office to pick up. **The engine never overwrites the user's original file.** `pptx` write-back is explicitly unsupported (`NotImplementedError`) — read-only for pptx. Write-back failures are logged only; they never fail the RPC result.
+- **Config** (`ipc` section): `office_enabled: true`, `office_dir: ""` (empty = derived default). Env overrides: `FUSION_ARTIFACTS_IPC_OFFICE_ENABLED`, `FUSION_ARTIFACTS_IPC_OFFICE_DIR`.
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.patch",
+ "params": {"artifact_id": "art_x", "operation": "replace_section",
+            "anchor": "Findings", "content": "### Findings\n\npatched body"}}
+# → .outbox/art_x_v2.docx regenerated with the patched section
+```
 
 ## Artifact Card Deep-Link Contract (issue #78)
 
