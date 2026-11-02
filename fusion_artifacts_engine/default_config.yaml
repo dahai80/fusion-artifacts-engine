@@ -114,3 +114,21 @@ ipc:
   # 消息目录；空= <FUSION_OFFICE_DATA_DIR 或 ~/.fusion-office>/fusion-artifacts-engine
   office_dir: ""
 
+long_context:
+  # v0.7.1 #91: 分层上下文压缩主机制（compactor 保持最后兜底）。
+  # 滚动摘要：版本数达 summary_threshold 后用 fusion-mlx 生成 changelog 摘要，
+  # 写回 artifact.summary（ref_text 自动携带）+ metadata.summary_version 防重。0=禁用
+  summary_threshold: 5
+  # 摘要生成模型；空=fusion-mlx 默认模型
+  summary_model: ""
+  mlx_url: "http://127.0.0.1:11434"
+  # 空=env FUSION_MLX_API_KEY
+  mlx_api_key: ""
+  # RAG 归档：版本被取代时把旧版本推入 fusion-rag（幂等，metadata.archived_versions 防重）。
+  # rag 不可达仅告警，绝不阻断版本创建。
+  rag_enabled: true
+  rag_url: "http://127.0.0.1:11436"
+  # 空=env FUSION_RAG_API_KEY
+  rag_api_key: ""
+  rag_kb_id: "fusion-artifacts"
+

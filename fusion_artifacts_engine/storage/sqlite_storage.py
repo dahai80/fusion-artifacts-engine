@@ -1107,6 +1107,38 @@ class SQLiteStorage(StorageDriver):
         logger.info("Renamed artifact %s -> %s ok=%s", artifact_id, new_name, ok)
         return ok
 
+    def update_artifact_summary(
+        self, artifact_id: str, summary: str, metadata_patch: dict | None = None
+    ) -> bool:
+        # v0.7.1 #91: 滚动摘要写回。summary 进 artifact.summary 列（ref_text 经
+        # 既有管道自动携带）；metadata_patch 合并进 metadata JSON（单事务原子）。
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT metadata FROM artifacts WHERE id = ?",
+                (artifact_id,),
+            ).fetchone()
+            if row is None:
+                logger.warning("update_artifact_summary: %s not found", artifact_id)
+                return False
+            current = {}
+            if row[0]:
+                try:
+                    current = json.loads(row[0])
+                except (ValueError, TypeError):
+                    current = {}
+            if metadata_patch:
+                current.update(metadata_patch)
+            metadata_json = json.dumps(current, ensure_ascii=False) if current else None
+            _enforce_metadata_limit(current, self.max_metadata_bytes)
+            cur = self._conn.execute(
+                "UPDATE artifacts SET summary = ?, metadata = ?, updated_at = ? WHERE id = ?",
+                (summary or None, metadata_json, time.time(), artifact_id),
+            )
+            self._conn.commit()
+        ok = cur.rowcount > 0
+        logger.info("Updated artifact summary %s ok=%s", artifact_id, ok)
+        return ok
+
     def star_artifact(self, artifact_id: str, starred: bool) -> bool:
         with self._write_lock:
             cur = self._conn.execute(
