@@ -81,6 +81,19 @@ class RPCHandler:
         payload = {"event_type": event_type, "kind": kind}
         payload.update(extra)
         self.engine.event_bus.publish(event_type, payload)
+        # #100-2: 事件同时落库——list_events/审计依赖持久事件。此前只进内存 SSE，
+        # create/update/rollback 后 artifact.list_events 返回空。落库失败不阻断主操作。
+        if aid:
+            try:
+                await asyncio.to_thread(
+                    self.engine.emit_event,
+                    event_type,
+                    aid,
+                    extra.get("session_id"),
+                    payload,
+                )
+            except Exception as e:
+                logger.error("Persist event failed (non-fatal): %s type=%s aid=%s", e, event_type, aid)
 
     def _enforce_owner(self, params: dict, artifact) -> None:
         # P2-3/MEDIUM-4: IDOR 防护。写操作 + get 校验调用方身份归属。
@@ -185,7 +198,7 @@ class RPCHandler:
         }
 
     async def _create(self, params: dict) -> dict:
-        valid_types = ("code", "markdown", "html", "react", "data")
+        valid_types = ("code", "markdown", "html", "react", "svg", "mermaid", "data")
         if params.get("type") not in valid_types:
             raise ValueError(f"Invalid type, must be one of {valid_types}")
         valid_kinds = ("app", "code", "document", "game", "tool", "template")

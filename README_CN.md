@@ -289,7 +289,7 @@ GET /api/v1/artifacts          # 列出产物（支持查询参数：created_by,
 GET /api/v1/external?source_module=fusion-mlx&workspace_id=ws-001  # 按来源模块列出产物
 GET /api/v1/folders            # 列出文件夹
 GET /api/v1/tags               # 列出标签
-GET /api/v1/events             # 列出事件
+GET /api/v1/events             # 列出事件（?artifact_id=&session_id=&page=&page_size=；REST 对等 artifact.list_events）(#100)
 GET /api/v1/recycle            # 列出回收站
 GET /api/v1/share/{share_id}   # 公开分享访问（免鉴权；share_id 格式非法返回 400，已撤销/过期/耗尽返回 410 Gone，不存在返回 404）
 GET /api/v1/share-base        # 需鉴权：配置的分享页 base URL（#83）
@@ -302,7 +302,7 @@ GET /s/{share_id}             # 公开渲染分享页（免鉴权；410 失效�
 - `created_by` — 按所有者过滤
 - `since` / `until` — 按创建时间过滤（Unix 时间戳）
 - `kind` — 按分类过滤（app/code/document/game/tool/template）
-- `type` — 按类型过滤（code/markdown/html/react/data）
+- `type` — 按类型过滤（code/markdown/html/react/svg/mermaid/data）
 - `sort` — 排序字段（updated_at, created_at, name, starred）
 - `page` / `page_size` — 分页
 
@@ -669,7 +669,7 @@ gateway:
 - **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <fm- service key>`。引擎 `_is_authed` 同时接受配置的 `api_key`（X-API-Key / Bearer）与该 service key（Bearer），符合网关 #294 契约（模块须校验签发 key）。
 - 注册/心跳失败**不影响服务**：网关宕机时引擎照常工作。
 
-## Web 管理界面 (v0.6.0, issue #76; v0.7.3 shell 规范对齐; v0.7.4 新建框; v0.7.5 编辑器 + AI)
+## Web 管理界面 (v0.6.0, issue #76; v0.7.3 shell 规范对齐; v0.7.4 新建框; v0.7.5 编辑器 + AI; v0.7.6 svg/mermaid)
 
 内置 Web GUI（`webui/`，Vite + React 18 + Tailwind v4），由守护进程自身从 `fusion_artifacts_engine/webui_dist/` 静态服务 — 同源访问 `http://127.0.0.1:11451/`，或经 shell 代理 `/shell/fusion-artifacts/`。内核零改动：GUI 只调用既有 JSON-RPC 方法。
 
@@ -770,6 +770,17 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 - **卡片数据**：`artifact.get` / `GET /api/v1/artifacts/{id}` 返回全部卡片字段（name、type、kind、current_version、summary、source_module、is_starred）。每次渲染重新拉取，版本变更下次渲染即同步。
 - **会话载荷保持轻量引用**：`ref_text` 格式 `[Artifact: <名称> | ID: <id> | Version: v<n> | Type: <类型> | Size: <字节> | Summary: …]`（~30 token，不膨胀内容）。
 - **深链**：打开 `http://<shell主机>:11432/shell/fusion-artifacts/#/a/<artifact_id>`（hash 路由直达 AR2 详情视图；支持跨 iframe 调用）。
+
+## 验收缺陷修复 (v0.7.6, issue #100)
+
+2026-11-03 验收发现的 4 个缺陷，端到端修复：
+
+- **SVG / Mermaid 产物类型 (#100-1)** — `artifact.create` 在 handler 层放行 `type=svg|mermaid`，但 pydantic 与 SQLite `CHECK` 约束拒绝写入。三层已对齐：`ArtifactType` Literal、`_TYPE_TO_KIND`（svg→app、mermaid→document）、存储 DDL。旧库启动时自动迁移（`migrate_artifact_type_check` 重建 `artifacts` 表放宽 CHECK，并按捕获的 DDL 原样重建全部索引——幂等，记录在 `applied_migrations`）。GUI 沙箱预览 iframe 渲染两种类型（Mermaid 走 mermaid@11 CDN），库标签页/类型图块同步支持。
+- **事件持久化 (#100-2)** — `artifact.created` / `artifact.updated` / 回滚事件此前只进内存 SSE 总线，`artifact.list_events` 在任何变更后返回空，反向会话查询恒空。`_publish` 现在同时经 `engine.emit_event` 落库（失败不阻断主操作，超限载荷拒绝 `-32003`）。
+- **REST 集合创建 + 事件读取 (#100-3)** — `POST /api/v1/artifacts`（集合路径，REST 惯例 create，`201`）成为一等别名；`GET /api/v1/events?artifact_id=` 读回持久化事件（`artifact.list_events` 的 REST 对等，支持分页）。刻意走集合路径——`/api/v1/artifacts/{id}/events` 已是 artifact 级 SSE 流（#55）。
+- **版本 id 泄露 (#100-4)** — `ArtifactVersion.id` 是全局 SQLite rowid，外泄即泄露全局版本总量，且别的产物 v1 显示 id=49。该字段已从所有 `model_dump()` 排除；API 一律以 `(artifact_id, version_num)` 复合标识版本。
+
+覆盖测试：`tests/test_acceptance_100.py`（713 用例全绿）。
 
 ## 路线图
 

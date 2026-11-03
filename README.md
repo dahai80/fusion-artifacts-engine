@@ -424,7 +424,11 @@ GET /api/v1/artifacts/{artifact_id}/versions/{num}   # Get a specific version's 
 GET /api/v1/share/{share_id}                         # Public share access (no auth; 400 if malformed share_id, 410 Gone if revoked/expired/exhausted, 404 if not found)
 GET /api/v1/share-base                               # Authenticated: configured share page base URL (#83)
 GET /s/{share_id}                                    # Public rendered share page (no auth; 410 expired page, 404 unknown) (#83)
+GET /api/v1/events?artifact_id=...&session_id=...    # Read persisted events (REST twin of artifact.list_events; supports page/page_size) (#100)
 ```
+
+`GET /api/v1/events` is the read-back endpoint for persisted events — distinct from the
+SSE stream at `GET /api/v1/artifacts/{id}/events` (#55), which subscribes instead of listing.
 
 `GET /api/v1/share/{share_id}` validates the `share_id` format (`shr_<12>`; LOW-1) before
 hitting the DB — a malformed id returns `400` immediately, and a valid-but-absent id returns
@@ -440,7 +444,8 @@ Query parameters for `GET /api/v1/artifacts`:
 
 **POST** endpoints:
 ```bash
-POST /api/v1/artifacts/create    # {"session_id": "...", "name": "...", "artifact_type": "code", "content": "..."}  → 201
+POST /api/v1/artifacts           # {"session_id": "...", "name": "...", "type": "code", "content": "..."}  → 201 (collection-create, REST convention) (#100)
+POST /api/v1/artifacts/create    # same as above (legacy alias)
 POST /api/v1/artifacts/{id}      # {"action": "delete"} → delete; otherwise → artifact.update
 ```
 
@@ -852,7 +857,7 @@ gateway:
 - **Proxy auth**: the gateway shell proxy strips caller credentials, forwards `/shell/fusion-artifacts/<rest>` to `upstream/<rest>`, and injects `Authorization: Bearer <fm- service key>`. The engine's `_is_authed` accepts both its configured `api_key` (X-API-Key / Bearer) and the persisted service key (Bearer), matching the gateway #294 contract that modules validate the issued key.
 - Registration/heartbeat failures are **non-fatal**: the daemon keeps serving even if the gateway is down.
 
-## Web GUI (v0.6.0, issue #76; v0.7.3 shell-spec alignment; v0.7.4 create tiles; v0.7.5 editor + AI)
+## Web GUI (v0.6.0, issue #76; v0.7.3 shell-spec alignment; v0.7.4 create tiles; v0.7.5 editor + AI; v0.7.6 svg/mermaid)
 
 A built-in web GUI (`webui/`, Vite + React 18 + Tailwind v4) served by the daemon itself from `fusion_artifacts_engine/webui_dist/` — same-origin at `http://127.0.0.1:11451/` and through the shell proxy at `/shell/fusion-artifacts/`. Kernel zero change: the GUI consumes only existing JSON-RPC methods.
 
@@ -957,6 +962,32 @@ For cowork run timelines (fusion-cowork#224) and code session streams (fusion-co
 - **Card data**: `artifact.get` / `GET /api/v1/artifacts/{id}` returns all card fields (name, type, kind, current_version, summary, source_module, is_starred). Cards stay fresh: re-fetch on render; version bumps appear on next render.
 - **Conversation payload stays a lightweight ref**: `ref_text` format `[Artifact: <name> | ID: <id> | Version: v<n> | Type: <type> | Size: <bytes> | Summary: …]` (~30 tokens, no content inflation).
 - **Deep link**: open `http://<shell-host>:11432/shell/fusion-artifacts/#/a/<artifact_id>` (hash route straight into the AR2 detail view; works cross-iframe from any shell module).
+
+## Acceptance Parity Fixes (v0.7.6, issue #100)
+
+Four defects found by the 2026-11-03 acceptance run, fixed end to end:
+
+- **SVG / Mermaid artifact types (#100-1)** — `artifact.create` accepted `type=svg|mermaid` at the
+  handler layer but pydantic and the SQLite `CHECK` constraint rejected the insert. All three layers
+  now agree: `ArtifactType` literal, `_TYPE_TO_KIND` (`svg` → app, `mermaid` → document), and the
+  storage DDL. Existing databases are migrated at startup (`migrate_artifact_type_check` rebuilds the
+  `artifacts` table with the relaxed CHECK and re-creates every index from its captured DDL —
+  idempotent, recorded in `applied_migrations`). The GUI renders both in the sandboxed preview iframe
+  (Mermaid via the mermaid@11 CDN) and shows them in the correct library tabs/tiles.
+- **Event persistence (#100-2)** — `artifact.created` / `artifact.updated` / rollback events were only
+  published to the in-memory SSE bus, so `artifact.list_events` returned empty after any mutation and
+  the reverse session-lookup stayed blank. `_publish` now also persists each event via
+  `engine.emit_event` (non-fatal on failure, oversize payloads rejected with `-32003`).
+- **REST collection create + event read (#100-3)** — `POST /api/v1/artifacts` (collection path,
+  REST-convention create, `201`) is now a first-class alias of `/create`; `GET /api/v1/events?artifact_id=`
+  reads persisted events back (REST twin of `artifact.list_events`, paginated). It deliberately uses the
+  collection path because `/api/v1/artifacts/{id}/events` is the artifact-scoped SSE stream (#55).
+- **Version id leak (#100-4)** — `ArtifactVersion.id` is the global SQLite rowid; exposing it leaked
+  total-version counts and made unrelated artifacts' version ids jump ("another tenant's v1 has
+  id=49"). The field is now excluded from every `model_dump()`; the API identifies versions by
+  `(artifact_id, version_num)` as before.
+
+Covered by `tests/test_acceptance_100.py` (713 tests green).
 
 ## Roadmap
 
