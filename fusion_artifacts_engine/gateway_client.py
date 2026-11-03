@@ -29,6 +29,14 @@ _MODULE_DEVICES = ["desktop"]
 # 15s 一次 admin-key 调用的日志/调用风暴。
 _REREGISTER_COOLDOWN_SECONDS = 300
 
+# #104: key 漂移探测间隔。gateway 心跳面与再注册面都会在 KeyRotationGrace
+# （默认 24h）内接受"上一把 key"——引擎持陈旧 key 时心跳仍 200，数据面
+# （代理注入当前 key）却已被引擎拒之门外，症状是 shell 代理 -32600 且最长
+# 持续一个 grace 窗口。探测走 upsert 自愈面：响应体 key_id 始终是 gateway
+# 当前 key 的 id（保留分支也一样），与本地持久化的 key_id 比对即可在 grace
+# 窗口内发现漂移，再用 admin 再注册触发 #460 轮换拿到新明文。
+_KEY_PROBE_INTERVAL_SECONDS = 600
+
 # _is_authed 每次请求都要比对 service key；按 (path, mtime) 缓存避免重复读盘。
 _key_file_cache: dict[str, tuple[float, str]] = {}
 _key_file_cache_lock = threading.Lock()
@@ -65,6 +73,29 @@ def save_service_key(path: Path, raw_key: str) -> None:
     logger.info("gateway service key persisted to %s", path)
 
 
+def key_id_path(key_path: Path) -> Path:
+    # #104: key_id sidecar（<key文件名>.keyid）。key 文件本体是纯文本 key
+    # （rpc/server.py _is_authed 直接读），key_id 存旁路文件互不干扰。
+    return key_path.with_name(key_path.name + ".keyid")
+
+
+def load_key_id(key_path: Path) -> str:
+    try:
+        return key_id_path(key_path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def save_key_id(key_path: Path, key_id: str) -> None:
+    p = key_id_path(key_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(key_id.strip(), encoding="utf-8")
+    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+    tmp.replace(p)
+    logger.info("gateway service key_id persisted to %s", p)
+
+
 class GatewayClient:
     def __init__(self, config, host: str, port: int) -> None:
         self._config = config
@@ -76,6 +107,8 @@ class GatewayClient:
         self._key_path: Path = config.gateway_service_key_path
         self._service_key = load_service_key(self._key_path)
         self._last_reregister = 0.0
+        self._last_probe = 0.0
+        self._divergent_keyid = False
         self._register_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -111,9 +144,15 @@ class GatewayClient:
             candidates.append(("admin-key", admin_key))
         return candidates
 
-    def register(self) -> bool:
+    def register(self, force_admin: bool = False) -> bool:
         with self._register_lock:
-            candidates = self._register_candidates()
+            if force_admin:
+                # #104: 漂移自愈专用——跳过 service-key 候选，直接用 admin key
+                # 再注册（#460：admin 面再注册会轮换 key 并返回新明文）。
+                admin_key = self._config.gateway_admin_key or ""
+                candidates = [("admin-key", admin_key)] if admin_key else []
+            else:
+                candidates = self._register_candidates()
             if not candidates:
                 logger.warning(
                     "gateway registration skipped: no service key (key_file=%s) and no "
@@ -144,9 +183,11 @@ class GatewayClient:
 
     def _accept_register_response(self, resp, label: str) -> None:
         raw_key = ""
+        key_id = ""
         try:
             data = json.loads(resp.text or "{}")
             raw_key = data.get("raw_key") or ""
+            key_id = data.get("key_id") or ""
         except (ValueError, AttributeError):
             logger.debug("gateway register response not JSON, assuming no issued key")
         if raw_key:
@@ -155,6 +196,32 @@ class GatewayClient:
                 save_service_key(self._key_path, raw_key)
             except OSError as e:
                 logger.error("gateway service key persist failed %s: %s", self._key_path, e)
+            if key_id:
+                try:
+                    save_key_id(self._key_path, key_id)
+                except OSError as e:
+                    logger.error("gateway key_id persist failed: %s", e)
+        elif label == "service-key" and key_id:
+            # #104: upsert 保留分支的 key_id 是 gateway 当前 key 的 id。与本地
+            # 持久化值比对：不一致 = 引擎持陈旧 key（grace 窗口内的"上一把"，
+            # 心跳面照常 200 掩盖了漂移）。置位后由 probe_key_state 走 admin
+            # 再注册轮换自愈；本地无记录则首次落盘建立基线。
+            stored = load_key_id(self._key_path)
+            if not stored:
+                try:
+                    save_key_id(self._key_path, key_id)
+                except OSError as e:
+                    logger.error("gateway key_id persist failed: %s", e)
+                logger.info("gateway key_id baseline recorded (%s)", key_id)
+            elif stored != key_id:
+                self._divergent_keyid = True
+                logger.warning(
+                    "gateway service key divergence detected: engine holds "
+                    "key_id=%s, gateway current=%s (stale key masked by "
+                    "heartbeat grace window)",
+                    stored,
+                    key_id,
+                )
         elif not self._service_key:
             # 网关 upsert 再注册可能不签发新 key（保留已存记录）——先回读 key 文件
             # 自检（先前实例可能已持久化有效 key），有效则直接复用，不告警
@@ -220,10 +287,33 @@ class GatewayClient:
             logger.warning("gateway heartbeat request failed: %s", e)
         return False
 
+    def probe_key_state(self) -> bool:
+        # #104: 周期 key 漂移探测。心跳 200 不代表 key 未漂移（grace 窗口内
+        # 上一把 key 照常通过心跳面），故按独立间隔走一次 service-key 再注册，
+        # 比对响应 key_id；发现漂移则 admin 再注册轮换（#460 返回新明文）。
+        now = time.time()
+        if now - self._last_probe < _KEY_PROBE_INTERVAL_SECONDS:
+            return True
+        self._last_probe = now
+        if not self._service_key:
+            # 无 key 时 heartbeat_once 的引导注册路径负责签发，无需探测。
+            return True
+        self._divergent_keyid = False
+        if not self.register():
+            return False
+        if self._divergent_keyid:
+            logger.warning(
+                "self-healing stale gateway service key via admin re-register (module=%s)",
+                self._module_id,
+            )
+            return self.register(force_admin=True)
+        return True
+
     def _loop(self) -> None:
         # 周期心跳。失败不退出（gateway 重启等瞬时故障自愈），只节流告警。
         fail_streak = 0
         while not self._stop.wait(self._interval):
+            self.probe_key_state()
             ok = self.heartbeat_once()
             if ok:
                 fail_streak = 0
