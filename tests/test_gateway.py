@@ -6,7 +6,12 @@ import urllib.request
 
 from fusion_artifacts_engine.config import ArtifactEngineConfig
 from fusion_artifacts_engine.engine import ArtifactEngine
-from fusion_artifacts_engine.gateway_client import GatewayClient, load_service_key
+from fusion_artifacts_engine.gateway_client import (
+    GatewayClient,
+    load_key_id,
+    load_service_key,
+    save_key_id,
+)
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 
 API_KEY = "fae-gw-test-key-abcdef0123456789"
@@ -44,9 +49,7 @@ def _ephemeral_port():
 
 def _post_ping(port, headers):
     req = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
-    r = urllib.request.Request(
-        f"http://127.0.0.1:{port}/", data=req, headers=headers
-    )
+    r = urllib.request.Request(f"http://127.0.0.1:{port}/", data=req, headers=headers)
     try:
         with urllib.request.urlopen(r, timeout=5) as resp:
             return resp.status, json.loads(resp.read())
@@ -265,9 +268,7 @@ def test_gateway_heartbeat_uses_service_key(tmp_path):
 
 def test_gateway_heartbeat_without_key_registers(tmp_path):
     client = _make_client(tmp_path)
-    fake = _FakeHttpClient(
-        [(200, json.dumps({"code": "ok", "raw_key": SERVICE_KEY}))]
-    )
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok", "raw_key": SERVICE_KEY}))])
     client._client = fake
     assert client.heartbeat_once() is True
     assert fake.calls[0]["url"].endswith("/api/v1/shell/manifests")
@@ -278,9 +279,7 @@ def test_gateway_heartbeat_404_reregisters(tmp_path):
     # #369 self-heal：心跳 404 manifest_unknown → 再注册
     client = _make_client(tmp_path)
     _write_service_key(client)
-    fake = _FakeHttpClient(
-        [(404, "manifest_unknown"), (200, json.dumps({"code": "ok"}))]
-    )
+    fake = _FakeHttpClient([(404, "manifest_unknown"), (200, json.dumps({"code": "ok"}))])
     client._client = fake
     assert client.heartbeat_once() is True
     assert fake.calls[0]["url"].endswith("/heartbeat")
@@ -317,6 +316,86 @@ def test_gateway_heartbeat_403_cooldown_no_loop(tmp_path):
     assert client.heartbeat_once() is False
     assert len(fake.calls) == 3
     assert fake.calls[-1]["url"].endswith("/heartbeat")
+
+
+def test_gateway_probe_detects_keyid_divergence_and_heals(tmp_path):
+    # #104: 引擎持陈旧 key（心跳面 grace 窗口内照常 200 掩盖漂移）——
+    # 探测 upsert 响应 key_id 与本地基线不一致 → admin 再注册轮换自愈
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    save_key_id(client._key_path, "kid-old")
+    fake = _FakeHttpClient(
+        [
+            (200, json.dumps({"code": "ok", "key_id": "kid-new", "raw_key": ""})),
+            (
+                200,
+                json.dumps({"code": "ok", "key_id": "kid-rot", "raw_key": SERVICE_KEY + "new"}),
+            ),
+        ]
+    )
+    client._client = fake
+    assert client.probe_key_state() is True
+    assert fake.calls[0]["headers"]["Authorization"] == f"Bearer {SERVICE_KEY}"
+    assert fake.calls[1]["headers"]["Authorization"] == "Bearer gw-admin-key"
+    assert client._service_key == SERVICE_KEY + "new"
+    assert load_service_key(client._key_path) == SERVICE_KEY + "new"
+    assert load_key_id(client._key_path) == "kid-rot"
+
+
+def test_gateway_probe_no_action_when_keyid_matches(tmp_path):
+    # key 未漂移：探测只做一次幂等再注册，不轮换不告警
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    save_key_id(client._key_path, "kid-1")
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok", "key_id": "kid-1"}))])
+    client._client = fake
+    assert client.probe_key_state() is True
+    assert len(fake.calls) == 1
+    assert client._service_key == SERVICE_KEY
+
+
+def test_gateway_probe_seeds_keyid_baseline(tmp_path):
+    # 升级后首次探测：无本地 key_id 基线 → 落盘建立基线，不做任何轮换
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok", "key_id": "kid-new"}))])
+    client._client = fake
+    assert client.probe_key_state() is True
+    assert len(fake.calls) == 1
+    assert load_key_id(client._key_path) == "kid-new"
+    assert client._service_key == SERVICE_KEY
+
+
+def test_gateway_probe_cooldown_skips(tmp_path):
+    # 探测受独立冷却窗口约束，不随心跳节奏打 upsert
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    client._last_probe = time.time()
+    fake = _FakeHttpClient([])
+    client._client = fake
+    assert client.probe_key_state() is True
+    assert fake.calls == []
+
+
+def test_gateway_probe_skips_when_no_service_key(tmp_path):
+    # 无 key 时探测不介入——heartbeat_once 的引导注册负责签发
+    client = _make_client(tmp_path)
+    client._service_key = ""
+    fake = _FakeHttpClient([])
+    client._client = fake
+    assert client.probe_key_state() is True
+    assert fake.calls == []
+
+
+def test_gateway_register_issuance_persists_key_id(tmp_path):
+    # #104: raw_key 签发时同步持久化 key_id 基线
+    client = _make_client(tmp_path)
+    fake = _FakeHttpClient(
+        [(200, json.dumps({"code": "ok", "key_id": "kid-abc", "raw_key": SERVICE_KEY}))]
+    )
+    client._client = fake
+    assert client.register() is True
+    assert load_key_id(client._key_path) == "kid-abc"
 
 
 def test_gateway_start_stop(tmp_path):
