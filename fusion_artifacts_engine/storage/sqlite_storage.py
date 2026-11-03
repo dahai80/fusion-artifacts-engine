@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK(type IN ('code','markdown','html','react','data')),
+    type TEXT NOT NULL CHECK(type IN ('code','markdown','html','react','svg','mermaid','data')),
     kind TEXT DEFAULT NULL CHECK(kind IS NULL OR kind IN ('app','code','document','game','tool','template')),
     project_id TEXT DEFAULT NULL,
     metadata TEXT DEFAULT NULL,
@@ -2449,6 +2449,58 @@ class SQLiteStorage(StorageDriver):
         except Exception as e:  # noqa: BLE001
             logger.warning("Migration size_bytes failed: %s", e)
 
+    def _migrate_artifact_type_check(self) -> None:
+        # #100-1: 旧库 artifacts.type 的 CHECK 约束缺少 'svg'/'mermaid'，插入被
+        # IntegrityError 拒绝。SQLite 无法 ALTER CHECK，只能按官方流程重建表：
+        # foreign_keys=OFF + rename 换表 + 复制数据 + 按原 DDL 重建全部索引。
+        # 索引 DDL 从 sqlite_master 原样捕获（含表达式索引），换表后逐条重建。
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='artifacts'"
+        ).fetchone()
+        old_check = "type IN ('code','markdown','html','react','data')"
+        if row is None or not row[0] or old_check not in row[0]:
+            return
+        old_ddl = row[0]
+        new_ddl = old_ddl.replace(
+            old_check,
+            "type IN ('code','markdown','html','react','svg','mermaid','data')",
+        )
+        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(artifacts)").fetchall()]
+        col_list = ", ".join(f'"{c}"' for c in cols)
+        idx_ddls = [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='artifacts' AND sql IS NOT NULL"
+            ).fetchall()
+        ]
+        logger.info(
+            "Migrating artifacts.type CHECK: adding svg/mermaid (%d columns, %d indexes)",
+            len(cols),
+            len(idx_ddls),
+        )
+        tmp_name = "artifacts_type_check_tmp"
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(f"DROP TABLE IF EXISTS {tmp_name}")
+            self._conn.execute(f"ALTER TABLE artifacts RENAME TO {tmp_name}")
+            self._conn.execute(new_ddl)
+            self._conn.execute(
+                f'INSERT INTO artifacts ({col_list}) SELECT {col_list} FROM {tmp_name}'
+            )
+            self._conn.execute(f"DROP TABLE {tmp_name}")
+            for ddl in idx_ddls:
+                self._conn.execute(ddl)
+            self._conn.commit()
+            logger.info("Migrated artifacts.type CHECK done: svg/mermaid now accepted")
+        except Exception as e:
+            self._conn.rollback()
+            logger.error("Migration artifact_type_check failed: %s", e)
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
+
     _SCHEMA_VERSION = 2
 
     def _migrate_schema_meta(self) -> None:
@@ -2500,6 +2552,7 @@ class SQLiteStorage(StorageDriver):
         ("migrate_tag_scope_column", "_migrate_tag_scope_column"),
         ("migrate_remix_lineage", "_migrate_remix_lineage"),
         ("migrate_share_permission", "_migrate_share_permission"),
+        ("migrate_artifact_type_check", "_migrate_artifact_type_check"),
     ]
 
     def _run_migrations_gated(self) -> None:

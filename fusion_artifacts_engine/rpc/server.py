@@ -602,6 +602,30 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(200, {"base_url": engine.config.share_base_url})
             return
 
+        # #100-3: REST 读事件——与 JSON-RPC artifact.list_events 对等。
+        # 注意 /api/v1/artifacts/{id}/events 已是 SSE 流（#55），故 REST 读
+        # 端点用集合路径 /api/v1/events?artifact_id=，避免与流路由冲突。
+        if len(path_parts) == 3 and path_parts[2] == "events":
+            artifact_id = query.get("artifact_id", [None])[0]
+            session_id = query.get("session_id", [None])[0]
+            try:
+                page = int(query.get("page", ["1"])[0])
+                page_size = int(query.get("page_size", ["50"])[0])
+            except ValueError:
+                self._send_rest_response(400, {"error": "Invalid page or page_size"})
+                return
+            events, total = engine.list_events(
+                artifact_id=artifact_id,
+                session_id=session_id,
+                page=page,
+                page_size=page_size,
+            )
+            self._send_rest_response(
+                200,
+                {"events": [e.model_dump() for e in events], "total": total},
+            )
+            return
+
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
             if len(path_parts) == 4:
                 artifact_id = path_parts[3]
@@ -705,6 +729,16 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         # REST create/update/delete 复用 RPC handler.dispatch，继承 SSE 发布与参数校验，
         # 保持 REST 与 RPC 能力对等 (P1-3 / P1-4)。
+        # #100-3: POST /api/v1/artifacts（集合路径）= create 别名——验收发现只认
+        # /create 别名导致 POST 集合 404，补齐常规 REST 语义。
+        if len(path_parts) == 3 and path_parts[2] == "artifacts":
+            try:
+                result = self._run_async(rpc_handler.dispatch("artifact.create", data))
+            except Exception as e:
+                self._rest_error_response(e)
+                return
+            self._send_rest_response(201, result)
+            return
         if len(path_parts) >= 4 and path_parts[2] == "artifacts":
             if len(path_parts) == 4 and path_parts[3] == "create":
                 try:

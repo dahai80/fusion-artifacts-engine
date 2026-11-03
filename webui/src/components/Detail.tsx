@@ -125,8 +125,14 @@ export default function Detail({
 
     const blobUrl = useMemo(() => {
         if (!artifact || !content) return "";
-        if (artifact.type !== "html" && artifact.type !== "react") return "";
-        return URL.createObjectURL(new Blob([content], { type: "text/html" }));
+        const ty = artifact.type;
+        if (ty !== "html" && ty !== "react" && ty !== "svg" && ty !== "mermaid") return "";
+        // #100-1: mermaid 走同一 blob 通道，包一层 mermaid CDN 渲染壳（CDN 允许，图表类既有约定）
+        const doc =
+            ty === "mermaid"
+                ? `<!DOCTYPE html><html><head><meta charset="utf-8"><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><style>html,body{margin:0;padding:16px;background:#fff;display:flex;justify-content:center}</style></head><body><pre class="mermaid">${content.replace(/</g, "&lt;")}</pre><script>mermaid.initialize({startOnLoad:true});</script></body></html>`
+                : content;
+        return URL.createObjectURL(new Blob([doc], { type: "text/html" }));
     }, [artifact, content]);
 
     useEffect(() => {
@@ -293,7 +299,11 @@ export default function Detail({
         );
     }
 
-    const isHtml = artifact.type === "html" || artifact.type === "react";
+    const isHtml =
+        artifact.type === "html" ||
+        artifact.type === "react" ||
+        artifact.type === "svg" ||
+        artifact.type === "mermaid";
     const isMd = artifact.type === "markdown";
     const current = artifact.current_version;
 

@@ -7,8 +7,10 @@ import {
     FileText,
     GitFork,
     Globe,
+    Image as ImageIcon,
     Layers,
     Link2,
+    Network,
     PackageOpen,
     Palette,
     Presentation,
@@ -33,8 +35,8 @@ type TimeBucket = "today" | "yesterday" | "week" | "earlier";
 
 const TAB_DEFS: { key: TabKey; match: (a: Artifact) => boolean }[] = [
     { key: "all", match: () => true },
-    { key: "htmlApp", match: (a) => a.type === "html" || a.type === "react" },
-    { key: "document", match: (a) => a.type === "markdown" },
+    { key: "htmlApp", match: (a) => a.type === "html" || a.type === "react" || a.type === "svg" },
+    { key: "document", match: (a) => a.type === "markdown" || a.type === "mermaid" },
     { key: "chart", match: (a) => a.type === "data" },
     { key: "code", match: (a) => a.type === "code" },
 ];
@@ -44,6 +46,8 @@ const TAB_DEFS: { key: TabKey; match: (a: Artifact) => boolean }[] = [
 const TYPE_TILE: Record<string, string> = {
     html: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
     react: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+    svg: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
+    mermaid: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
     markdown: "bg-violet-500/10 text-violet-600 dark:text-violet-400",
     data: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
     code: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
@@ -54,8 +58,12 @@ function typeIcon(a: Artifact, size = 16) {
         case "html":
         case "react":
             return <Globe size={size} />;
+        case "svg":
+            return <ImageIcon size={size} />;
         case "markdown":
             return <FileText size={size} />;
+        case "mermaid":
+            return <Network size={size} />;
         case "data":
             return <BarChart3 size={size} />;
         default:
@@ -69,8 +77,12 @@ function typeLabel(a: Artifact, lang: Lang) {
         case "html":
         case "react":
             return d.htmlApp;
+        case "svg":
+            return d.svgType;
         case "markdown":
             return d.document;
+        case "mermaid":
+            return d.mermaidType;
         case "data":
             return d.chart;
         default:

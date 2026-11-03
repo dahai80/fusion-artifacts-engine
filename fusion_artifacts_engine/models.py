@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-ArtifactType = Literal["code", "markdown", "html", "react", "data"]
+ArtifactType = Literal["code", "markdown", "html", "react", "svg", "mermaid", "data"]
 ArtifactKind = Literal["app", "code", "document", "game", "tool", "template"]
 OwnershipType = Literal["free", "project", "cowork"]
 SnapshotType = Literal["auto", "manual", "named", "rollback"]
@@ -14,6 +14,8 @@ SnapshotType = Literal["auto", "manual", "named", "rollback"]
 _TYPE_TO_KIND: dict[str, str] = {
     "html": "app",
     "react": "app",
+    "svg": "app",
+    "mermaid": "document",
     "markdown": "document",
     "code": "code",
     "data": "tool",
@@ -85,7 +87,9 @@ class Artifact(BaseModel):
 
 
 class ArtifactVersion(BaseModel):
-    id: int = 0
+    # #100-4: 全局自增 rowid 不外泄（泄露全局产物量且 UI 上"别家 v1 已是 id=49"）。
+    # 字段保留供存储层内部用，API 一律以 (artifact_id, version_num) 复合标识。
+    id: int = Field(default=0, exclude=True)
     artifact_id: str
     version_num: int
     content: str = ""
