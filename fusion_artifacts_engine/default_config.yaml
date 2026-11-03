@@ -133,3 +133,12 @@ long_context:
   rag_api_key: ""
   rag_kb_id: "fusion-artifacts"
 
+
+ai:
+  # v0.7.5 #97: webui AI 生成/迭代入口的后端（OpenAI 兼容 /v1/chat/completions）。
+  base_url: "http://127.0.0.1:11434"
+  # 空=自动取 /v1/models 第一个可用模型
+  model: ""
+  timeout: 120.0
+  # 空=不发送 Authorization 头（fusion-mlx 本地默认无鉴权）
+  api_key: ""

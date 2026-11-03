@@ -14,9 +14,11 @@ import {
     Presentation,
     RotateCcw,
     Search,
+    Sparkles,
     Star,
 } from "lucide-react";
 import {
+    aiGenerate,
     createArtifact,
     getContent,
     listArtifacts,
@@ -94,6 +96,12 @@ export function sourceLabel(a: Artifact, lang: Lang = "zh"): string {
     if (typeof meta.source === "string") return meta.source;
     if (typeof meta.session_name === "string") return meta.session_name;
     return a.session_id;
+}
+
+export function stripFence(text: string): string {
+    const s = text.trim();
+    const m = s.match(/^```[a-zA-Z0-9]*\n([\s\S]*?)\n?```$/);
+    return m ? m[1] : s;
 }
 
 const contentCache = new Map<string, Promise<string>>();
@@ -330,6 +338,21 @@ const DESIGN_TEMPLATE = JSON.stringify(
     4
 );
 
+// #97: AI 生成类型系统提示——只输出内容本体，禁止围栏/解释
+const GEN_SYS: Record<string, string> = {
+    markdown: "生成完整的 markdown 文档。只输出正文内容，不要解释，不要 markdown 代码围栏。",
+    html: "生成完整自包含的 HTML 单文件（内联 CSS/JS，可引用公共 CDN）。只输出从 <!DOCTYPE html> 开始的代码，不要解释，不要代码围栏。",
+    code: "只输出源代码本身，不要解释，不要代码围栏。",
+    data: "只输出格式合法的 JSON，不要解释，不要代码围栏。",
+};
+
+const GEN_TYPES: { key: string; labelKey: "document" | "htmlApp" | "code" | "chart" }[] = [
+    { key: "markdown", labelKey: "document" },
+    { key: "html", labelKey: "htmlApp" },
+    { key: "code", labelKey: "code" },
+    { key: "data", labelKey: "chart" },
+];
+
 export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: string) => void }) {
     const d = t(lang);
     const [artifacts, setArtifacts] = useState<Artifact[] | null>(null);
@@ -340,6 +363,11 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
     const [error, setError] = useState("");
     const [recycleOpen, setRecycleOpen] = useState(false);
     const [creating, setCreating] = useState<string | null>(null);
+    // #97: AI 生成面板
+    const [aiOpen, setAiOpen] = useState(false);
+    const [aiPrompt, setAiPrompt] = useState("");
+    const [aiType, setAiType] = useState("markdown");
+    const [aiBusy, setAiBusy] = useState(false);
 
     const doCreate = async (key: string, name: string, type: string, content: string) => {
         if (creating) return;
@@ -352,6 +380,25 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
             setError(`${d.loadError}: ${(e as Error).message}`);
         } finally {
             setCreating(null);
+        }
+    };
+
+    const doAiGenerate = async () => {
+        if (!aiPrompt.trim() || aiBusy) return;
+        setAiBusy(true);
+        try {
+            const r = await aiGenerate(aiPrompt, GEN_SYS[aiType]);
+            const text = stripFence(r.text);
+            const name = aiPrompt.trim().split("\n")[0].slice(0, 24) || d.untitledDoc;
+            const art = await createArtifact(name, aiType, text, "webui-ai");
+            setAiPrompt("");
+            setAiOpen(false);
+            await reload();
+            onOpen(art.id);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setAiBusy(false);
         }
     };
 
@@ -509,7 +556,7 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                 </div>
             </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-4">
+            <div className="mt-4 grid grid-cols-2 gap-4 lg:grid-cols-4">
                 {(
                     [
                         { key: "doc", label: d.newDocument, icon: FileText, tile: "bg-violet-500/10 text-violet-600 dark:text-violet-400", tpl: DOC_TEMPLATE, type: "markdown" },
@@ -536,7 +583,53 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                         {creating === key ? d.creating : label}
                     </button>
                 ))}
+                <button
+                    onClick={() => setAiOpen(!aiOpen)}
+                    className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm font-medium transition ${
+                        aiOpen
+                            ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
+                            : "border-dashed border-zinc-300 bg-white text-zinc-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-indigo-500/60 dark:hover:text-indigo-400"
+                    }`}
+                >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                        <Sparkles size={20} />
+                    </span>
+                    {aiBusy ? d.aiRunning : d.aiGenerateTile}
+                </button>
             </div>
+
+            {aiOpen && (
+                <div className="mt-4 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <textarea
+                        value={aiPrompt}
+                        onChange={(e) => setAiPrompt(e.target.value)}
+                        placeholder={d.aiNewPlaceholder}
+                        rows={3}
+                        className="w-full resize-none rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                    />
+                    <div className="mt-2 flex items-center justify-end gap-2">
+                        <select
+                            value={aiType}
+                            onChange={(e) => setAiType(e.target.value)}
+                            className="rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                        >
+                            {GEN_TYPES.map(({ key, labelKey }) => (
+                                <option key={key} value={key}>
+                                    {tabLabels[labelKey]}
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            disabled={aiBusy || !aiPrompt.trim()}
+                            onClick={doAiGenerate}
+                            className="flex items-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            <Sparkles size={16} />
+                            {aiBusy ? d.aiRunning : d.aiCreate}
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {error && (
                 <p className="mt-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
