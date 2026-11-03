@@ -775,7 +775,7 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 
 2026-11-03 验收发现的 4 个缺陷，端到端修复：
 
-- **SVG / Mermaid 产物类型 (#100-1)** — `artifact.create` 在 handler 层放行 `type=svg|mermaid`，但 pydantic 与 SQLite `CHECK` 约束拒绝写入。三层已对齐：`ArtifactType` Literal、`_TYPE_TO_KIND`（svg→app、mermaid→document）、存储 DDL。旧库启动时自动迁移（`migrate_artifact_type_check` 重建 `artifacts` 表放宽 CHECK，并按捕获的 DDL 原样重建全部索引——幂等，记录在 `applied_migrations`）。GUI 沙箱预览 iframe 渲染两种类型（Mermaid 走 mermaid@11 CDN），库标签页/类型图块同步支持。
+- **SVG / Mermaid 产物类型 (#100-1)** — `artifact.create` 在 handler 层放行 `type=svg|mermaid`，但 pydantic 与 SQLite `CHECK` 约束拒绝写入。三层已对齐：`ArtifactType` Literal、`_TYPE_TO_KIND`（svg→app、mermaid→document）、存储 DDL。旧库启动时自动迁移（`migrate_artifact_type_check` 重建 `artifacts` 表放宽 CHECK，并按捕获的 DDL 原样重建全部索引——幂等，记录在 `applied_migrations`）。GUI 沙箱预览 iframe 渲染两种类型（Mermaid 本地打包 npm 包、在模块上下文渲染为静态 SVG——iframe 内零脚本，CSP 与离线/本地优先均满足），库标签页/类型图块同步支持。
 - **事件持久化 (#100-2)** — `artifact.created` / `artifact.updated` / 回滚事件此前只进内存 SSE 总线，`artifact.list_events` 在任何变更后返回空，反向会话查询恒空。`_publish` 现在同时经 `engine.emit_event` 落库（失败不阻断主操作，超限载荷拒绝 `-32003`）。
 - **REST 集合创建 + 事件读取 (#100-3)** — `POST /api/v1/artifacts`（集合路径，REST 惯例 create，`201`）成为一等别名；`GET /api/v1/events?artifact_id=` 读回持久化事件（`artifact.list_events` 的 REST 对等，支持分页）。刻意走集合路径——`/api/v1/artifacts/{id}/events` 已是 artifact 级 SSE 流（#55）。
 - **版本 id 泄露 (#100-4)** — `ArtifactVersion.id` 是全局 SQLite rowid，外泄即泄露全局版本总量，且别的产物 v1 显示 id=49。该字段已从所有 `model_dump()` 排除；API 一律以 `(artifact_id, version_num)` 复合标识版本。

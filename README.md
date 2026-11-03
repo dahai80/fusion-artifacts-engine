@@ -973,7 +973,9 @@ Four defects found by the 2026-11-03 acceptance run, fixed end to end:
   storage DDL. Existing databases are migrated at startup (`migrate_artifact_type_check` rebuilds the
   `artifacts` table with the relaxed CHECK and re-creates every index from its captured DDL —
   idempotent, recorded in `applied_migrations`). The GUI renders both in the sandboxed preview iframe
-  (Mermaid via the mermaid@11 CDN) and shows them in the correct library tabs/tiles.
+  (Mermaid is bundled from the npm package and rendered to a static SVG in the module context — the
+  preview iframe carries zero scripts, so CSP and offline/local-first both hold) and shows them in
+  the correct library tabs/tiles.
 - **Event persistence (#100-2)** — `artifact.created` / `artifact.updated` / rollback events were only
   published to the in-memory SSE bus, so `artifact.list_events` returned empty after any mutation and
   the reverse session-lookup stayed blank. `_publish` now also persists each event via

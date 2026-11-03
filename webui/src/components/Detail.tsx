@@ -123,17 +123,51 @@ export default function Detail({
             .catch(() => setParentName(artifact.parent_artifact_id || ""));
     }, [artifact?.parent_artifact_id]);
 
+    // #100-1: mermaid 在模块上下文渲染成 SVG 再注入 blob——blob iframe 继承页面
+    // CSP（script-src 'self'），CDN 外链脚本与内联脚本都会被拦，渲染壳方案不可行；
+    // 本地打包 mermaid、iframe 内零脚本，同时满足离线/本地优先。
+    const [mermaidSvg, setMermaidSvg] = useState("");
+    useEffect(() => {
+        let alive = true;
+        if (!artifact || artifact.type !== "mermaid" || !content) {
+            setMermaidSvg("");
+            return;
+        }
+        import("mermaid")
+            .then(async (m) => {
+                try {
+                    m.default.initialize({ startOnLoad: false });
+                    const { svg } = await m.default.render(
+                        "mmd-" + artifact.id,
+                        content
+                    );
+                    if (alive) setMermaidSvg(svg);
+                } catch (e) {
+                    console.error("mermaid render failed", e);
+                    if (alive) setMermaidSvg("");
+                }
+            })
+            .catch((e) => {
+                console.error("mermaid load failed", e);
+                if (alive) setMermaidSvg("");
+            });
+        return () => {
+            alive = false;
+        };
+    }, [artifact, content]);
+
     const blobUrl = useMemo(() => {
         if (!artifact || !content) return "";
         const ty = artifact.type;
-        if (ty !== "html" && ty !== "react" && ty !== "svg" && ty !== "mermaid") return "";
-        // #100-1: mermaid 走同一 blob 通道，包一层 mermaid CDN 渲染壳（CDN 允许，图表类既有约定）
+        if (ty !== "html" && ty !== "react" && ty !== "svg" && ty !== "mermaid")
+            return "";
         const doc =
             ty === "mermaid"
-                ? `<!DOCTYPE html><html><head><meta charset="utf-8"><script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script><style>html,body{margin:0;padding:16px;background:#fff;display:flex;justify-content:center}</style></head><body><pre class="mermaid">${content.replace(/</g, "&lt;")}</pre><script>mermaid.initialize({startOnLoad:true});</script></body></html>`
+                ? `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:16px;background:#fff;display:flex;justify-content:center}svg{max-width:100%;height:auto}</style></head><body>${mermaidSvg}</body></html>`
                 : content;
+        if (ty === "mermaid" && !mermaidSvg) return "";
         return URL.createObjectURL(new Blob([doc], { type: "text/html" }));
-    }, [artifact, content]);
+    }, [artifact, content, mermaidSvg]);
 
     useEffect(() => {
         return () => {
