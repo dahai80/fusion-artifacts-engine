@@ -193,8 +193,9 @@ async def test_migration_relaxes_check_keeps_children(tmp_path):
 
 
 async def test_migration_fk_repair(tmp_path):
+    # 生产真实受损形态：ALTER RENAME 改写出的引用带引号
     ddl = _SCHEMA_SQL.replace(
-        "REFERENCES artifacts(id)", "REFERENCES artifacts_type_check_tmp(id)"
+        'REFERENCES artifacts(id)', 'REFERENCES "artifacts_type_check_tmp"(id)'
     )
     root = tmp_path / "artifacts"
     _seed_db(root, ddl)

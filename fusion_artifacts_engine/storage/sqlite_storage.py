@@ -2518,22 +2518,27 @@ class SQLiteStorage(StorageDriver):
 
     def _migrate_artifact_type_fk_repair(self) -> None:
         # 修复 v0.7.6 首版迁移的生产缺陷：首版用 ALTER TABLE RENAME 换表，SQLite
-        # 会把子表 FK 引用改写到临时表名 artifacts_type_check_tmp，临时表删除后
-        # 引用悬空，子表 insert 报 "no such table: main.artifacts_type_check_tmp"。
-        # 本迁移重建所有引用悬空的子表，把 REFERENCES 指回 artifacts。
+        # 会把子表 FK 引用改写到临时表名 artifacts_type_check_tmp（带引号形式
+        # "artifacts_type_check_tmp"），临时表删除后引用悬空，子表 insert 报
+        # "no such table: main.artifacts_type_check_tmp"。本迁移重建所有引用
+        # 悬空的子表，把 REFERENCES 指回 artifacts（兼容带引号/不带引号两种 DDL）。
         broken = "artifacts_type_check_tmp"
         rows = self._conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql LIKE ?",
-            (f"%REFERENCES {broken}%",),
+            (f"%{broken}%",),
         ).fetchall()
         if not rows:
             return
         for r in rows:
             name, sql = r["name"], r["sql"]
-            fixed = sql.replace(broken, "artifacts")
-            fixed = fixed.replace(
-                f"CREATE TABLE {name}", f"CREATE TABLE {name}__rebuild", 1
-            )
+            fixed = sql.replace(f'"{broken}"', "artifacts").replace(broken, "artifacts")
+            quoted = f'CREATE TABLE "{name}"'
+            if quoted in fixed:
+                fixed = fixed.replace(quoted, f'CREATE TABLE "{name}__rebuild"', 1)
+            else:
+                fixed = fixed.replace(
+                    f"CREATE TABLE {name}", f"CREATE TABLE {name}__rebuild", 1
+                )
             logger.info("Repairing dangling FK references on table %s", name)
             self._rebuild_table_keep_data(name, fixed)
         logger.info("Repaired %d tables with dangling FK references", len(rows))
@@ -2590,7 +2595,7 @@ class SQLiteStorage(StorageDriver):
         ("migrate_remix_lineage", "_migrate_remix_lineage"),
         ("migrate_share_permission", "_migrate_share_permission"),
         ("migrate_artifact_type_check", "_migrate_artifact_type_check"),
-        ("migrate_artifact_type_fk_repair", "_migrate_artifact_type_fk_repair"),
+        ("migrate_artifact_type_fk_repair2", "_migrate_artifact_type_fk_repair"),
     ]
 
     def _run_migrations_gated(self) -> None:
