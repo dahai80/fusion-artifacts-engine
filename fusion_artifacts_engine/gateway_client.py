@@ -258,6 +258,22 @@ class GatewayClient:
                 url, json={}, headers={"Authorization": f"Bearer {self._service_key}"}
             )
             if resp.status_code == 200:
+                # #110: gateway #485 在心跳 200 响应里暴露 key 漂移信号——
+                # X-Fusion-Key-State: stale = 命中的是 grace 窗口内被轮换的
+                # 旧 key，数据面（代理注入当前 key）已被拒。旧网关无此头，
+                # 行为不变（403 后走既有恢复路径）。收到信号立即 admin 再
+                # 注册轮换（#460 返回新明文），冷却窗口防轮换抖动引发风暴；
+                # 心跳本身成功，返回 True 不进失败计数。
+                if resp.headers.get("X-Fusion-Key-State") == "stale":
+                    now = time.time()
+                    if now - self._last_reregister >= _REREGISTER_COOLDOWN_SECONDS:
+                        self._last_reregister = now
+                        logger.warning(
+                            "gateway heartbeat 200 but key state=stale (rotated out, "
+                            "grace window), re-registering via admin key module=%s",
+                            self._module_id,
+                        )
+                        self.register(force_admin=True)
                 return True
             # 404 manifest_unknown：gateway 重启清空 store；403 heartbeat_forbidden：
             # 该 module 无匹配 service key 记录（store 重建/key 丢失）。两者都再注册
