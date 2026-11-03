@@ -19,21 +19,25 @@ SERVICE_KEY = "fm-fusion-artifacts-0123456789abcdef0123456789abcdef"
 
 
 class _FakeResponse:
-    def __init__(self, status_code=200, text=""):
+    def __init__(self, status_code=200, text="", headers=None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
 
 class _FakeHttpClient:
     def __init__(self, responses):
-        # responses: list of (status_code, text) returned per call in order
+        # responses: list of (status_code, text) or (status_code, text, headers)
+        # returned per call in order
         self._responses = list(responses)
         self.calls = []
 
     def post(self, url, json=None, headers=None):
         self.calls.append({"url": url, "json": json, "headers": headers})
-        status, text = self._responses.pop(0) if self._responses else (200, "")
-        return _FakeResponse(status, text)
+        item = self._responses.pop(0) if self._responses else (200, "")
+        status, text = item[0], item[1]
+        resp_headers = item[2] if len(item) > 2 else {}
+        return _FakeResponse(status, text, resp_headers)
 
     def close(self):
         pass
@@ -396,6 +400,61 @@ def test_gateway_register_issuance_persists_key_id(tmp_path):
     client._client = fake
     assert client.register() is True
     assert load_key_id(client._key_path) == "kid-abc"
+
+
+def test_gateway_heartbeat_stale_signal_heals(tmp_path):
+    # #110: gateway #485 心跳 200 + X-Fusion-Key-State: stale = 命中 grace
+    # 窗口内的被轮换旧 key——立即 admin 再注册轮换拿新明文，无需等 grace 过期
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [
+            (
+                200,
+                json.dumps({"code": "ok"}),
+                {"X-Fusion-Key-State": "stale"},
+            ),
+            (
+                200,
+                json.dumps({"code": "ok", "key_id": "kid-new", "raw_key": SERVICE_KEY + "b"}),
+            ),
+        ]
+    )
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert fake.calls[0]["url"].endswith("/heartbeat")
+    assert fake.calls[1]["url"].endswith("/api/v1/shell/manifests")
+    assert fake.calls[1]["headers"]["Authorization"] == "Bearer gw-admin-key"
+    assert client._service_key == SERVICE_KEY + "b"
+
+
+def test_gateway_heartbeat_stale_signal_cooldown(tmp_path):
+    # #110: stale 信号受再注册冷却窗口约束——轮换抖动不会风暴
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    client._last_reregister = time.time()
+    fake = _FakeHttpClient([(200, json.dumps({"code": "ok"}), {"X-Fusion-Key-State": "stale"})])
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["url"].endswith("/heartbeat")
+
+
+def test_gateway_heartbeat_current_state_no_reregister(tmp_path):
+    # #110 回归：无信号头（旧网关）或 current 状态不做任何再注册
+    client = _make_client(tmp_path)
+    _write_service_key(client)
+    fake = _FakeHttpClient(
+        [
+            (200, json.dumps({"code": "ok"}), {"X-Fusion-Key-State": "current"}),
+            (200, json.dumps({"code": "ok"})),
+        ]
+    )
+    client._client = fake
+    assert client.heartbeat_once() is True
+    assert client.heartbeat_once() is True
+    assert len(fake.calls) == 2
+    assert all(c["url"].endswith("/heartbeat") for c in fake.calls)
 
 
 def test_gateway_start_stop(tmp_path):

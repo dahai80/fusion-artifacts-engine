@@ -668,6 +668,7 @@ gateway:
 - **心跳**：后台线程每 15s POST `…/shell/manifests/fusion-artifacts/heartbeat`。`404 manifest_unknown`（网关重启丢 store）或 `403 heartbeat_forbidden`（无匹配 service key 记录）触发一次再注册，网关签发新 key 并持久化继续使用。再注册限频 5 分钟一次，被撤销的 key 不会造成 15s 循环。
 - **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <fm- service key>`。引擎 `_is_authed` 同时接受配置的 `api_key`（X-API-Key / Bearer）与该 service key（Bearer），符合网关 #294 契约（模块须校验签发 key）。
 - **Key 漂移自愈 (v0.7.7, #104)**：网关心跳面与再注册面都会在 `KeyRotationGrace`（默认 24h）内接受"上一把" service key——引擎持陈旧 key 时心跳仍 200，而数据面（代理注入当前 key）已被拒，表现为 shell 模块 `-32600 Unauthorized` 最长持续一个 grace 窗口。心跳循环现内置漂移探测（每 10 分钟，独立冷却限频）：幂等 service-key 再注册一次，比对响应 `key_id` 与本地基线（`<key文件>.keyid` 旁路文件）；不一致即引擎持被轮换旧 key，改用 admin key 再注册触发网关轮换（#460）拿新明文，漂移分钟级闭合而非等一个 grace 窗口。升级后首次探测只落盘基线、不轮换。
+- **心跳 stale 信号快速通道 (v0.7.8, #110)**：网关 PR #485 在心跳面直接暴露同一漂移——200 响应携带 `X-Fusion-Key-State: stale` 即心跳命中了 grace 窗口内的被轮换旧 key。引擎读取该头后立即 admin 再注册（受冷却窗口约束防轮换抖动风暴），检测延迟从最长一个 grace 窗口（或 10 分钟探测）压缩到轮换后首个心跳。无该头的旧网关行为完全不变。
 - 注册/心跳失败**不影响服务**：网关宕机时引擎照常工作。
 
 ## Web 管理界面 (v0.6.0, issue #76; v0.7.3 shell 规范对齐; v0.7.4 新建框; v0.7.5 编辑器 + AI; v0.7.6 svg/mermaid)
