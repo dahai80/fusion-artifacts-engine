@@ -488,8 +488,15 @@ class SQLiteStorage(StorageDriver):
     @contextmanager
     def _read_conn(self):
         # E7: 从只读连接池借连接，用完归还。WAL 允许并发读；复用连接省 connect/close 开销。
-        # 池为空则阻塞等待（读并发受池大小约束，防连接泄漏）。
-        conn = self._read_pool.get()
+        # 池为空则限时等待（读并发受池大小约束，防连接泄漏）。已关闭或池饿死必须
+        # 快速失败而非永久阻塞——后台长上下文任务可能在 close 之后才被事件循环
+        # 执行，无限 get() 会把整个进程挂死（#100 验收测试暴露）。
+        if self._conn is None:
+            raise RuntimeError("storage closed: read pool unavailable")
+        try:
+            conn = self._read_pool.get(timeout=10)
+        except queue.Empty:
+            raise RuntimeError("read pool starved for 10s (possible leak)")
         try:
             yield conn
         finally:
@@ -2449,10 +2456,47 @@ class SQLiteStorage(StorageDriver):
         except Exception as e:  # noqa: BLE001
             logger.warning("Migration size_bytes failed: %s", e)
 
+    def _rebuild_table_keep_data(self, table: str, new_ddl: str) -> None:
+        # 表重建通用工具：新表名与旧表并存，复制数据后 drop 旧表、rename 新表就位。
+        # 关键约束：全程不改名旧表——ALTER TABLE RENAME 会把其他表的 FK 引用
+        # 改写到旧表名，旧表一删引用即悬空（v0.7.6 首版迁移的生产缺陷）。
+        # new_ddl 必须以 rebuild 名建表，调用方负责替换表名与 CHECK 等子句。
+        rebuild = f"{table}__rebuild"
+        self._conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            self._conn.execute(f'DROP TABLE IF EXISTS "{rebuild}"')
+            self._conn.execute(new_ddl)
+            cols = [
+                r["name"] for r in self._conn.execute(f'PRAGMA table_info("{rebuild}")').fetchall()
+            ]
+            col_list = ", ".join(f'"{c}"' for c in cols)
+            idx_ddls = [
+                r[0]
+                for r in self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' "
+                    "AND tbl_name=? AND sql IS NOT NULL",
+                    (table,),
+                ).fetchall()
+            ]
+            self._conn.execute(
+                f'INSERT INTO "{rebuild}" ({col_list}) SELECT {col_list} FROM "{table}"'
+            )
+            self._conn.execute(f'DROP TABLE "{table}"')
+            self._conn.execute(f'ALTER TABLE "{rebuild}" RENAME TO "{table}"')
+            for ddl in idx_ddls:
+                self._conn.execute(ddl)
+            self._conn.commit()
+        except Exception as e:
+            self._conn.rollback()
+            logger.error("Rebuild table %s failed: %s", table, e)
+            raise
+        finally:
+            self._conn.execute("PRAGMA foreign_keys=ON")
+
     def _migrate_artifact_type_check(self) -> None:
         # #100-1: 旧库 artifacts.type 的 CHECK 约束缺少 'svg'/'mermaid'，插入被
-        # IntegrityError 拒绝。SQLite 无法 ALTER CHECK，只能按官方流程重建表：
-        # foreign_keys=OFF + rename 换表 + 复制数据 + 按原 DDL 重建全部索引。
+        # IntegrityError 拒绝。SQLite 无法 ALTER CHECK，只能重建表。重建走
+        # _rebuild_table_keep_data（新旧表并存复制，不做 RENAME 旧表），
         # 索引 DDL 从 sqlite_master 原样捕获（含表达式索引），换表后逐条重建。
         row = self._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='artifacts'"
@@ -2465,41 +2509,34 @@ class SQLiteStorage(StorageDriver):
             old_check,
             "type IN ('code','markdown','html','react','svg','mermaid','data')",
         )
-        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(artifacts)").fetchall()]
-        col_list = ", ".join(f'"{c}"' for c in cols)
-        idx_ddls = [
-            r[0]
-            for r in self._conn.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='artifacts' AND sql IS NOT NULL"
-            ).fetchall()
-        ]
-        logger.info(
-            "Migrating artifacts.type CHECK: adding svg/mermaid (%d columns, %d indexes)",
-            len(cols),
-            len(idx_ddls),
+        new_ddl = new_ddl.replace(
+            "CREATE TABLE artifacts", "CREATE TABLE artifacts__rebuild", 1
         )
-        tmp_name = "artifacts_type_check_tmp"
-        self._conn.execute("PRAGMA foreign_keys=OFF")
-        try:
-            self._conn.execute("BEGIN IMMEDIATE")
-            self._conn.execute(f"DROP TABLE IF EXISTS {tmp_name}")
-            self._conn.execute(f"ALTER TABLE artifacts RENAME TO {tmp_name}")
-            self._conn.execute(new_ddl)
-            self._conn.execute(
-                f'INSERT INTO artifacts ({col_list}) SELECT {col_list} FROM {tmp_name}'
+        logger.info("Migrating artifacts.type CHECK: adding svg/mermaid")
+        self._rebuild_table_keep_data("artifacts", new_ddl)
+        logger.info("Migrated artifacts.type CHECK done: svg/mermaid now accepted")
+
+    def _migrate_artifact_type_fk_repair(self) -> None:
+        # 修复 v0.7.6 首版迁移的生产缺陷：首版用 ALTER TABLE RENAME 换表，SQLite
+        # 会把子表 FK 引用改写到临时表名 artifacts_type_check_tmp，临时表删除后
+        # 引用悬空，子表 insert 报 "no such table: main.artifacts_type_check_tmp"。
+        # 本迁移重建所有引用悬空的子表，把 REFERENCES 指回 artifacts。
+        broken = "artifacts_type_check_tmp"
+        rows = self._conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql LIKE ?",
+            (f"%REFERENCES {broken}%",),
+        ).fetchall()
+        if not rows:
+            return
+        for r in rows:
+            name, sql = r["name"], r["sql"]
+            fixed = sql.replace(broken, "artifacts")
+            fixed = fixed.replace(
+                f"CREATE TABLE {name}", f"CREATE TABLE {name}__rebuild", 1
             )
-            self._conn.execute(f"DROP TABLE {tmp_name}")
-            for ddl in idx_ddls:
-                self._conn.execute(ddl)
-            self._conn.commit()
-            logger.info("Migrated artifacts.type CHECK done: svg/mermaid now accepted")
-        except Exception as e:
-            self._conn.rollback()
-            logger.error("Migration artifact_type_check failed: %s", e)
-            raise
-        finally:
-            self._conn.execute("PRAGMA foreign_keys=ON")
+            logger.info("Repairing dangling FK references on table %s", name)
+            self._rebuild_table_keep_data(name, fixed)
+        logger.info("Repaired %d tables with dangling FK references", len(rows))
 
     _SCHEMA_VERSION = 2
 
@@ -2553,6 +2590,7 @@ class SQLiteStorage(StorageDriver):
         ("migrate_remix_lineage", "_migrate_remix_lineage"),
         ("migrate_share_permission", "_migrate_share_permission"),
         ("migrate_artifact_type_check", "_migrate_artifact_type_check"),
+        ("migrate_artifact_type_fk_repair", "_migrate_artifact_type_fk_repair"),
     ]
 
     def _run_migrations_gated(self) -> None:
