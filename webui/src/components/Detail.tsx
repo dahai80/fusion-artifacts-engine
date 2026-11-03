@@ -9,11 +9,16 @@ import {
     Link2,
     MessageSquare,
     MessagesSquare,
+    Pencil,
     RotateCcw,
+    Save,
+    Sparkles,
     X,
     GitFork,
 } from "lucide-react";
 import {
+    aiGenerate,
+    aiListModels,
     createShare,
     getArtifact,
     getContent,
@@ -23,12 +28,13 @@ import {
     remixArtifact,
     revokeShare,
     rollback,
+    updateArtifact,
     versionDiff,
     type Artifact,
     type ArtifactVersion,
 } from "../api";
 import { t, type Lang } from "../i18n";
-import { relTime, sourceLabel } from "./Library";
+import { relTime, sourceLabel, stripFence } from "./Library";
 
 type PreviewMode = "preview" | "code" | "diff";
 
@@ -63,6 +69,15 @@ export default function Detail({
     const [parentName, setParentName] = useState("");
     // S6: 禁原生 confirm——阻断确认走自实现 Modal（ConfirmDialog 组件就绪前过渡）
     const [confirm, setConfirm] = useState<{ msg: string; action: () => void } | null>(null);
+    // #96: 内容编辑器 + 乐观锁（expected_content_hash，冲突 -32002 显式报错）
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState("");
+    const [saving, setSaving] = useState(false);
+    // #97: AI 迭代面板（ai.generate → artifact.update source=ai_generation）
+    const [aiPrompt, setAiPrompt] = useState("");
+    const [aiBusy, setAiBusy] = useState(false);
+    const [aiModels, setAiModels] = useState<string[]>([]);
+    const [aiModel, setAiModel] = useState("");
 
     useEffect(() => {
         getShareBase()
@@ -207,6 +222,59 @@ export default function Detail({
         setTimeout(() => setCopied(false), 1500);
     };
 
+    const startEdit = () => {
+        setDraft(content);
+        setEditing(true);
+        setMode("code");
+    };
+
+    const doSaveEdit = async () => {
+        if (!artifact) return;
+        setSaving(true);
+        try {
+            await updateArtifact(id, draft, artifact.content_hash, d.manualEdit, "manual");
+            setEditing(false);
+            await load();
+        } catch (e) {
+            const msg = (e as Error).message;
+            setError(msg.startsWith("-32002") ? d.conflictMsg : `${d.loadError}: ${msg}`);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const openAiPanel = () => {
+        if (aiModels.length === 0) {
+            aiListModels()
+                .then((r) => setAiModels(r.models.length > 0 ? r.models : []))
+                .catch(() => {});
+        }
+    };
+
+    const doAiIterate = async () => {
+        if (!artifact || !aiPrompt.trim()) return;
+        setAiBusy(true);
+        try {
+            const sys = `${d.aiCard}: 基于当前产物内容按用户要求修改，输出完整新内容（不是 diff），不要解释，不要 markdown 代码围栏。\n\n<当前内容>\n${content}\n</当前内容>`;
+            const r = await aiGenerate(aiPrompt, sys, aiModel || undefined);
+            const text = stripFence(r.text);
+            await updateArtifact(
+                id,
+                text,
+                artifact.content_hash,
+                `AI: ${aiPrompt.trim().slice(0, 40)}`,
+                "ai_generation"
+            );
+            setAiPrompt("");
+            await load();
+        } catch (e) {
+            const msg = (e as Error).message;
+            setError(msg.startsWith("-32002") ? d.conflictMsg : `${d.loadError}: ${msg}`);
+        } finally {
+            setAiBusy(false);
+        }
+    };
+
     if (error && !artifact) {
         return (
             <div className="mx-auto w-full max-w-5xl px-6 py-6">
@@ -257,6 +325,17 @@ export default function Detail({
                     )}
                 </div>
                 <div className="flex items-center gap-2">
+                    {!editing && (
+                        <button
+                            disabled={busy}
+                            onClick={startEdit}
+                            className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            title={d.edit}
+                        >
+                            <Pencil size={16} />
+                            {d.edit}
+                        </button>
+                    )}
                     <button
                         disabled={busy}
                         onClick={doRemix}
@@ -325,10 +404,36 @@ export default function Detail({
                                 dangerouslySetInnerHTML={{ __html: renderedMd }}
                             />
                         )}
-                        {(mode === "code" || (mode === "preview" && !isHtml && !isMd)) && (
+                        {(mode === "code" || (mode === "preview" && !isHtml && !isMd)) && !editing && (
                             <pre className="max-h-[480px] overflow-auto p-4 text-xs leading-relaxed text-zinc-700 dark:text-zinc-300">
                                 <code>{content}</code>
                             </pre>
+                        )}
+                        {editing && (
+                            <>
+                                <textarea
+                                    value={draft}
+                                    onChange={(e) => setDraft(e.target.value)}
+                                    spellCheck={false}
+                                    className="h-[480px] w-full resize-none border-0 bg-transparent p-4 font-mono text-xs leading-relaxed text-zinc-800 outline-none dark:text-zinc-200"
+                                />
+                                <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+                                    <button
+                                        onClick={() => setEditing(false)}
+                                        className="rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                                    >
+                                        {d.close}
+                                    </button>
+                                    <button
+                                        disabled={saving || draft === content}
+                                        onClick={doSaveEdit}
+                                        className="flex items-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                                    >
+                                        <Save size={16} />
+                                        {d.save}
+                                    </button>
+                                </div>
+                            </>
                         )}
                         {mode === "diff" && (
                             <pre className="max-h-[480px] overflow-auto p-4 text-xs leading-relaxed">
@@ -381,6 +486,45 @@ export default function Detail({
                 </div>
 
                 <aside className="w-full shrink-0 space-y-4 lg:w-72">
+                    <div
+                        className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
+                        onFocus={openAiPanel}
+                    >
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <Sparkles size={16} className="text-indigo-400" />
+                            {d.aiCard}
+                        </h2>
+                        <textarea
+                            value={aiPrompt}
+                            onChange={(e) => setAiPrompt(e.target.value)}
+                            placeholder={d.aiPlaceholder}
+                            rows={3}
+                            className="w-full resize-none rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                        />
+                        {aiModels.length > 0 && (
+                            <select
+                                value={aiModel}
+                                onChange={(e) => setAiModel(e.target.value)}
+                                className="mt-2 w-full rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                            >
+                                <option value="">{d.aiModel}: auto</option>
+                                {aiModels.map((m) => (
+                                    <option key={m} value={m}>
+                                        {m}
+                                    </option>
+                                ))}
+                            </select>
+                        )}
+                        <button
+                            disabled={aiBusy || !aiPrompt.trim()}
+                            onClick={doAiIterate}
+                            className="mt-2 flex w-full items-center justify-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            <Sparkles size={16} />
+                            {aiBusy ? d.aiRunning : d.aiRun}
+                        </button>
+                    </div>
+
                     <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
                         <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
                             <History size={16} className="text-zinc-400" />

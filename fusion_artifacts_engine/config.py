@@ -150,6 +150,12 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
         "share": {
             "public_base_url": ("share_public_base_url", None),
         },
+        "ai": {
+            "base_url": ("ai_base_url", None),
+            "model": ("ai_model", None),
+            "timeout": ("ai_timeout", None),
+            "api_key": ("ai_api_key", None),
+        },
         "ipc": {
             "enabled": ("ipc_enabled", None),
             "design_dir": ("ipc_design_dir", _expanduser_path),
@@ -374,6 +380,12 @@ class ArtifactEngineConfig(BaseModel):
     long_context_rag_url: str = Field(default="http://127.0.0.1:11436/kb")
     long_context_rag_api_key: str = Field(default="")
     long_context_rag_kb_id: str = Field(default="fusion-artifacts")
+    # v0.7.5 #97: AI 生成/迭代入口——webui 经 ai.generate RPC 走 fusion-mlx OpenAI 兼容接口。
+    # model 空=自动取 /v1/models 第一个可用模型。
+    ai_base_url: str = Field(default="http://127.0.0.1:11434")
+    ai_model: str = Field(default="")
+    ai_timeout: float = Field(default=120.0)
+    ai_api_key: str = Field(default="")
 
     @property
     def gateway_service_key_path(self) -> Path:

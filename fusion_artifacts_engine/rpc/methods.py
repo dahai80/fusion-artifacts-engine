@@ -4,10 +4,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from fusion_artifacts_engine import long_context
+from fusion_artifacts_engine import ai_client, long_context
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.office_ingest import maybe_write_back
 from fusion_artifacts_engine.rpc.errors import (
+    BusinessRuleError,
     NotFoundError,
     NotImplementedError,
     PermissionError,
@@ -177,6 +178,9 @@ class RPCHandler:
             "artifact.sync": self._sync,
             # #58/#59/#60: visual engine — DSL parse + 8 primitive compilers + 3-level fallback
             "render.visual": self._render_visual,
+            # v0.7.5 #97: webui AI 生成/迭代入口（走 fusion-mlx OpenAI 兼容接口）
+            "ai.generate": self._ai_generate,
+            "ai.list_models": self._ai_list_models,
             "ping": self._ping,
         }
 
@@ -1144,3 +1148,55 @@ class RPCHandler:
             html_len=len(result.get("html") or ""),
         )
         return result
+
+    def _resolve_ai_model(self, requested: str | None) -> str:
+        cfg = self.engine.config
+        model = (requested or "").strip() or cfg.ai_model.strip()
+        return model
+
+    async def _ai_generate(self, params: dict) -> dict:
+        # #97: webui AI 生成/迭代。GUI 组 prompt（生成/迭代两模式），引擎薄代理到
+        # fusion-mlx OpenAI 兼容接口。model 空=自动取 /v1/models 第一个。
+        prompt = str(params.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("prompt is required")
+        cfg = self.engine.config
+        model = self._resolve_ai_model(params.get("model"))
+        try:
+            if not model:
+                models = await ai_client.list_models(
+                    cfg.ai_base_url, api_key=cfg.ai_api_key or None
+                )
+                if not models:
+                    raise BusinessRuleError(
+                        f"No models available at {cfg.ai_base_url}"
+                    )
+                model = models[0]
+            messages = []
+            system = params.get("system")
+            if system:
+                messages.append({"role": "system", "content": str(system)})
+            messages.append({"role": "user", "content": prompt})
+            text = await ai_client.chat(
+                cfg.ai_base_url,
+                model,
+                messages,
+                timeout=cfg.ai_timeout,
+                api_key=cfg.ai_api_key or None,
+                max_tokens=int(params.get("max_tokens", 4096)),
+            )
+        except RpcError:
+            raise
+        except Exception as e:
+            logger.error("AI generate failed: base_url=%s model=%s err=%s", cfg.ai_base_url, model, e)
+            raise BusinessRuleError(f"AI backend unavailable: {e}")
+        return {"text": text, "model": model}
+
+    async def _ai_list_models(self, params: dict) -> dict:
+        cfg = self.engine.config
+        try:
+            models = await ai_client.list_models(cfg.ai_base_url, api_key=cfg.ai_api_key or None)
+        except Exception as e:
+            logger.error("AI list models failed: base_url=%s err=%s", cfg.ai_base_url, e)
+            raise BusinessRuleError(f"AI backend unavailable: {e}")
+        return {"models": models, "default": cfg.ai_model}

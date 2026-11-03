@@ -669,12 +669,15 @@ gateway:
 - **代理认证**：网关 shell 代理剥调用方凭证，将 `/shell/fusion-artifacts/<rest>` 转发到 `upstream/<rest>`，并注入 `Authorization: Bearer <fm- service key>`。引擎 `_is_authed` 同时接受配置的 `api_key`（X-API-Key / Bearer）与该 service key（Bearer），符合网关 #294 契约（模块须校验签发 key）。
 - 注册/心跳失败**不影响服务**：网关宕机时引擎照常工作。
 
-## Web 管理界面 (v0.6.0, issue #76; v0.7.3 shell 规范对齐; v0.7.4 新建框)
+## Web 管理界面 (v0.6.0, issue #76; v0.7.3 shell 规范对齐; v0.7.4 新建框; v0.7.5 编辑器 + AI)
 
 内置 Web GUI（`webui/`，Vite + React 18 + Tailwind v4），由守护进程自身从 `fusion_artifacts_engine/webui_dist/` 静态服务 — 同源访问 `http://127.0.0.1:11451/`，或经 shell 代理 `/shell/fusion-artifacts/`。内核零改动：GUI 只调用既有 JSON-RPC 方法。
 
 - **库视图**（v0.7.3 重构；v0.7.4 新建框）— claude.ai 式时间分段（今天 / 昨天 / 本周内 / 更早）替代 v0.6.3 的按会话分组（原始 session id 不可读且把网格切碎）；分段控件式类型标签页（全部 / HTML 应用 / 文档 / 图表 / 代码）带计数、产物/版本统计头；工具条一行放搜索（名称+摘要）、排序（更新/创建/名称 — 名称排序退化为平铺）与回收站 chip（展开面板 + 恢复）。网格上方三个新建框 — 新建文档（markdown 起始模板）、新建 PPT（自包含 HTML 幻灯，键盘/点击翻页）、新建设计（JSON 画布）— 点击经 `artifact.create` 创建（会话 `webui-created`）并打开详情；模板名跟随 shell 语言。骨架屏加载态、带引导文案的空态。卡片带实时预览缩略图（html/react/svg 用免脚本沙箱 iframe，markdown 渲染预览，JSON/data 载荷显示类型图标，其余显示文本片段 — 滚动时懒加载并缓存）、类型着色 chip、星标、来源归属（`source_module` → `metadata.source` → 会话）、分享/remix 徽标、滚动摘要摘录。
 - **详情视图** — 三态预览：HTML/React 在沙箱 iframe 中渲染（`sandbox="allow-scripts allow-forms allow-popups"`，blob URL — 不内联回显产物字节）、markdown 经 `marked` 渲染、代码/数据以文本展示；版本时间线支持对比（统一 diff、着色）与一键回滚；引用会话反向查询（来自持久化事件）；分享创建/撤销/复制链接。恢复/remix 确认使用应用内弹窗（不用原生 `confirm`，规范 S6）。
+- **内容编辑器**（v0.7.5, issue #96）— 编辑按钮对全部类型（markdown/html/code/data）打开代码模式 textarea——v0.7.4 的 PPT/设计新建框产物也因此可编辑（issue #98）；保存走 `artifact.update` + `expected_content_hash` 乐观锁（`-32002` 冲突显式提示"内容已被其他会话修改"，绝不静默覆盖），落为新版本 `source=manual`。
+- **AI 生成与迭代**（v0.7.5, issue #97）— 新增 `ai.generate` / `ai.list_models` RPC：服务端薄代理到 fusion-mlx 的 OpenAI 兼容 `/v1/chat/completions`（免 CORS，走引擎鉴权）。配置段 `ai`（`base_url` 默认 `http://127.0.0.1:11434`、`model` 空=取 `/v1/models` 第一个、`timeout`、`api_key`）。GUI 两个入口：详情页"AI 修改"卡片（提示词 → 模型重写全文 → 新版本 `source=ai_generation`，模型下拉来自 `ai.list_models`）和库页"AI 生成"框（提示词 + 类型选择 → 生成 markdown/html/code/data → 建产物并打开）。模型输出客户端去代码围栏；建议部署时用 `ai.model` 钉死对话模型（自动选取可能拿到图像模型）。
+
 - **Shell 集成**（v0.7.3，`fusion-web-ui-spec-1015` S7/S8/S9）— 经 `/shell/` 代理访问（或 `?embedded=1`）时隐藏模块自有顶部导航并跟随宿主 Shell：主题取 `fusion.shell.theme` + `fusion:theme` 事件，语言取 `fusion.shell.lang` + `fusion:lang` 事件（`@fusion/web-sdk` 就绪前以同源 storage 桥接过渡）。独立运行保留本地切换按钮。视觉语言对齐规范：`rounded-lg` 卡片 / `rounded-md` 控件、平面用边框不用阴影、Lucide 图标 16/20/24 三档、间距 4 的倍数、暗色默认。
 - 静态服务加固：入口页 `no-store` + 严格 CSP（`frame-ancestors` 允许网关源以便 iframe 嵌入）、hash 文件名资源 `immutable`、路径穿越拒绝、dist 缺失时降级 404 不影响 RPC。
 

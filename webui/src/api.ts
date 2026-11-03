@@ -35,6 +35,7 @@ export interface Artifact {
     metadata: Record<string, any> | null;
     current_version: number;
     summary: string;
+    content_hash: string | null;
     created_at: number;
     updated_at: number;
     is_starred: boolean;
@@ -126,6 +127,33 @@ export async function remixArtifact(id: string): Promise<Artifact> {
 
 export async function restoreArtifact(id: string): Promise<void> {
     await rpc("artifact.restore", { artifact_id: id });
+}
+
+export async function updateArtifact(
+    id: string,
+    content: string,
+    expectedContentHash: string | null,
+    changeLog = "",
+    source: "manual" | "ai_generation" = "manual"
+): Promise<void> {
+    const params: Record<string, any> = { artifact_id: id, content, source, change_log: changeLog };
+    if (expectedContentHash) params.expected_content_hash = expectedContentHash;
+    await rpc("artifact.update", params);
+}
+
+export async function aiGenerate(
+    prompt: string,
+    system?: string,
+    model?: string
+): Promise<{ text: string; model: string }> {
+    const params: Record<string, any> = { prompt };
+    if (system) params.system = system;
+    if (model) params.model = model;
+    return rpc("ai.generate", params);
+}
+
+export async function aiListModels(): Promise<{ models: string[]; default: string }> {
+    return rpc("ai.list_models", {});
 }
 
 export interface PublicShare {
