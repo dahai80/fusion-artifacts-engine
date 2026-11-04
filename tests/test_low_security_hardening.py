@@ -72,7 +72,7 @@ def test_share_id_valid_format_passes(server_factory):
         json={"jsonrpc": "2.0", "id": 2, "method": "artifact.create_share", "params": {"artifact_id": art}},
         timeout=5,
     ).json()["result"]["share"]["share_id"]
-    # 引擎生成的 share_id 必须满足 shr_<12> 格式，否则公开端点会自拒
+    # Engine-generated share_id must match the shr_<12> format, otherwise the public endpoint self-rejects
     assert share_id.startswith("shr_")
     resp = httpx.get(f"{base}/api/v1/share/{share_id}", timeout=5)
     assert resp.status_code == 200
@@ -80,7 +80,7 @@ def test_share_id_valid_format_passes(server_factory):
 
 def test_share_id_garbage_rejected_400(server_factory):
     _server, _engine, base = server_factory()
-    # 各种非法格式 → 400，不到 DB
+    # All invalid formats → 400, never reaches DB
     for bad in ("shr_short", "shr_", "notshr_abcabcabcabc", "shr_" + "a" * 13, "shr_!!", "SHR_abcabcabcabc"):
         resp = httpx.get(f"{base}/api/v1/share/{bad}", timeout=5)
         assert resp.status_code == 400, f"{bad!r} must be 400"
@@ -98,7 +98,7 @@ def test_log_sanitizer_strips_newlines():
     flt = LogSanitizerFilter()
     assert flt.filter(rec) is True
     msg = rec.getMessage()
-    # 换行被替换为字面 \\n，注入文本留在同一逻辑行
+    # Newlines are replaced with literal \\n, injected text stays on the same logical line
     assert "\n" not in msg
     assert "\\n" in msg
     assert "[ERROR] fake" in msg
@@ -118,14 +118,14 @@ def test_log_sanitizer_msg_string():
 
 
 def test_setup_logging_installs_sanitizer():
-    # setup_logging 后 root logger 应有 LogSanitizerFilter 实例
+    # After setup_logging the root logger should have a LogSanitizerFilter instance
     setup_logging(logging.WARNING)
     root = logging.getLogger()
     assert any(isinstance(f, LogSanitizerFilter) for f in root.filters)
 
 
 def test_log_sanitizer_handler_emits_single_line():
-    # 端到端：捕获 stderr handler 输出，确认注入换行不出现在输出行
+    # End-to-end: capture stderr handler output, confirm injected newlines never appear in output lines
     setup_logging(logging.WARNING)
     log = logging.getLogger("low3.inject.test")
     buf = io.StringIO()
@@ -136,7 +136,7 @@ def test_log_sanitizer_handler_emits_single_line():
     log.addFilter(LogSanitizerFilter())
     log.warning("name=%s", "evil\nFAKE")
     out = buf.getvalue()
-    assert out.count("\n") == 1  # 仅末尾换行
+    assert out.count("\n") == 1  # trailing newline only
     assert "FAKE" in out
     assert "evil" in out
     log.removeHandler(h)
@@ -147,7 +147,7 @@ def test_log_sanitizer_handler_emits_single_line():
 
 def test_metrics_no_token_open(server_factory):
     _server, _engine, base = server_factory(cfg_overrides={"metrics_enabled": True})
-    # 未设 token → /metrics 直接可读
+    # No token set → /metrics directly readable
     resp = httpx.get(f"{base}/metrics", timeout=5)
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
@@ -157,13 +157,13 @@ def test_metrics_token_required_when_set(server_factory):
     _server, _engine, base = server_factory(
         cfg_overrides={"metrics_enabled": True, "metrics_token": "secret-metrics-123"}
     )
-    # 无 token → 401
+    # No token → 401
     resp = httpx.get(f"{base}/metrics", timeout=5)
     assert resp.status_code == 401
-    # 错 token → 401
+    # Wrong token → 401
     resp = httpx.get(f"{base}/metrics", headers={"X-Metrics-Token": "wrong"}, timeout=5)
     assert resp.status_code == 401
-    # 对 token → 200
+    # Correct token → 200
     resp = httpx.get(f"{base}/metrics", headers={"X-Metrics-Token": "secret-metrics-123"}, timeout=5)
     assert resp.status_code == 200
 
@@ -186,7 +186,7 @@ def test_render_share_csp_has_nonce_no_unsafe_inline():
     out = render_share_html(art, "<p>hi</p>")
     assert "unsafe-inline" not in out
     assert "style-src 'nonce-" in out
-    # CSP nonce 与 <style nonce> 必须一致
+    # CSP nonce and <style nonce> must match
     import re
 
     csp_nonce = re.search(r"style-src 'nonce-([^']+)'", out)
@@ -226,7 +226,7 @@ def test_render_share_data_has_style_nonce():
 
     art = types.SimpleNamespace(type="data", name="t")
     out = render_share_html(art, '{"a": 1}')
-    # R2 (#86): 所有分支统一带 nonce CSP meta（page wrapper 单点注入）
+    # R2 (#86): all branches carry the nonce CSP meta uniformly (single-point injection in page wrapper)
     assert "Content-Security-Policy" in out
     assert '<style nonce="' in out
 
@@ -238,7 +238,7 @@ def test_render_share_code_fallback_has_csp_meta():
 
     art = types.SimpleNamespace(type="python", name="t")
     out = render_share_html(art, "print('hi')")
-    # R2 (#86): fallback code 分支此前漏 CSP meta，现在由 wrapper 统一注入
+    # R2 (#86): fallback code branch previously missed the CSP meta, now injected uniformly by the wrapper
     assert "Content-Security-Policy" in out
     assert "style-src 'nonce-" in out
     assert '<style nonce="' in out

@@ -204,7 +204,7 @@ async def test_check_safety_rpc_dispatch(engine_with_tmp):
 
 
 async def test_inject_rpc_dispatch(engine_with_tmp):
-    # 运维6: artifact.inject 占位方法下线，RPC 层显式拒绝 (-32005)
+    # Ops-6: artifact.inject placeholder method retired, explicitly rejected at the RPC layer (-32005)
     engine = engine_with_tmp
     handler = RPCHandler(engine)
     with pytest.raises(NotImplementedError) as exc:
@@ -216,7 +216,7 @@ async def test_inject_rpc_dispatch(engine_with_tmp):
 
 
 async def test_interact_rpc_dispatch(engine_with_tmp):
-    # 运维6: artifact.interact 占位方法下线，RPC 层显式拒绝 (-32005)
+    # Ops-6: artifact.interact placeholder method retired, explicitly rejected at the RPC layer (-32005)
     engine = engine_with_tmp
     handler = RPCHandler(engine)
     artifact, _, _ = await engine.create_artifact(

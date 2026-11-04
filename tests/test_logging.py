@@ -60,11 +60,11 @@ def test_setup_logging_writes_rotating_file(tmp_path, monkeypatch):
     assert log_file.exists()
     content = log_file.read_text()
     assert "rotating log test message" in content
-    # 应为 JSON 行
+    # Should be a JSON line
     line = content.strip().splitlines()[-1]
     obj = json.loads(line)
     assert obj["msg"] == "rotating log test message"
-    # 清理 root handlers，避免污染后续测试
+    # Clean up root handlers to avoid polluting subsequent tests
     for h in list(logging.getLogger().handlers):
         h.close()
         logging.getLogger().removeHandler(h)

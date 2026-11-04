@@ -637,29 +637,29 @@ def test_content_file_missing(storage):
     content_dir = storage.content_dir / "art1"
     for f in content_dir.iterdir():
         f.unlink()
-    # L-16: 内容文件缺失是数据损坏，storage 上抛而非伪造空版本
+    # L-16: a missing content file is data corruption; storage must raise rather than fabricate an empty version
     with pytest.raises(FileNotFoundError):
         storage.get_version("art1", 1)
 
 
 def test_p14_close_runs_truncate_checkpoint_clears_wal(storage):
-    # P1-4: 写入产生 WAL 帧，close() 跑 TRUNCATE checkpoint 后 -wal 文件应清空（不存在或 0 字节）。
-    # 验证停机后备份只拷 meta.db 即可，无需 -wal/-shm（scripts/backup.sh 依赖此前提）。
+    # P1-4: writes produce WAL frames; after close() runs a TRUNCATE checkpoint the -wal file must be cleared (absent or 0 bytes).
+    # This verifies backups after shutdown only need meta.db, no -wal/-shm (scripts/backup.sh relies on this premise).
     art = _make_artifact()
     ver = _make_version(content="content for wal checkpoint test")
     storage.save_artifact_and_version(art, ver)
     wal_file = storage.db_path.parent / f"{storage.db_path.name}-wal"
-    # 写入后 -wal 可能存在且非空（WAL 模式未 checkpoint）
+    # After writes the -wal may exist and be non-empty (WAL mode, not yet checkpointed)
     assert storage.db_path.exists()
     storage.close()
-    # TRUNCATE 后 -wal 应为 0 字节或不存在
+    # After TRUNCATE the -wal must be 0 bytes or absent
     if wal_file.exists():
         assert wal_file.stat().st_size == 0
-    storage._conn = None  # 防止 fixture teardown 二次 close
+    storage._conn = None  # prevent a second close in fixture teardown
 
 
 def test_p14_disabled_checkpoint_no_thread():
-    # P1-4: wal_checkpoint_interval=0 禁用后台线程，_checkpoint_thread 应为 None。
+    # P1-4: wal_checkpoint_interval=0 disables the background thread; _checkpoint_thread must be None.
     tmp = Path(tempfile.mkdtemp())
     try:
         s = SQLiteStorage(tmp / "test.db", tmp / "content", wal_checkpoint_interval=0)
@@ -671,7 +671,7 @@ def test_p14_disabled_checkpoint_no_thread():
 
 
 def test_p18_save_artifact_and_version_two_phase_no_tmp_residue(storage):
-    # P1-8/H10: 大内容两阶段写——提交成功后 tmp rename 到最终路径，无 .tmp_ 残留。
+    # P1-8/H10: large content uses two-phase write — after a successful commit the tmp file is renamed to the final path, no .tmp_ residue.
     art = _make_artifact()
     big_content = "line\n" * 4000  # > small_content_limit (10KB)
     ver = _make_version(content=big_content)
@@ -679,24 +679,24 @@ def test_p18_save_artifact_and_version_two_phase_no_tmp_residue(storage):
     art_dir = storage.content_dir / art.id
     assert art_dir.exists()
     files = [p.name for p in art_dir.iterdir()] if art_dir.exists() else []
-    # 最终版本文件存在，无临时残留
+    # Final version file exists, no temporary residue
     assert any(f.startswith("v1.") for f in files), f"final content file missing: {files}"
     assert not any(".tmp_" in f for f in files), f"tmp residue left: {files}"
 
 
 def test_p18_save_artifact_and_version_rollback_cleans_tmp(storage):
-    # P1-8/H10: 事务失败时清理 tmp 文件，不留孤儿。
+    # P1-8/H10: the tmp file must be cleaned up when the transaction fails, no orphans left.
     art = _make_artifact()
-    ver = _make_version(content="big" * 5000)  # > 10KB 触发文件写
+    ver = _make_version(content="big" * 5000)  # > 10KB triggers file write
     storage.save_artifact_and_version(art, ver)
-    # 再次用相同 version_num=1 写入——UNIQUE(artifact_id, version_num) 冲突，
-    # _translate_sqlite_error 映射 IntegrityError，事务失败路径应清理 tmp。
-    dup_ver = _make_version(content="also big" * 5000)  # 同 artifact_id, version_num=1
+    # Write again with the same version_num=1 — UNIQUE(artifact_id, version_num) conflict;
+    # _translate_sqlite_error maps IntegrityError, and the failed-transaction path must clean up the tmp file.
+    dup_ver = _make_version(content="also big" * 5000)  # same artifact_id, version_num=1
     import sqlite3
     with pytest.raises(sqlite3.IntegrityError):
         storage.save_artifact_and_version(art, dup_ver)
     art_dir = storage.content_dir / art.id
     files = [p.name for p in art_dir.iterdir()] if art_dir.exists() else []
-    # 失败的 tmp 已清理，只留成功的 v1 文件
+    # The failed tmp is cleaned up, only the successful v1 file remains
     assert not any(".tmp_" in f for f in files), f"orphan tmp after rollback: {files}"
     assert sum(1 for f in files if f.startswith("v1.")) == 1

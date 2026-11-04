@@ -30,11 +30,11 @@ def engine(tmp_path):
     return ArtifactEngine(config=cfg)
 
 
-# ── metadata 函数索引 ────────────────────────────────────
+# ── metadata expression indexes ────────────────────────────────────
 
 
 def test_metadata_indexed_keys_filter_unsafe(storage):
-    # 不安全标识符（含空格/!）被过滤，仅建安全 key 的索引
+    # Unsafe identifiers (containing spaces/!) are filtered; indexes are created only for safe keys
     assert storage.metadata_indexed_keys == ["language", "framework"]
 
 
@@ -47,7 +47,7 @@ def test_metadata_indexes_created(storage):
     }
     assert "idx_meta_language" in idxs
     assert "idx_meta_framework" in idxs
-    # 不安全 key 不建索引
+    # No index created for unsafe keys
     assert not any("bad" in i for i in idxs)
 
 
@@ -63,21 +63,21 @@ def test_no_metadata_indexes_when_empty(tmp_path):
 
 
 def test_metadata_filter_uses_index(storage, tmp_path):
-    # P2-7/F6: metadata_filter 命中表达式索引。建产物 + 带 metadata。
+    # P2-7/F6: metadata_filter hits the expression index. Create artifacts with metadata attached.
     art = Artifact(
         id="art_x", session_id="s1", name="d.md", type="markdown", kind="document",
         current_version=1, summary="", created_at=1700000000.0, updated_at=1700000000.0,
         metadata={"language": "python", "framework": "fastapi"},
     )
     storage.save_artifact(art)
-    # list_artifacts 走 metadata_filter，命中索引列 language
+    # list_artifacts uses metadata_filter and hits the indexed language column
     found = storage.list_artifacts("s1", metadata_filter={"language": "python"})
     assert len(found) == 1 and found[0].id == "art_x"
     miss = storage.list_artifacts("s1", metadata_filter={"language": "rust"})
     assert miss == []
 
 
-# ── 游标编解码 ──────────────────────────────────────────
+# ── cursor encode/decode ──────────────────────────────────────────
 
 
 def test_decode_cursor_valid():
@@ -97,7 +97,7 @@ def test_decode_cursor_empty():
 
 
 def test_decode_cursor_id_with_no_colon_id():
-    # id 段无 ':' 时 partition tail 为空
+    # When the id segment has no ':', the partition tail is empty
     assert _decode_cursor("1.0:") == (1.0, "")
 
 
@@ -106,7 +106,7 @@ def test_encode_cursor_roundtrip():
     assert _decode_cursor(c) == (1700000000.5, "art_1")
 
 
-# ── keyset 分页 ─────────────────────────────────────────
+# ── keyset pagination ─────────────────────────────────────────
 
 
 def _seed_many(engine, n=25):
@@ -145,23 +145,23 @@ def test_keyset_order_desc(engine):
 
 def test_keyset_invalid_cursor_falls_back_offset(engine):
     _seed_many(engine, 25)
-    # 非法游标 → 回退 OFFSET 分页，page=1 取前 10
+    # Invalid cursor → fall back to OFFSET pagination, page=1 takes the first 10
     arts, _ = engine.list_all_artifacts(page_size=10, cursor="notfloat:x")
     assert len(arts) == 10
-    # 回退后等价第一页（最新 10 条）
+    # After fallback this is equivalent to the first page (10 newest)
     assert arts[0].id == "art_24"
 
 
 def test_keyset_unsupported_sort_falls_back(engine):
     _seed_many(engine, 25)
-    # name 排序不支持 keyset → 回退 OFFSET
+    # name ordering does not support keyset → fall back to OFFSET
     arts, _ = engine.list_all_artifacts(page_size=10, sort="name", cursor="1.0:art_24")
     assert len(arts) == 10
 
 
 def test_keyset_with_filter(engine):
     _seed_many(engine, 25)
-    # 仅取前 5 的 type 过滤，游标仍正确翻页
+    # With a type filter matching only 5 rows, cursor paging still works correctly
     page1, total = engine.list_all_artifacts(
         filters={"type": "markdown"}, page_size=3
     )
@@ -197,7 +197,7 @@ async def test_rpc_next_cursor_none_on_last_page(engine):
     _seed_many(engine, 5)
     handler = RPCHandler(engine)
     res = await handler.dispatch("artifact.list_all", {"page_size": 10})
-    # 不足一页 → 无下一页游标
+    # Fewer than one page → no next-page cursor
     assert res["next_cursor"] is None
 
 
@@ -208,15 +208,15 @@ async def test_rpc_next_cursor_none_unsupported_sort(engine):
     res = await handler.dispatch(
         "artifact.list_all", {"page_size": 10, "sort": "name"}
     )
-    # name 排序不支持 keyset → next_cursor None
+    # name ordering does not support keyset → next_cursor None
     assert res["next_cursor"] is None
 
 
-# ── ABC 契约 ────────────────────────────────────────────
+# ── ABC contract ────────────────────────────────────────────
 
 
 def test_abc_signature_has_cursor():
-    # list_all_artifacts ABC 含 cursor 参数（H8 swap point 契约）
+    # The list_all_artifacts ABC carries the cursor parameter (H8 swap-point contract)
     sig = StorageDriver.list_all_artifacts
     import inspect
     params = inspect.signature(sig).parameters

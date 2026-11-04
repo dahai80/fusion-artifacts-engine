@@ -25,7 +25,7 @@ def test_write_read_chunked_roundtrip_small(tmp_path):
 
 
 def test_write_read_chunked_roundtrip_large(tmp_path):
-    # 3MB 内容跨多个 1MB 分块
+    # 3MB of content spans multiple 1MB chunks
     p = tmp_path / "big.txt"
     payload = "x" * (3 * 1024 * 1024) + "END"
     _write_text_chunked(p, payload)
@@ -33,8 +33,8 @@ def test_write_read_chunked_roundtrip_large(tmp_path):
 
 
 def test_write_read_chunked_multibyte_boundary(tmp_path):
-    # 多字节 UTF-8 字符恰好跨块边界（encode 后 1MB 边界落在字符中间）
-    # 分块以 encode 后字节切，decode 整体一次，不应产生 UnicodeDecodeError
+    # A multi-byte UTF-8 character lands exactly on a chunk boundary (after encoding, the 1MB boundary falls mid-character)
+    # Chunking splits encoded bytes; decoding happens once over the whole, so no UnicodeDecodeError should occur
     p = tmp_path / "mb.txt"
     payload = "界" * (1024 * 1024) + "tail"
     _write_text_chunked(p, payload)
@@ -42,7 +42,7 @@ def test_write_read_chunked_multibyte_boundary(tmp_path):
 
 
 def test_write_chunked_disk_full_maps_resource_limit(tmp_path, monkeypatch):
-    # 模拟 ENOSPC：open 写入时抛 OSError(ENOSPC) → ResourceLimitError，并删临时文件
+    # Simulate ENOSPC: open raises OSError(ENOSPC) on write → ResourceLimitError, and the temp file is removed
     import errno as _errno
 
     from fusion_artifacts_engine.rpc.errors import ResourceLimitError
@@ -63,7 +63,7 @@ def test_write_chunked_disk_full_maps_resource_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "open", fake_open)
     with pytest.raises(ResourceLimitError):
         _write_text_chunked(p, "big" * 1024)
-    # 临时文件被清理
+    # Temp file cleaned up
     assert not p.exists()
 
 
@@ -71,7 +71,7 @@ def test_write_chunked_disk_full_maps_resource_limit(tmp_path, monkeypatch):
 
 
 def test_storage_large_content_roundtrip(tmp_path):
-    # 走真实 _write_content_file / _read_content_file（分块），>small_content_limit 落盘
+    # Exercise the real _write_content_file / _read_content_file (chunked); content >small_content_limit hits disk
     st = SQLiteStorage(
         db_path=tmp_path / "m.db",
         content_dir=tmp_path / "c",
@@ -87,7 +87,7 @@ def test_storage_large_content_roundtrip(tmp_path):
 
 
 def test_server_sse_event_size_cap_drops_oversized(tmp_path):
-    # F5: 单事件序列化超 sse_max_event_bytes 被丢弃，不写流
+    # F5: a single event whose serialization exceeds sse_max_event_bytes is dropped, never written to the stream
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts",
@@ -107,7 +107,7 @@ def test_server_sse_event_size_cap_drops_oversized(tmp_path):
         ) as resp:
             assert resp.status_code == 200
             time.sleep(0.3)
-            # 大 payload 事件（远超 256B cap）
+            # Large-payload event (far beyond the 256B cap)
             big_payload = {"marker": "big", "blob": "Z" * 5000}
             httpx.post(
                 "http://127.0.0.1:19920/",
@@ -119,7 +119,7 @@ def test_server_sse_event_size_cap_drops_oversized(tmp_path):
                 },
                 timeout=5.0,
             )
-            # 小事件应正常投递
+            # Small events should still be delivered
             httpx.post(
                 "http://127.0.0.1:19920/",
                 json={
@@ -141,9 +141,9 @@ def test_server_sse_event_size_cap_drops_oversized(tmp_path):
     except (httpx.ConnectError, httpx.TimeoutException, OSError):
         pass
 
-    # 小事件投递
+    # Small event delivered
     assert b"small.event" in received, "small SSE event within cap must be delivered"
-    # 大事件被丢弃
+    # Large event dropped
     assert b"big.event" not in received, "oversized SSE event must be dropped by cap"
 
     server.stop()
@@ -152,7 +152,7 @@ def test_server_sse_event_size_cap_drops_oversized(tmp_path):
 
 
 def test_server_sse_event_size_cap_zero_unlimited(tmp_path):
-    # F5: sse_max_event_bytes=0 不限，大事件照常投递
+    # F5: sse_max_event_bytes=0 means unlimited; large events are delivered as usual
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts",

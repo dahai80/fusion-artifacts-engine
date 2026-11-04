@@ -557,14 +557,14 @@ def test_context_budget_warning_high_utilization(rpc_server):
 
 
 def test_list_all_bad_page_returns_invalid_params(rpc_server):
-    # P1-5: list_all 直传 params（无 int()），storage _clamp_pagination 把非 int 兜底为默认——
-    # 不报错，防御性成功。验证不崩溃且返回正常结构。
+    # P1-5: list_all passes params straight through (no int()); storage _clamp_pagination falls back to defaults for non-int —
+    # no error, defensive success. Verify it does not crash and returns a normal structure.
     r = rpc("artifact.list_all", {"page": "abc", "page_size": "xyz"})
     assert "artifacts" in r["result"]
 
 
 def test_list_versions_bad_page_returns_invalid_params(rpc_server):
-    # P1-5: version_list 用 int(params.get("page"))，非 int → ValueError → dispatch 捕获转 -32602。
+    # P1-5: version_list uses int(params.get("page")); non-int → ValueError → dispatch catches and converts to -32602.
     r = rpc(
         "artifact.create",
         {"session_id": "s_pg", "name": "pg.py", "type": "code", "content": "x"},
@@ -575,13 +575,13 @@ def test_list_versions_bad_page_returns_invalid_params(rpc_server):
 
 
 def test_list_all_huge_page_size_clamped(rpc_server):
-    # P1-5: page_size 远超 500 时 storage _clamp_pagination 截到 500，不报错。
+    # P1-5: when page_size far exceeds 500, storage _clamp_pagination clamps to 500 without error.
     r = rpc("artifact.list_all", {"page": 1, "page_size": 99999})
     assert "artifacts" in r["result"]
 
 
 def test_rest_list_bad_page_returns_400(rpc_server):
-    # P1-5: REST /api/v1/artifacts 非 int page → 400 而非 500。
+    # P1-5: REST /api/v1/artifacts with a non-int page → 400 instead of 500.
     resp = httpx.get(
         f"http://127.0.0.1:{PORT}/api/v1/artifacts",
         params={"page": "abc"},
@@ -591,7 +591,7 @@ def test_rest_list_bad_page_returns_400(rpc_server):
 
 
 def test_rest_list_huge_page_size_ok(rpc_server):
-    # P1-5: REST 大 page_size 截到 500，200 OK。
+    # P1-5: REST with a large page_size is clamped to 500, 200 OK.
     resp = httpx.get(
         f"http://127.0.0.1:{PORT}/api/v1/artifacts",
         params={"page": "1", "page_size": "99999"},
@@ -601,7 +601,7 @@ def test_rest_list_huge_page_size_ok(rpc_server):
 
 
 def test_jsonrpc_response_has_request_id_header(rpc_server):
-    # P1-3: JSON-RPC 响应必须回写 X-Request-ID，客户端可凭此查服务端日志。
+    # P1-3: JSON-RPC responses must echo X-Request-ID so clients can look up server logs with it.
     resp = httpx.post(
         f"http://127.0.0.1:{PORT}",
         json={"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 1},
@@ -613,7 +613,7 @@ def test_jsonrpc_response_has_request_id_header(rpc_server):
 
 
 def test_rest_response_has_request_id_header(rpc_server):
-    # P1-3: REST 响应同样回写 X-Request-ID。
+    # P1-3: REST responses echo X-Request-ID the same way.
     resp = httpx.get(
         f"http://127.0.0.1:{PORT}/api/v1/artifacts",
         params={"page": "1", "page_size": "20"},
@@ -625,7 +625,7 @@ def test_rest_response_has_request_id_header(rpc_server):
 
 
 def test_request_id_unique_per_request(rpc_server):
-    # P1-3: 每请求独立 uuid4，两次请求 ID 不同。
+    # P1-3: each request gets its own uuid4; two requests must have different IDs.
     r1 = httpx.post(
         f"http://127.0.0.1:{PORT}",
         json={"jsonrpc": "2.0", "method": "ping", "params": {}, "id": 1},

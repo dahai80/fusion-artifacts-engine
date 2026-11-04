@@ -25,7 +25,7 @@ def env():
 
 
 async def test_remix_creates_child_with_lineage(env):
-    # #77: remix 派生副本 — parent_artifact_id 血统 + 内容复制为独立产物
+    # #77: remix derived copy — parent_artifact_id lineage + content copied as an independent artifact
     art, _, _ = await env.create_artifact(
         session_id="s1", name="board v1", artifact_type="html", content="<h1>kanban</h1>"
     )
@@ -34,10 +34,10 @@ async def test_remix_creates_child_with_lineage(env):
     assert child.parent_artifact_id == art.id
     assert child.id != art.id
     assert "remix" in child.name
-    # 持久化后血统仍在
+    # Lineage survives persistence
     got = env.storage.get_artifact(child.id)
     assert got.parent_artifact_id == art.id
-    # 内容复制到 v1
+    # Content copied into v1
     ver = env.get_version_content(child.id)
     assert ver.content == "<h1>kanban</h1>"
 
@@ -56,7 +56,7 @@ async def test_share_permission_default_view(env):
 
 
 async def test_share_permission_upsert_same_link(env):
-    # #77: 同链接改权限 — 重复 create_share 换 permission，share_id 不变
+    # #77: permission change on the same link — repeated create_share swaps permission, share_id unchanged
     art, _, _ = await env.create_artifact(
         session_id="s1", name="doc", artifact_type="markdown", content="# hi"
     )
@@ -64,7 +64,7 @@ async def test_share_permission_upsert_same_link(env):
     s2 = env.create_share(art.id, created_by=None, permission="remix")
     assert s2.share_id == s1.share_id
     assert s2.permission == "remix"
-    # 存储层已更新
+    # Storage layer updated
     got = env.storage.get_share(s1.share_id)
     assert got.permission == "remix"
 
@@ -94,7 +94,7 @@ def test_share_model_permission_validator():
 
 
 def test_migration_adds_columns_to_existing_db():
-    # #77: 既有 DB（无新列）升级 — 迁移幂等补列
+    # #77: existing DB (without the new columns) upgrade — migration idempotently adds columns
     tmp = Path(tempfile.mkdtemp())
     try:
         db = tmp / "meta.db"
@@ -122,7 +122,7 @@ def test_migration_adds_columns_to_existing_db():
         )
         conn.commit()
         conn.close()
-        # 打开即触发迁移
+        # Opening triggers the migration
         storage = SQLiteStorage(db_path=db, content_dir=tmp / "content")
         cur = storage._conn.execute("PRAGMA table_info(artifacts)").fetchall()
         cols = {r["name"] for r in cur}
@@ -130,7 +130,7 @@ def test_migration_adds_columns_to_existing_db():
         cur = storage._conn.execute("PRAGMA table_info(artifact_shares)").fetchall()
         scols = {r["name"] for r in cur}
         assert "permission" in scols
-        # 旧行读取不炸，parent 为 None，share 默认 view
+        # Old rows read without error, parent is None, share defaults to view
         art = storage.get_artifact("art_old")
         assert art.parent_artifact_id is None
         storage.close()
