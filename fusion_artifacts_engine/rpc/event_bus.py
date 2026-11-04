@@ -18,7 +18,7 @@ class EventBus:
         self._closed = False
 
     def subscribe(self) -> queue.Queue:
-        # C-7: 订阅者上限，防无界增长耗内存
+        # C-7: subscriber cap, prevents unbounded memory growth
         q = queue.Queue(maxsize=self._maxsize)
         with self._lock:
             if self._closed:
@@ -42,7 +42,7 @@ class EventBus:
         logger.info("EventBus subscriber removed, total=%d", len(self._subscribers))
 
     def publish(self, event_type: str, data: dict) -> None:
-        # P-5: 锁内只快照订阅者列表，释放锁后再 put，避免 put 阻塞期间持锁
+        # P-5: snapshot the subscriber list inside the lock only; put after releasing the lock so a blocking put never holds the lock
         with self._lock:
             if self._closed:
                 return
@@ -52,9 +52,9 @@ class EventBus:
             try:
                 q.put_nowait({"event_type": event_type, **data})
             except queue.Full:
-                # A-3: 队列满删除前先投递 __dropped__ 信号，让 SSE handler 关流促客户端重连。
-                # P0-6: 队列已满时 put_nowait(EVENT_DROPPED) 也必 Full——先 get_nowait 腾槽再投，
-                # 否则信号静默丢失，SSE 永不关流。
+                # A-3: before dropping a full queue, deliver the __dropped__ signal so the SSE handler closes the stream and the client reconnects.
+                # P0-6: with the queue full, put_nowait(EVENT_DROPPED) would hit Full too — get_nowait first to free a slot,
+                # otherwise the signal is silently lost and the SSE stream never closes.
                 try:
                     q.get_nowait()
                 except queue.Empty:
@@ -75,7 +75,7 @@ class EventBus:
             )
 
     def shutdown(self) -> None:
-        # A-4: 优雅停机——向所有订阅者投递 __closed__ 信号，SSE handler 收到即关流
+        # A-4: graceful shutdown — deliver the __closed__ signal to all subscribers; the SSE handler closes the stream on receipt
         with self._lock:
             if self._closed:
                 return
@@ -90,6 +90,6 @@ class EventBus:
         logger.info("EventBus shutdown: notified %d subscriber(s)", len(snapshot))
 
     def is_closed(self) -> bool:
-        # 运维5: /readyz 探针依赖——EventBus 关闭后判定 not ready
+        # Ops-5: /readyz probe dependency — reports not ready once the EventBus is closed
         with self._lock:
             return self._closed

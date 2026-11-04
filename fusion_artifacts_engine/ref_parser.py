@@ -24,7 +24,7 @@ def parse_refs_from_message(content: str) -> list[ArtifactRef]:
             ver = str(int(ver))
         except ValueError:
             pass
-        # L-19: 单条引用解析失败不丢整条消息的其余引用
+        # L-19: one reference failing to parse must not drop the rest of the message's references
         try:
             refs.append(
                 ArtifactRef(

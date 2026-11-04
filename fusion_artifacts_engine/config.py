@@ -13,7 +13,8 @@ _DEFAULT_CONFIG_PATH = _PACKAGE_DIR / "default_config.yaml"
 
 
 def _default_user_config_path() -> Path:
-    # M-1: 不在 import 时捕获 env，每次 load_config 实时读，避免长进程轮换配置失效
+    # M-1: do not capture env at import time; read live on each load_config so long-running
+    # processes pick up config rotation
     return Path(
         os.environ.get(
             "FUSION_ARTIFACTS_CONFIG",
@@ -32,18 +33,19 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         logger.debug("Config file not found: %s", path)
         return {}
     except yaml.YAMLError as e:
-        # C-14: YAML 解析失败不再静默回退到 fail-open 默认，直接 raise
+        # C-14: YAML parse failure no longer silently falls back to fail-open defaults; raise directly
         logger.error("Failed to parse config %s: %s", path, e)
         raise RuntimeError(f"Invalid YAML config {path}: {e}") from e
 
 
 def _expanduser_path(v: str) -> Path:
-    # L-23: env 与 YAML 路径统一展开 ~
+    # L-23: expand ~ uniformly for env and YAML paths
     return Path(os.path.expanduser(v))
 
 
 def _parse_bool(v: str) -> bool:
-    # P1-12: env bool 解析——接受 true/false/1/0/yes/no（大小写不敏感），非法值 raise 触发 env_map 警告
+    # P1-12: env bool parsing - accepts true/false/1/0/yes/no (case-insensitive); invalid values
+    # raise to trigger the env_map warning
     s = v.strip().lower()
     if s in ("true", "1", "yes", "on"):
         return True
@@ -53,10 +55,11 @@ def _parse_bool(v: str) -> bool:
 
 
 def _resolve_contract_env() -> dict[str, Any]:
-    # #69 (config Phase 2.2): 契约变量 FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR
-    # 经 fusion_core.config 单点解析（config-conventions §1/§2）。fusion_core 是
-    # monorepo 兄弟包、隔离 CI 中缺失——回退到语义等价的仓内解析（同 dsl_parser
-    # 的 _fallback_validate_dsl 模式），两路径行为一致。
+    # #69 (config Phase 2.2): contract vars FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR
+    # are resolved via fusion_core.config as the single point (config-conventions §1/§2).
+    # fusion_core is a monorepo sibling package and may be missing in isolated CI - fall back to a
+    # semantically equivalent in-repo resolution (same pattern as dsl_parser's
+    # _fallback_validate_dsl); both paths behave identically.
     overrides: dict[str, Any] = {}
     raw_port = os.environ.get("FUSION_ARTIFACTS_PORT", "")
     if raw_port:
@@ -79,14 +82,16 @@ def _resolve_contract_env() -> dict[str, Any]:
         except ImportError:
             overrides["storage_root"] = _expanduser_path(raw_dir)
         else:
-            # fusion_core 不展开 ~（上游 gap），仓内统一展开保持与 STORAGE_ROOT 一致
+            # fusion_core does not expand ~ (upstream gap); expand in-repo to stay consistent
+            # with STORAGE_ROOT
             overrides["storage_root"] = _expanduser_path(str(service_data_dir("artifacts", default=raw_dir)))
     return overrides
 
 
 def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
-    # A-9: yaml section.key -> model field 的映射集中在此表，新增字段只改一处。
-    # 路径类值经 _expanduser_path 展开 ~；空字符串 sync_root 归一为 None。
+    # A-9: the yaml section.key -> model field mapping is centralized in this one table;
+    # new fields only touch this. Path values are ~-expanded via _expanduser_path;
+    # empty sync_root normalizes to None.
     section_map: dict[str, dict[str, tuple[str, Any | None]]] = {
         "server": {
             "host": ("server_host", None),
@@ -184,8 +189,9 @@ def _flatten_yaml_config(data: dict[str, Any]) -> dict[str, Any]:
             if yaml_key not in section_data:
                 continue
             val = section_data[yaml_key]
-            # 空字符串归一为 None：路径类缺省值由代码推导（sync_root 禁用 /
-            # gateway_key_file 用 storage_root 默认 / ipc_design_dir 用 convention 目录）
+            # Empty string normalizes to None: path defaults are derived in code (sync_root
+            # disabled / gateway_key_file uses storage_root default / ipc_design_dir uses the
+            # convention dir)
             if (
                 field_name in ("sync_root", "gateway_key_file", "ipc_design_dir", "ipc_office_dir")
                 and not val
@@ -207,12 +213,13 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
     env_overrides: dict[str, Any] = {}
     env_map = {
         "FUSION_ARTIFACTS_HOST": ("server_host", str),
-        # FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR 契约变量在
-        # _resolve_contract_env (#69) 中经 fusion_core 单点解析，不再走 env_map。
-        # L-23: env STORAGE_ROOT 也展开 ~。#69 后为 legacy 别名，优先用 DATA_DIR。
+        # FUSION_ARTIFACTS_PORT / FUSION_ARTIFACTS_DATA_DIR contract vars are resolved
+        # via fusion_core in _resolve_contract_env (#69), no longer through env_map.
+        # L-23: env STORAGE_ROOT is also ~-expanded. Legacy alias after #69; prefer DATA_DIR.
         "FUSION_ARTIFACTS_STORAGE_ROOT": ("storage_root", _expanduser_path),
         "FUSION_ARTIFACTS_API_KEY": ("api_key", str),
-        # P1-12/M22: 运维可调项 env 覆盖补全——容器/多节点部署不依赖改 YAML 即可调参
+        # P1-12/M22: ops-tunable env override completion - container/multi-node deployments
+        # can tune parameters without editing YAML
         "FUSION_ARTIFACTS_MAX_WORKERS": ("server_max_workers", int),
         "FUSION_ARTIFACTS_RATE_LIMIT_RPS": ("rate_limit_rps", float),
         "FUSION_ARTIFACTS_RATE_LIMIT_BURST": ("rate_limit_burst", int),
@@ -221,15 +228,15 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
         "FUSION_ARTIFACTS_METRICS_ENABLED": ("metrics_enabled", _parse_bool),
         "FUSION_ARTIFACTS_METRICS_TOKEN": ("metrics_token", str),
         "FUSION_ARTIFACTS_DISK_WARNING_PCT": ("disk_space_warning_pct", int),
-        # P1-4: WAL checkpoint 间隔 env 覆盖
+        # P1-4: WAL checkpoint interval env override
         "FUSION_ARTIFACTS_WAL_CHECKPOINT_INTERVAL": ("wal_checkpoint_interval", int),
         "FUSION_ARTIFACTS_SSE_MAX_LIFETIME": ("sse_max_lifetime", int),
         "FUSION_ARTIFACTS_SSE_MAX_EVENT_BYTES": ("sse_max_event_bytes", int),
         "FUSION_ARTIFACTS_SSE_MAX_CONNECTIONS": ("sse_max_connections", int),
-        # P2-5: OTel tracing env 覆盖
+        # P2-5: OTel tracing env override
         "FUSION_ARTIFACTS_TRACING_ENABLED": ("tracing_enabled", _parse_bool),
         "FUSION_ARTIFACTS_TRACING_SERVICE_NAME": ("tracing_service_name", str),
-        # #75: web-shell 集成 env 覆盖
+        # #75: web-shell integration env override
         "FUSION_ARTIFACTS_GATEWAY_ENABLED": ("gateway_enabled", _parse_bool),
         "FUSION_ARTIFACTS_GATEWAY_URL": ("gateway_url", str),
         "FUSION_ARTIFACTS_GATEWAY_MODULE_ID": ("gateway_module_id", str),
@@ -239,16 +246,16 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
             "gateway_heartbeat_interval",
             int,
         ),
-        # #83: 公开 share 页面 base URL（空=按 server host/port 推导）
+        # #83: public share page base URL (empty = derived from server host/port)
         "FUSION_ARTIFACTS_SHARE_PUBLIC_BASE_URL": ("share_public_base_url", str),
-        # #84: fusion-design save_artifact file-IPC 消费
+        # #84: fusion-design save_artifact file-IPC consumption
         "FUSION_ARTIFACTS_IPC_ENABLED": ("ipc_enabled", _parse_bool),
         "FUSION_ARTIFACTS_IPC_DESIGN_DIR": ("ipc_design_dir", _expanduser_path),
         "FUSION_ARTIFACTS_IPC_POLL_INTERVAL": ("ipc_poll_interval", float),
-        # v0.7.0: fusion-office 文件摄取 (docx/xlsx/pptx → 分段 markdown)
+        # v0.7.0: fusion-office file ingest (docx/xlsx/pptx -> sectioned markdown)
         "FUSION_ARTIFACTS_IPC_OFFICE_ENABLED": ("ipc_office_enabled", _parse_bool),
         "FUSION_ARTIFACTS_IPC_OFFICE_DIR": ("ipc_office_dir", _expanduser_path),
-        # v0.7.1 #91: 滚动摘要 + RAG 归档
+        # v0.7.1 #91: rolling summary + RAG archival
         "FUSION_ARTIFACTS_LC_SUMMARY_THRESHOLD": ("long_context_summary_threshold", int),
         "FUSION_ARTIFACTS_LC_RAG_ENABLED": ("long_context_rag_enabled", _parse_bool),
         "FUSION_ARTIFACTS_LC_MLX_URL": ("long_context_mlx_url", None),
@@ -265,8 +272,9 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
 
     merged.update(env_overrides)
 
-    # #69: 契约变量（PORT/DATA_DIR）后应用——优先级高于 legacy STORAGE_ROOT；
-    # STORAGE_ROOT 迁移期保留（config-conventions §6），设值时告警指路 DATA_DIR。
+    # #69: contract vars (PORT/DATA_DIR) applied afterwards - higher priority than legacy
+    # STORAGE_ROOT; STORAGE_ROOT kept during migration (config-conventions §6); setting it
+    # warns and points to DATA_DIR.
     merged.update(_resolve_contract_env())
     if os.environ.get("FUSION_ARTIFACTS_STORAGE_ROOT", ""):
         logger.warning(
@@ -274,14 +282,16 @@ def load_config(user_config_path: Path | None = None) -> "ArtifactEngineConfig":
             "(config-conventions §1, issue #69)"
         )
 
-    # 丢弃用户配置中模型已不存在的 stale key，避免 extra="forbid" 抛错 (P2-18)。
+    # Strip stale keys no longer present on the model from user config, avoiding
+    # extra="forbid" errors (P2-18).
     valid_fields = set(ArtifactEngineConfig.model_fields.keys())
     stale_keys = [k for k in merged if k not in valid_fields]
     for stale in stale_keys:
         logger.warning("Stripping stale config key: %s", stale)
         merged.pop(stale, None)
 
-    # L-21: 不再 pop/reassign 绕过 pydantic 校验，host/port 一并经 model 构造校验
+    # L-21: no longer pop/reassign to bypass pydantic validation; host/port are validated
+    # via model construction too
     return ArtifactEngineConfig(**merged)
 
 
@@ -296,92 +306,116 @@ class ArtifactEngineConfig(BaseModel):
     artifact_id_prefix: str = Field(default="art_")
     server_host: str = Field(default="127.0.0.1")
     server_port: int = Field(default=11451)
-    # R1: HTTP 线程池上限，0=不限（回退 ThreadingMixIn 默认）。防 SSE/并发耗尽线程
+    # R1: HTTP thread-pool cap, 0 = unlimited (falls back to ThreadingMixIn default).
+    # Prevents SSE/concurrency from exhausting threads
     server_max_workers: int = Field(default=64)
     recycle_retention_days: int = Field(default=7)
-    # L-6: share expires_at 最大 TTL（天），0=不限；过去日期一律拒绝
+    # L-6: max share expires_at TTL (days), 0 = unlimited; past dates are always rejected
     share_max_ttl_days: int = Field(default=90)
-    # C-4: 默认 fail-closed，无 api_key 时拒绝请求。本地单机可显式 allow_no_auth=true
+    # C-4: fail-closed by default; requests without api_key are rejected. Local single-user
+    # setups may set allow_no_auth=true explicitly
     allow_no_auth: bool = Field(default=False)
     api_key: str | None = Field(default=None)
     sse_heartbeat_interval: int = Field(default=30)
-    # P1-7/M7: SSE 单连接最大存活秒。0=不限。超时后服务端主动关流促客户端重连，
-    # 防僵尸长连接占线程。生产建议 3600（1h），客户端应实现自动重连。
+    # P1-7/M7: max SSE single-connection lifetime in seconds. 0 = unlimited. After timeout
+    # the server closes the stream proactively to prompt client reconnect, preventing zombie
+    # long-lived connections from hogging threads. Production recommends 3600 (1h);
+    # clients should implement auto-reconnect.
     sse_max_lifetime: int = Field(default=3600)
-    # F5: SSE 单事件序列化后字节上限。超限事件被丢弃（仅记日志），防大 payload
-    # 长时间阻塞单连接线程 + 客户端缓冲爆炸。0=不限（向后兼容）。
+    # F5: max serialized byte size per SSE event. Oversized events are dropped (log only),
+    # preventing large payloads from blocking a connection thread long-term plus client
+    # buffer blowup. 0 = unlimited (backward compatible).
     sse_max_event_bytes: int = Field(default=262144)
-    # P2-1/F1/H3: SSE 独立并发上限。SSE 握手后释放 RPC worker 信号量、占用此专用信号量，
-    # 使长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
-    # 默认 16：本地单机足够（fusion-studio 通常 1-2 个 SSE）；0=不设独立上限（回退旧行为，不推荐）。
+    # P2-1/F1/H3: dedicated SSE concurrency cap. After the SSE handshake the RPC worker
+    # semaphore is released and this dedicated semaphore held, so long-lived connections no
+    # longer monopolize the 64 RPC threads - 64 SSE clients no longer saturate the backend
+    # causing new RPCs to all 503. Default 16: enough for local single-machine
+    # (fusion-studio typically 1-2 SSE); 0 = no dedicated cap (old behavior, not recommended).
     sse_max_connections: int = Field(default=16)
     context_budget_default: int = Field(default=200000)
-    # C-1: sync_artifact_file 文件读写根目录，路径必须在其下
+    # C-1: root dir for sync_artifact_file reads/writes; paths must stay under it
     sync_root: Path | None = Field(default=None)
-    # R9: 单 artifact 版本上限，0=不限；超限淘汰最旧非快照版本（防磁盘无限增长）
+    # R9: per-artifact version cap, 0 = unlimited; over the cap the oldest non-snapshot
+    # version is evicted (prevents unbounded disk growth)
     max_versions_per_artifact: int = Field(default=100)
-    # P0-5/H9: 单版本内容字节上限，0=不限；超限拒绝写入防 OOM/磁盘耗尽
+    # P0-5/H9: per-version content byte cap, 0 = unlimited; over the cap writes are rejected
+    # to prevent OOM/disk exhaustion
     max_content_bytes: int = Field(default=0)
-    # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限；超限拒绝写入
+    # P0-5/H9: per-artifact metadata JSON byte cap, 0 = unlimited; over the cap writes are rejected
     max_metadata_bytes: int = Field(default=0)
-    # P0-5/H6: emit_event payload JSON 字节上限，默认 64KB；超限拒绝写入防事件总线放大
+    # P0-5/H6: emit_event payload JSON byte cap, default 64KB; over the cap writes are
+    # rejected to prevent event-bus amplification
     max_event_payload_bytes: int = Field(default=65536)
-    # R9: 磁盘水位告警百分比（0-100），0=禁用监控。写前预检 + log warning。
-    # 字段默认 0（禁用，单元测试不依赖宿主机磁盘状态）；生产经 default_config.yaml 设 90。
+    # R9: disk usage warning percentage (0-100), 0 = disables monitoring. Pre-write check
+    # plus log warning. Field default 0 (disabled, so unit tests do not depend on host disk
+    # state); production sets 90 via default_config.yaml.
     disk_space_warning_pct: int = Field(default=0)
-    # P1-4: WAL 周期 checkpoint 间隔秒。0=禁用后台 checkpoint（依赖 SQLite 默认 1000 页自动）。
-    # 生产建议 300——后台 PASSIVE checkpoint 控制 -wal 文件增长，配合 backup.sh 在线备份。
+    # P1-4: WAL periodic checkpoint interval in seconds. 0 = disables background checkpoint
+    # (relies on SQLite default 1000-page auto checkpoint). Production recommends 300 -
+    # background PASSIVE checkpoint controls -wal file growth, paired with backup.sh online backup.
     wal_checkpoint_interval: int = Field(default=300)
-    # 运维1: 令牌桶限流。rps=0 表示不限流（默认）。default 桶覆盖 JSON-RPC + 鉴权 REST
+    # Ops-1: token-bucket rate limiting. rps=0 means unlimited (default). The default bucket
+    # covers JSON-RPC + authenticated REST
     rate_limit_rps: float = Field(default=0)
     rate_limit_burst: int = Field(default=0)
-    # 运维1: 公开 share 端点独立配额（无鉴权，易刷量，须独立桶）
+    # Ops-1: isolated quota for public share endpoints (unauthenticated, easily abused,
+    # needs its own bucket)
     public_rate_limit_rps: float = Field(default=0)
     public_rate_limit_burst: int = Field(default=0)
-    # 运维2: Prometheus /metrics 端点开关
+    # Ops-2: Prometheus /metrics endpoint switch
     metrics_enabled: bool = Field(default=True)
-    # LOW-4: /metrics 可选 token 鉴权。设值后 /metrics 要求 X-Metrics-Token 头匹配（常量时间比较）。
-    # 留空=不鉴权（依赖 127.0.0.1 绑定的本机隔离）。暴露 0.0.0.0 时必须设值，否则运维指标泄露。
+    # LOW-4: optional token auth for /metrics. When set, /metrics requires a matching
+    # X-Metrics-Token header (constant-time compare). Empty = no auth (relies on the
+    # 127.0.0.1 binding for local isolation). Must be set when exposing 0.0.0.0, otherwise
+    # ops metrics leak.
     metrics_token: str | None = Field(default=None)
-    # P2-5/H12(trace)/M20: OTel 分布式追踪开关。默认 false——local-first 单租户无需追踪，
-    # 且 opentelemetry-sdk 为可选依赖（[otel] extra）。enabled=true 时若未装 SDK 则 no-op + WARN。
+    # P2-5/H12(trace)/M20: OTel distributed tracing switch. Default false - local-first
+    # single-tenant needs no tracing, and opentelemetry-sdk is an optional dependency
+    # ([otel] extra). With enabled=true and the SDK missing it is a no-op + WARN.
     tracing_enabled: bool = Field(default=False)
     tracing_service_name: str = Field(default="fusion-artifacts-engine")
-    # P2-7/F6: metadata 高频过滤字段名。对每个 key 建 json_extract 表达式索引，
-    # 使 metadata_filter 不再全表扫。空列表=不建索引（向后兼容）。仅含安全标识符字符。
+    # P2-7/F6: high-frequency metadata filter field names. Builds a json_extract expression
+    # index per key so metadata_filter no longer does full table scans. Empty list = no
+    # indexes (backward compatible). Only safe identifier characters allowed.
     metadata_indexed_keys: list[str] = Field(default_factory=list)
-    # #75: web-shell 集成——向 fusion-gateway 自注册 shell manifest + 周期心跳。
-    # enabled=false（默认）零开销；enabled=true 且 api_key 已配置时启动注册/心跳线程。
+    # #75: web-shell integration - self-register the shell manifest to fusion-gateway plus
+    # periodic heartbeat. enabled=false (default) zero overhead; enabled=true and api_key
+    # configured starts the registration/heartbeat thread.
     gateway_enabled: bool = Field(default=False)
     gateway_url: str = Field(default="http://127.0.0.1:11432")
     gateway_module_id: str = Field(default="fusion-artifacts")
-    # 首次注册引导用（gateway web_shell.admin_key）；注册成功后凭引擎自身 api_key
-    # 完成心跳与 #369 self-heal 再注册，admin_key 可从配置中移除。
+    # For first-registration bootstrap only (gateway web_shell.admin_key); after successful
+    # registration the engine's own api_key handles heartbeat and #369 self-heal
+    # re-registration, and admin_key can be removed from config.
     gateway_admin_key: str | None = Field(default=None)
-    # #82: gateway 签发的 fm- service key 持久化文件（空=storage_root/gateway_service_key）
+    # #82: persistence file for the gateway-issued fm- service key (empty =
+    # storage_root/gateway_service_key)
     gateway_key_file: str | None = Field(default=None)
     gateway_heartbeat_interval: int = Field(default=15)
-    # #83: 公开 share 页面 base URL（空=按 server host/port 推导）
+    # #83: public share page base URL (empty = derived from server host/port)
     share_public_base_url: str = Field(default="")
-    # #84: fusion-design save_artifact file-IPC 消费（目录缺省=~/.fusion-design/fusion-artifacts-engine）
+    # #84: fusion-design save_artifact file-IPC consumption (dir default =
+    # ~/.fusion-design/fusion-artifacts-engine)
     ipc_enabled: bool = Field(default=True)
     ipc_design_dir: str | None = Field(default=None)
     ipc_poll_interval: float = Field(default=3.0)
-    # v0.7.0: fusion-office 文件摄取（目录缺省=~/.fusion-office/fusion-artifacts-engine）
+    # v0.7.0: fusion-office file ingest (dir default = ~/.fusion-office/fusion-artifacts-engine)
     ipc_office_enabled: bool = Field(default=True)
     ipc_office_dir: str | None = Field(default=None)
-    # v0.7.1 #91: 分层上下文压缩——滚动摘要（fusion-mlx）+ 旧版本归档（fusion-rag）
+    # v0.7.1 #91: layered context compaction - rolling summary (fusion-mlx) plus
+    # old-version archival (fusion-rag)
     long_context_summary_threshold: int = Field(default=5)
     long_context_summary_model: str = Field(default="")
     long_context_mlx_url: str = Field(default="http://127.0.0.1:11434")
     long_context_mlx_api_key: str = Field(default="")
     long_context_rag_enabled: bool = Field(default=True)
-    # /kb 前缀是 fusion-rag 应用层路由（openapi: /kb/bases/...）
+    # The /kb prefix is the fusion-rag application-layer route (openapi: /kb/bases/...)
     long_context_rag_url: str = Field(default="http://127.0.0.1:11436/kb")
     long_context_rag_api_key: str = Field(default="")
     long_context_rag_kb_id: str = Field(default="fusion-artifacts")
-    # v0.7.5 #97: AI 生成/迭代入口——webui 经 ai.generate RPC 走 fusion-mlx OpenAI 兼容接口。
-    # model 空=自动取 /v1/models 第一个可用模型。
+    # v0.7.5 #97: AI generate/iterate entry - webui calls the fusion-mlx OpenAI-compatible
+    # API via the ai.generate RPC. Empty model = auto-pick the first available model
+    # from /v1/models.
     ai_base_url: str = Field(default="http://127.0.0.1:11434")
     ai_model: str = Field(default="")
     ai_timeout: float = Field(default=120.0)

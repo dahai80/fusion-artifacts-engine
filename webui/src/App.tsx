@@ -5,8 +5,8 @@ import Detail from "./components/Detail";
 import Share from "./components/Share";
 import type { Lang } from "./i18n";
 
-// S7: 经 gateway /shell/<id>/ 代理或 ?embedded=1 时为内嵌模式——
-// 自有顶部导航/主题/语言控件隐藏（Shell 管外壳，§2.1/§4.1）
+// S7: embedded mode when proxied via gateway /shell/<id>/ or with ?embedded=1 —
+// hide our own top nav/theme/language controls (the Shell owns the chrome, §2.1/§4.1)
 const EMBEDDED =
     window.location.pathname.includes("/shell/") ||
     new URLSearchParams(window.location.search).has("embedded");
@@ -19,8 +19,8 @@ function readShellPref(key: string): string | null {
     }
 }
 
-// §3.1: 暗色为默认主题；内嵌模式跟随 Shell（fusion.shell.theme + fusion:theme 事件），
-// 模块禁止自行检测（SDK theme API 就绪前以同源 storage/事件桥接过渡）
+// §3.1: dark is the default theme; embedded mode follows the Shell (fusion.shell.theme + fusion:theme events).
+// Modules must not detect it themselves (bridged via same-origin storage/events until the SDK theme API is ready)
 function useTheme() {
     const [dark, setDark] = useState(() => {
         if (EMBEDDED) return readShellPref("fusion.shell.theme") !== "light";
@@ -40,7 +40,7 @@ function useTheme() {
     return { dark, toggle: () => setDark((d) => !d) };
 }
 
-// §9.1: 界面文案跟随 Shell 语言（fusion.shell.lang + fusion:lang 事件）
+// §9.1: UI copy follows the Shell language (fusion.shell.lang + fusion:lang events)
 function useLang() {
     const [lang, setLang] = useState<Lang>(() => {
         if (EMBEDDED) return readShellPref("fusion.shell.lang") === "en" ? "en" : "zh";

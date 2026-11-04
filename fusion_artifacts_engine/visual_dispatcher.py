@@ -12,11 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class VisualEngineDispatcher:
-    # #59: 按 dsl.meta.visual_type 路由到对应 compiler，3 级兜底链：
-    #   Level 1: 主 compiler（如 isometric_3d → Isometric3DCompiler）
-    #   Level 2: TapeDiagramCompiler（主 compiler 抛异常或缺参）
-    #   Level 3: FlowCardCompiler（100% 保证渲染）
-    # dsl.meta.fallback_type 可覆盖 Level 2（tape_diagram 或 flow_card）。
+    # #59: route dsl.meta.visual_type to the matching compiler with a 3-level fallback chain:
+    #   Level 1: primary compiler (e.g. isometric_3d → Isometric3DCompiler)
+    #   Level 2: TapeDiagramCompiler (primary compiler raised or missing params)
+    #   Level 3: FlowCardCompiler (100% render guarantee)
+    # dsl.meta.fallback_type can override Level 2 (tape_diagram or flow_card).
 
     def __init__(self):
         self._tape = TapeDiagramCompiler()
@@ -84,8 +84,8 @@ class VisualEngineDispatcher:
         dsl: dict | None = None,
         progress: float = 1.0,
     ) -> dict:
-        # #58/#59/#60: 可视化渲染入口。接受原始模型输出或已解析 DSL dict，
-        # 返回 {html, visual_type, valid, errors, [thinking]}。永远返回 HTML（FlowCard 兜底）。
+        # #58/#59/#60: visual rendering entry point. Accepts raw model output or a parsed DSL dict,
+        # returns {html, visual_type, valid, errors, [thinking]}. Always returns HTML (FlowCard fallback).
         from fusion_artifacts_engine.dsl_parser import parse_model_output
         from fusion_artifacts_engine.visual_primitives import VALID_VISUAL_TYPES
 

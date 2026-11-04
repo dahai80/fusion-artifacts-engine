@@ -11,7 +11,7 @@ from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 from fusion_artifacts_engine.utils import get_package_version, setup_logging
 
-# User instruction: "所有的项目要有一个配置文件，配置类的卸载配置文件里面，不能写死在代码里面"
+# User instruction: "Every project must have a config file; config belongs in the config file, never hardcoded in code"
 # Importers/callers: CLI entry point, calls load_config() from config.py, passes config to ArtifactEngine and ArtifactRPCServer
 # Affected API: argparse --host/--port/--config flags; status command reads config instead of hardcoded URL
 # Data schemas: ArtifactEngineConfig with server_host/server_port fields
@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 def _set_process_title(title: str) -> None:
-    # #68: macOS homebrew Python 的 comm 显示为裸 "Python"，operator 无法区分产品。
-    # 优先用 fusion_core.proc（共享 helper）；fusion_core 缺失（隔离 CI）时回退
-    # 直接 import setproctitle；两者皆缺则静默跳过（acceptance #3: fallback safe）。
+    # #68: on macOS homebrew Python, comm shows bare "Python" and operators cannot tell products apart.
+    # Prefer fusion_core.proc (shared helper); fall back to a direct setproctitle import
+    # when fusion_core is missing (isolated CI); if both are missing, skip silently (acceptance #3: fallback safe).
     try:
         from fusion_core.proc import set_process_title
 
@@ -43,16 +43,16 @@ def _set_process_title(title: str) -> None:
 
 
 def _run_once(config, host, port) -> int:
-    # P0-8: 单次 engine 运行，返回退出码。0=优雅退出，非 0=崩溃（watch loop 据此重启）。
-    # P2-5: 启动时按 config 配置 OTel tracing（可选；未装 SDK 或 enabled=false → no-op）。
+    # P0-8: single engine run, returns an exit code. 0=graceful stop, non-0=crash (watch loop restarts on it).
+    # P2-5: configure OTel tracing from config at startup (optional; no SDK or enabled=false → no-op).
     import fusion_artifacts_engine.tracing as tracing
 
     tracing.configure_tracing(config.tracing_enabled, config.tracing_service_name)
     engine = ArtifactEngine(config)
     server = ArtifactRPCServer(engine, host=host, port=port)
 
-    # #84: fusion-design [Save to Artifacts] file-IPC 消费。engine 生命周期内运行；
-    # watch 重启后按新 engine 重建（consumer 持有 engine 引用）。
+    # #84: fusion-design [Save to Artifacts] file-IPC consumer. Runs within the engine lifecycle;
+    # rebuilt around the new engine after watch restart (consumer holds an engine reference).
     ipc_consumer = None
     if getattr(config, "ipc_enabled", True):
         from fusion_artifacts_engine.ipc_consumer import DesignIPCConsumer
@@ -66,7 +66,7 @@ def _run_once(config, host, port) -> int:
             logger.warning("design IPC consumer start failed (non-fatal): %s", e)
             ipc_consumer = None
 
-    # v0.7.0: fusion-office 文件摄取（read 路径）+ .outbox 写回目录。同样非致命。
+    # v0.7.0: fusion-office file ingest (read path) + .outbox write-back dir. Also non-fatal.
     office_consumer = None
     if getattr(config, "ipc_enabled", True) and getattr(config, "ipc_office_enabled", True):
         from fusion_artifacts_engine.ipc_consumer import OfficeIPCConsumer
@@ -80,9 +80,10 @@ def _run_once(config, host, port) -> int:
             logger.warning("office IPC consumer start failed (non-fatal): %s", e)
             office_consumer = None
 
-    # C-13: 主线程跑 serve_forever 时信号处理器同线程调 shutdown() 会死锁
-    # (socketserver 文档禁止同线程 shutdown)。改用 start_async 起后台线程，
-    # 主线程用 threading.Event 阻塞；信号处理器 set Event，主线程醒来后 stop。
+    # C-13: calling shutdown() from a signal handler on the same thread that runs serve_forever deadlocks
+    # (socketserver docs forbid same-thread shutdown). Instead start_async runs the server on a background
+    # thread while the main thread blocks on threading.Event; the signal handler sets the Event, the main
+    # thread wakes up and stops.
     stop_event = threading.Event()
     graceful = {"yes": False}
 
@@ -139,8 +140,8 @@ def main():
     start_parser.add_argument("--port", type=int, default=None)
     start_parser.add_argument("--storage-root", default=None)
     start_parser.add_argument("--config", default=None, help="Path to config YAML file")
-    # P0-8: 崩溃自动重启。engine 异常退出（非 0）后 backoff 秒重启；
-    # SIGTERM/SIGINT 优雅退出（stop_event 被 set）返回 0，watch loop 不再重启。
+    # P0-8: automatic crash restart. If the engine exits abnormally (non-0), restart after backoff seconds;
+    # SIGTERM/SIGINT graceful stop (stop_event set) returns 0 and the watch loop stops restarting.
     start_parser.add_argument(
         "--watch", action="store_true",
         help="Restart daemon on crash (backoff between restarts)",
@@ -165,12 +166,12 @@ def main():
         host = args.host or config.server_host
         port = args.port or config.server_port
 
-        # #68: 进程标题设为产品名，ps/Activity Monitor 不再显示裸 "Python"。
-        # 放 watch loop 外——重启不改端口，无需重复设置。
+        # #68: set the process title to the product name so ps/Activity Monitor no longer shows bare "Python".
+        # Outside the watch loop — restarts do not change the port, no need to set it again.
         _set_process_title(f"fusion-artifacts-engine serve :{port}")
 
-        # #75: web-shell 集成。enabled 时向 fusion-gateway 自注册 manifest + 心跳。
-        # 注册/心跳线程独立于 engine 生命周期（watch 重启不重复注册）。
+        # #75: web-shell integration. When enabled, self-registers the manifest to fusion-gateway + heartbeat.
+        # Register/heartbeat threads are independent of the engine lifecycle (watch restarts do not re-register).
         gateway_client = None
         if config.gateway_enabled:
             from fusion_artifacts_engine.gateway_client import GatewayClient
@@ -179,13 +180,13 @@ def main():
             try:
                 gateway_client.start()
             except Exception as e:  # noqa: BLE001
-                # 增强面：gateway 不可达不阻断引擎启动
+                # Hardening surface: gateway unreachable must not block engine startup
                 logger.warning("gateway client start failed (non-fatal): %s", e)
                 gateway_client = None
 
-        # P1-1/H4: 限流生产告警。rps==0 表示不限流——生产环境裸奔，启动显式 WARN。
-        # default_config.yaml 已设生产默认值（rps:200/burst:400，public_rps:50/burst:100），
-        # 但用户自定义配置或测试环境可能回退 0，此处兜底告警。
+        # P1-1/H4: rate-limit production warning. rps==0 means unlimited — unthrottled in production, explicit WARN at startup.
+        # default_config.yaml already sets production defaults (rps:200/burst:400, public_rps:50/burst:100),
+        # but user configs or test environments may fall back to 0; this is the safety-net warning.
         if config.rate_limit_rps == 0:
             logger.warning(
                 "rate_limit.rps=0 (unlimited) — JSON-RPC/REST endpoints unthrottled; "
@@ -197,8 +198,8 @@ def main():
                 "set rate_limit.public_rps>0 in production"
             )
 
-        # P0-8: watch loop 包裹单次 run。--watch 时 engine 退出码非 0 则 backoff 后重启。
-        # 退出码 0（优雅 stop）跳出循环。单次 run 内含信号注册与 stop_event 逻辑。
+        # P0-8: watch loop wraps a single run. With --watch, a non-0 engine exit code restarts after backoff.
+        # Exit code 0 (graceful stop) breaks out of the loop. A single run includes signal registration and stop_event logic.
         try:
             while True:
                 code = _run_once(config, host, port)
@@ -245,7 +246,7 @@ def main():
                 print("Not running or error")
         except Exception as e:  # noqa: BLE001
             print(f"Not running: {e}")
-        # L-20: 健康检查退出码——0 健康，1 未运行；start.sh 依赖 $? 判定
+        # L-20: health-check exit code — 0 healthy, 1 not running; start.sh relies on $?
         sys.exit(0 if healthy else 1)
 
     elif args.command == "version":

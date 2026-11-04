@@ -7,7 +7,7 @@ from fusion_artifacts_engine.token_counter import count_tokens
 logger = logging.getLogger(__name__)
 
 
-# H7: token 预算相关逻辑从 engine.py 抽出。纯函数传 config+storage，行为不变。
+# H7: token budget logic extracted from engine.py. Pure functions taking config+storage, behavior unchanged.
 
 
 def context_budget(
@@ -16,7 +16,7 @@ def context_budget(
     session_id: str | None = None,
     context_window: int | None = None,
 ) -> dict:
-    # P-2: 用存储层一条 SQL 聚合 token，替代 N+1 逐版本读 + 无界 page_size=100000。
+    # P-2: aggregate tokens with a single storage-layer SQL instead of N+1 per-version reads + an unbounded page_size=100000.
     if context_window is not None and context_window < 1:
         raise ValueError("context_window must be >= 1")
     total_tokens, artifact_list = storage.sum_token_counts(session_id=session_id)
@@ -88,9 +88,10 @@ def inject(
     messages: list[dict],
     output_budget: int | None = None,
 ) -> dict:
-    # R7/STUB: inject 是占位实现，仅做 token 预算检查，不注入也不修改 messages。
-    # 不是未来扩展——是已宣传但未实现的能力。商用集成勿依赖注入副作用。
-    # README/SDK 已标注 stub（见 Batch8 文档修正）。返回 injected=False + stub=True。
+    # R7/STUB: inject is a placeholder implementation — only a token budget check; it injects nothing and does not modify messages.
+    # Not a future extension — a capability that was advertised but never implemented. Commercial integrations must not
+    # rely on injection side effects.
+    # README/SDK already flag it as a stub (see Batch8 doc corrections). Returns injected=False + stub=True.
     total_tokens = 0
     for msg in messages:
         content = msg.get("content", "") if isinstance(msg, dict) else str(msg)

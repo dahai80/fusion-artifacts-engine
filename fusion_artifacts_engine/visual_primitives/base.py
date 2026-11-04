@@ -9,8 +9,8 @@ def _esc(text: str | None) -> str:
 
 
 class BaseCompiler:
-    # 8 个可视化基元的公共基类。每个子类实现 compile() 返回自包含 HTML 字符串。
-    # progress [0.0,1.0] 驱动步骤回放；active_entities 按 pipeline step 高亮。
+    # Common base class for the 8 visual primitives. Each subclass implements compile() returning a self-contained HTML string.
+    # progress [0.0,1.0] drives step playback; active_entities highlights per pipeline step.
 
     visual_type: str = "base"
 

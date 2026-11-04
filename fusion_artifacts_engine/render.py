@@ -4,8 +4,8 @@ import secrets
 
 logger = logging.getLogger(__name__)
 
-# H3: _sanitize_html 用真实 HTML 解析器（lxml Cleaner）替换正则净化。
-# 正则无法处理嵌套/变体/编码绕过（如 <scr<script>ipt>），lxml 解析树后剥危险节点。
+# H3: _sanitize_html uses a real HTML parser (lxml Cleaner) instead of regex sanitization.
+# Regex cannot handle nested/variant/encoded bypasses (e.g. <scr<script>ipt>); lxml parses the tree then strips dangerous nodes.
 
 try:
     from lxml import etree
@@ -13,7 +13,7 @@ try:
     from lxml.html.clean import Cleaner
 
     _LXML_AVAILABLE = True
-    # lxml_html_clean 无 events 参数：on* 事件属性由 javascript=True + safe_attrs_only=True 剥除
+    # lxml_html_clean has no events parameter: on* event attributes are stripped via javascript=True + safe_attrs_only=True
     _cleaner = Cleaner(
         scripts=True,
         javascript=True,
@@ -36,8 +36,8 @@ except ImportError:
     )
 
 
-# LOW-5/CWE-79: 去掉 style-src 'unsafe-inline'，改每渲染一次性 nonce。
-# {nonce} 由 _gen_nonce 注入；同一文档的 CSP 声明与 <style nonce="..."> 必须一致。
+# LOW-5/CWE-79: drop style-src 'unsafe-inline' in favor of a one-time nonce per render.
+# {nonce} is injected by _gen_nonce; the CSP declaration and the <style nonce="..."> in the same document must match.
 _SHARE_DOC_CSP_TMPL = (
     "default-src 'none'; "
     "script-src 'none'; "
@@ -49,7 +49,7 @@ _SHARE_DOC_CSP_TMPL = (
 
 
 def _gen_nonce() -> str:
-    # LOW-5: 单次渲染随机 nonce。token_urlsafe(16) → ~22 字符 URL 安全串。
+    # LOW-5: random nonce per render. token_urlsafe(16) → ~22-char URL-safe string.
     return secrets.token_urlsafe(16)
 
 
@@ -58,8 +58,8 @@ def _html_escape(text: str) -> str:
 
 
 def _sanitize_html_lxml(html_str: str) -> str:
-    # H3: 解析 HTML 树 -> Cleaner 剥 script/event/style/危险协议 -> 序列化。
-    # 解析失败（畸形 HTML）fail-closed：返回转义原文，绝不裸放危险内容。
+    # H3: parse HTML tree -> Cleaner strips script/event/style/dangerous protocols -> serialize.
+    # Parse failure (malformed HTML) fails closed: return the escaped original, never emit dangerous content raw.
     try:
         doc = lxml_html.fromstring(html_str)
     except (etree.ParserError, etree.XMLSyntaxError, ValueError) as e:
@@ -67,11 +67,11 @@ def _sanitize_html_lxml(html_str: str) -> str:
         return _html_escape(html_str)
     _cleaner(doc)
     result = lxml_html.tostring(doc, encoding="unicode")
-    # tostring 可能包 <p>..</p> 或片段；strip 外层多余换行
+    # tostring may wrap in <p>..</p> or emit a fragment; strip extra outer newlines
     return result.strip()
 
 
-# 回退正则——仅 lxml 不可用时用。保留以兼容旧测试与降级场景。
+# Fallback regex — used only when lxml is unavailable. Kept for legacy test compatibility and degraded mode.
 import re
 
 _SCRIPT_TAG_RE = re.compile(r"<\s*script\b[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
@@ -96,8 +96,8 @@ def _sanitize_html(html_str: str) -> str:
 
 
 def _share_footer(nonce: str, permission: str, remix_url: str | None) -> str:
-    # #83: 公开 share 页脚 —— 权限标识 + remix 入口。CSP 只放行带 nonce 的
-    # <style>，故样式与文档共用同一 nonce（内联 style 属性会被阻断）。
+    # #83: public share footer — permission badge + remix entry. CSP only allows nonce'd
+    # <style>, so styles share the same nonce as the document (inline style attributes are blocked).
     if remix_url:
         action = (
             f"<a class='btn' href=\"{_html_escape(remix_url)}\">"
@@ -130,9 +130,9 @@ def _append_share_footer(
 def render_share_html(
     artifact, content: str, remix_url: str | None = None, permission: str = "view"
 ) -> str:
-    # H7: 从 engine.py 抽出的分享渲染层。iframe sandbox + CSP + 净化。
-    # LOW-5: 单次渲染 nonce，去掉 style-src 'unsafe-inline'，CSP 与 <style> 共用同一 nonce。
-    # #83: remix_url 非空时追加权限页脚（view/remix 与 remix 入口）。
+    # H7: share rendering layer extracted from engine.py. iframe sandbox + CSP + sanitization.
+    # LOW-5: nonce per render, drop style-src 'unsafe-inline', CSP and <style> share the same nonce.
+    # #83: append the permission footer when remix_url is non-empty (view/remix badge and remix entry).
     doc, nonce = _render_share_body(artifact, content)
     return _append_share_footer(doc, nonce, permission, remix_url)
 

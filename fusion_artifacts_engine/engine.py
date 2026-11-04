@@ -50,14 +50,14 @@ _SUMMARY_MAX_LEN = 200
 
 
 def _truncate_summary(content: str) -> str:
-    # JSON 结构化内容截断即文本墙，非人类摘要——返回空（GUI 类型图标兜底）
+    # JSON structured content truncation is a text wall, not a human summary - return empty (GUI falls back to the type icon)
     if content.lstrip()[:1] in ("{", "["):
         return ""
     return content[:_SUMMARY_MAX_LEN].replace("\n", " ").strip()
 
 
 def _auto_changelog(old_content: str, new_content: str) -> str:
-    # 基于真实行级 diff 统计增删，非仅行数算术 (P2-11)。
+    # Count additions/deletions from the real line-level diff, not mere line-count arithmetic (P2-11).
     old_lines = old_content.splitlines()
     new_lines = new_content.splitlines()
     diff_lines = list(difflib.unified_diff(old_lines, new_lines, lineterm=""))
@@ -74,7 +74,7 @@ def _auto_changelog(old_content: str, new_content: str) -> str:
         else:
             parts.append("no change")
     elif added == removed and old_content != new_content:
-        # 同行数内容替换：diff 报 +n/-n，补充 content modified 标记替换语义 (P2-11)。
+        # Same-line-count content replacement: diff reports +n/-n; add 'content modified' to mark the replacement semantics (P2-11).
         parts.append("content modified")
     return ", ".join(parts)
 
@@ -83,8 +83,8 @@ def _size_bytes(content: str) -> int:
     return len(content.encode("utf-8"))
 
 
-# H3/H7: _sanitize_html / _render_share_html / _SHARE_DOC_CSP / _html_escape 已抽到 render.py。
-# _sanitize_html 改用 lxml Cleaner（真实 HTML 解析树），正则仅作 lxml 缺失时降级。
+# H3/H7: _sanitize_html / _render_share_html / _SHARE_DOC_CSP / _html_escape moved to render.py.
+# _sanitize_html now uses lxml Cleaner (real HTML parse tree); regex only as a fallback when lxml is missing.
 
 
 class ArtifactEngine:
@@ -100,18 +100,18 @@ class ArtifactEngine:
             max_metadata_bytes=self.config.max_metadata_bytes,
             wal_checkpoint_interval=self.config.wal_checkpoint_interval, metadata_indexed_keys=self.config.metadata_indexed_keys,
         )
-        # A-1/R6: _watchers 仅作注册簿记录（audit-only registry），无主动投递路径。
-        # 变更通知实际走 EventBus → SSE（engine.event_bus.publish）。_watchers 不参与推送，
-        # 仅为 watch RPC 保留「谁注册过」的记录。未来要加推送应基于 EventBus 扩展，
-        # 勿在 _watchers 上补投递逻辑（会产生与 SSE 的重复推送）。
-        # ThreadingMixIn 多线程改写，加锁防 dict changed size during iteration 竞态。
+        # A-1/R6: _watchers is an audit-only registry, no active delivery path.
+        # Change notifications actually flow via EventBus -> SSE (engine.event_bus.publish). _watchers does not push,
+        # it only keeps a record of 'who registered' for the watch RPC. Future push features should extend EventBus,
+        # do NOT add delivery logic on _watchers (it would duplicate SSE pushes).
+        # ThreadingMixIn multi-thread rework: lock to prevent 'dict changed size during iteration' races.
         self._watchers: dict[str, list[str]] = {}
         self._watchers_lock = threading.Lock()
-        # A-2: EventBus 注入 engine 实例，避免模块级单例跨 engine 串流
+        # A-2: EventBus is injected per engine instance, avoiding module-level singleton cross-engine streaming
         self.event_bus = EventBus()
-        # H7: share 访问控制 + R2 内存缓冲抽到 ShareManager
+        # H7: share access control + R2 in-memory buffering extracted to ShareManager
         self.share_mgr = ShareManager(self)
-        # #58/#59/#60: 可视化引擎调度器（DSL 解析 + 8 基元 + 3 级兜底）
+        # #58/#59/#60: visual engine dispatcher (DSL parsing + 8 primitives + 3-level fallback)
         from fusion_artifacts_engine.visual_dispatcher import VisualEngineDispatcher
         self.visual_dispatcher = VisualEngineDispatcher()
         logger.info(
@@ -119,7 +119,7 @@ class ArtifactEngine:
         )
 
     def _publish_disk_alarm(self, message: str) -> None:
-        # 运维4: 磁盘水位告警事件，经 EventBus 投递给 SSE 订阅者（运维侧监听）
+        # Ops-4: disk watermark warning event, delivered via EventBus to SSE subscribers (ops-side listening)
         try:
             self.event_bus.publish(
                 "disk_full_alarm",
@@ -130,7 +130,7 @@ class ArtifactEngine:
         logger.critical("DISK ALARM: %s", message)
 
     def shutdown_share_buffer(self) -> None:
-        # H7: 委托 ShareManager.shutdown（R2 最终 flush 防计数丢失）
+        # H7: delegate to ShareManager.shutdown (R2 final flush prevents count loss)
         self.share_mgr.shutdown()
 
 
@@ -177,8 +177,8 @@ class ArtifactEngine:
             change_log=change_log,
             created_at=now,
         )
-        # H5: 阻塞 storage 写卸到线程池，不独占事件循环
-        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        # H5: offload blocking storage write to the thread pool, do not hog the event loop
+        # Ops-4: pre-write disk check may raise ResourceLimitError; emit the warning event then re-raise
         try:
             await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
         except ResourceLimitError as e:
@@ -243,8 +243,8 @@ class ArtifactEngine:
             change_log="Created by external module",
             created_at=now,
         )
-        # H5: 阻塞 storage 写卸到线程池
-        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        # H5: offload blocking storage write to the thread pool
+        # Ops-4: pre-write disk check may raise ResourceLimitError; emit the warning event then re-raise
         try:
             await asyncio.to_thread(self.storage.save_artifact_and_version, artifact, version)
         except ResourceLimitError as e:
@@ -316,8 +316,8 @@ class ArtifactEngine:
         except FileNotFoundError as e:
             logger.error("Content file missing for %s v%s: %s", artifact_id, ver, e)
             return None
-        # section_index 保持原始 JSON 字符串（与 list_versions 一致），不在原地改类型，
-        # 避免 str/dict 漂移；调用方需 dict 时自行 json.loads (P2-8)。
+        # section_index keeps the original JSON string (consistent with list_versions); the type is not changed in place,
+        # avoiding str/dict drift; callers json.loads themselves when they need a dict (P2-8).
         return result
 
     def list_versions(
@@ -336,7 +336,7 @@ class ArtifactEngine:
         artifact_id: str,
         target_version: int,
     ) -> tuple[ArtifactVersion, str]:
-        # H5: 阻塞 storage 读卸到线程池
+        # H5: offload blocking storage read to the thread pool
         try:
             target = await asyncio.to_thread(
                 self.storage.get_version, artifact_id, target_version
@@ -596,7 +596,7 @@ class ArtifactEngine:
         snapshot_type: str = "auto",
         parent_version: int | None = None,
     ) -> tuple[ArtifactVersion, str]:
-        # H5: 阻塞 storage 读卸到线程池
+        # H5: offload blocking storage read to the thread pool
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -608,7 +608,7 @@ class ArtifactEngine:
         now = time.time()
         size = _size_bytes(content)
         sections = extract_sections(content, artifact.type)
-        # C-8: version_num 由原子存储方法在事务内分配，这里用 0 占位
+        # C-8: version_num is allocated inside the transaction by the atomic storage method; 0 is a placeholder here
         version = ArtifactVersion(
             artifact_id=artifact_id,
             version_num=0,
@@ -622,17 +622,17 @@ class ArtifactEngine:
             snapshot_type=snapshot_type,
             parent_version=parent_version,
         )
-        # L-8: rollback 的 content_hash 与历史版本内容相同会碰撞——乐观锁调用方
-        # 无法区分"已回滚到 vN"与"仍在 vN"。回滚版本 hash 计算前加标记前缀，
-        # 使其与原始版本 hash 不同，消除锁歧义。
+        # L-8: the rollback content_hash collides when identical to the historical version content - optimistic-lock callers
+        # cannot distinguish 'rolled back to vN' from 'still on vN'. Add a marker prefix before hashing the rollback version
+        # so its hash differs from the original version hash, removing the lock ambiguity.
         hash_input = content
         if snapshot_type == "rollback":
             hash_input = f"rollback:{parent_version}:{content}"
         content_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:16]
         summary = _truncate_summary(content) if not artifact.summary else None
-        # C-8: 校验+分配+写入原子化，BEGIN IMMEDIATE 序列化并发写
-        # H5: 原子写卸到线程池
-        # 运维4: 写前磁盘预检可能抛 ResourceLimitError，发告警事件后透传
+        # C-8: validate + allocate + write atomically; BEGIN IMMEDIATE serializes concurrent writes
+        # H5: offload the atomic write to the thread pool
+        # Ops-4: pre-write disk check may raise ResourceLimitError; emit the warning event then re-raise
         try:
             new_version = await asyncio.to_thread(
                 self.storage.create_version_atomic,
@@ -671,7 +671,7 @@ class ArtifactEngine:
         expires_at: str | None = None, max_accesses: int | None = None,
         permission: str = "view",
     ) -> ArtifactShare:
-        # H7: 委托 ShareManager
+        # H7: delegate to ShareManager
         return self.share_mgr.create_share(
             artifact_id, created_by, expires_at, max_accesses, permission
         )
@@ -679,7 +679,7 @@ class ArtifactEngine:
     def remix_artifact(
         self, artifact_id: str, new_name: str | None = None
     ) -> Artifact | None:
-        # #77: remix 派生副本 — 复制当前版本为独立产物，parent_artifact_id 记录血统
+        # #77: remix derived copy - duplicate the current version as an independent artifact; parent_artifact_id records lineage
         art = self.storage.get_artifact(artifact_id)
         if art is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -692,15 +692,15 @@ class ArtifactEngine:
         )
 
     def get_shared_artifact(self, share_id: str) -> dict | None:
-        # H7: 委托 ShareManager
+        # H7: delegate to ShareManager
         return self.share_mgr.get_shared_artifact(share_id)
 
     def revoke_share(self, share_id: str) -> bool:
-        # H7: 委托 ShareManager
+        # H7: delegate to ShareManager
         return self.share_mgr.revoke_share(share_id)
 
     def get_public_share(self, share_id: str) -> dict:
-        # H7: 委托 ShareManager
+        # H7: delegate to ShareManager
         return self.share_mgr.get_public_share(share_id)
 
     # ── P2: snapshots ──────────────────────────────────────────
@@ -711,7 +711,7 @@ class ArtifactEngine:
         label: str | None = None,
         author: str | None = None,
     ) -> ArtifactVersion:
-        # H5: 阻塞 storage 读写卸到线程池
+        # H5: offload blocking storage read/write to the thread pool
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -771,7 +771,7 @@ class ArtifactEngine:
         import uuid
 
         folder_id = f"fld_{uuid.uuid4().hex[:12]}"
-        # E1: created_at 用 float epoch，与 Artifact/Version 一致
+        # E1: created_at uses float epoch, consistent with Artifact/Version
         folder = ArtifactFolder(
             folder_id=folder_id,
             name=name,
@@ -805,7 +805,7 @@ class ArtifactEngine:
 
     @staticmethod
     def _tag_scope(artifact: "Artifact") -> str | None:
-        # L-7: tag 作用域优先 session_id，其次 project_id；都无则 None（全局）
+        # L-7: tag scope prefers session_id, then project_id; None (global) when neither is present
         if artifact.session_id:
             return artifact.session_id
         if artifact.project_id:
@@ -864,7 +864,7 @@ class ArtifactEngine:
 
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         now_ts = _time.time()
-        # P0-5/H6: emit_event payload 字节上限校验，超限拒绝写入防事件总线放大
+        # P0-5/H6: enforce the emit_event payload byte limit; reject oversized writes to prevent event-bus amplification
         if payload is not None:
             import json as _json
 
@@ -932,7 +932,7 @@ class ArtifactEngine:
         content: str = "",
         expected_version: int | None = None,
     ) -> tuple[ArtifactVersion, dict]:
-        # H5: 阻塞 storage 读卸到线程池
+        # H5: offload blocking storage read to the thread pool
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise NotFoundError(f"Artifact not found: {artifact_id}")
@@ -940,7 +940,7 @@ class ArtifactEngine:
             expected_version is not None
             and artifact.current_version != expected_version
         ):
-            # P0-2: 乐观锁冲突映射 ConflictError(-32002, 可重试)。
+            # P0-2: optimistic-lock conflict maps to ConflictError(-32002, retryable).
             raise ConflictError(
                 f"Optimistic lock failed: expected version {expected_version}, "
                 f"got {artifact.current_version}"
@@ -956,7 +956,7 @@ class ArtifactEngine:
         if operation == "replace_section":
             if not anchor:
                 raise ValueError("anchor is required for replace_section")
-            # H7: section patch 抽到 section_index 模块
+            # H7: section patch extracted to the section_index module
             new_content, replaced_content = _replace_sec(
                 old_content, anchor, content, artifact.type
             )
@@ -969,7 +969,7 @@ class ArtifactEngine:
         elif operation == "delete_section":
             if not anchor:
                 raise ValueError("anchor is required for delete_section")
-            # H7: section patch 抽到 section_index 模块
+            # H7: section patch extracted to the section_index module
             new_content, replaced_content = _delete_sec(
                 old_content, anchor, artifact.type
             )
@@ -979,7 +979,7 @@ class ArtifactEngine:
         version, _ref_text = await self.create_version(
             artifact_id, new_content, f"patch:{operation} anchor={anchor}"
         )
-        # F3: 复用 version.token_count（create_version 已计数），避免对 new_content 二次编码
+        # F3: reuse version.token_count (already counted in create_version); avoid re-encoding new_content
         new_tokens = version.token_count
         replaced_tokens = count_tokens(replaced_content)
         tokens_added = new_tokens - old_tokens + replaced_tokens
@@ -1017,7 +1017,7 @@ class ArtifactEngine:
         if version is None:
             raise ValueError(f"No version found for artifact: {artifact_id}")
 
-        # H7: section 构建/查找抽到 section_index 模块
+        # H7: section build/lookup extracted to the section_index module
         sections = _build_secs(version.content, artifact.type)
 
         result: dict = {
@@ -1072,7 +1072,7 @@ class ArtifactEngine:
         session_id: str | None = None,
         context_window: int | None = None,
     ) -> dict:
-        # H7: token 预算逻辑抽到 token_budget 模块
+        # H7: token budget logic extracted to the token_budget module
         return _context_budget_fn(self.config, self.storage, session_id, context_window)
 
     # ── AE-7: auto_compact ─────────────────────────────────────
@@ -1080,7 +1080,7 @@ class ArtifactEngine:
     async def auto_compact(self, artifact_id: str, token_budget: int) -> dict:
         from fusion_artifacts_engine.compactor import compact_and_count
 
-        # H5: 阻塞 storage 读卸到线程池
+        # H5: offload blocking storage read to the thread pool
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
@@ -1105,7 +1105,7 @@ class ArtifactEngine:
                 "reason": "already_within_budget",
             }
 
-        # F3: 大 content 压缩+计数卸线程池，避免阻塞事件循环
+        # F3: offload large-content compress+count to the thread pool, avoid blocking the event loop
         compacted_content, compacted_tokens = await asyncio.to_thread(compact_and_count, version.content, artifact.type, token_budget)
 
         if compacted_tokens < original_tokens:
@@ -1201,10 +1201,10 @@ class ArtifactEngine:
         lang_hint: str = "",
         project_id: str | None = None,
     ) -> dict:
-        # 边界说明：本方法不执行浏览器渲染，只做 (1) 阈值判定 (2) 类型检测
-        # (3) 存储为 artifact (4) 返回 render_type 提示 + 原始 content。
-        # 浏览器渲染由调用方 (fusion-studio) 负责；服务端渲染场景见
-        # _render_share_html (公开分享只读预览，实现在 render.py)。
+        # Boundary note: this method performs no browser rendering; it only does (1) threshold check (2) type detection
+        # (3) stores as artifact (4) returns the render_type hint + raw content.
+        # Browser rendering is the responsibility of the caller (fusion-studio); for server-side rendering see
+        # _render_share_html (public share read-only preview, implemented in render.py).
         from fusion_artifacts_engine.auto_identifier import (
             detect_artifact_type,
             detect_renderable_type,
@@ -1252,19 +1252,19 @@ class ArtifactEngine:
             return {"created": False, "reason": str(e)}
 
     def render_visual(self, raw_text: str | None = None, dsl: dict | None = None, progress: float = 1.0) -> dict:
-        # #58/#59/#60: 委托 VisualEngineDispatcher.render（H7：engine 保持薄包装，逻辑在 visual_dispatcher.py）。
+        # #58/#59/#60: delegate to VisualEngineDispatcher.render (H7: engine stays a thin wrapper, logic lives in visual_dispatcher.py).
         return self.visual_dispatcher.render(raw_text=raw_text, dsl=dsl, progress=progress)
 
     def check_safety(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
-        # H7: 委托 token_budget 模块
+        # H7: delegate to the token_budget module
         return _check_safety_fn(self.config, messages, output_budget)
 
     def inject(
         self, messages: list[dict], output_budget: int | None = None
     ) -> dict:
-        # H7: 委托 token_budget 模块（R7/STUB 语义不变）
+        # H7: delegate to the token_budget module (R7/STUB semantics unchanged)
         return _inject_fn(self.config, messages, output_budget)
 
     def interact_artifact(
@@ -1303,12 +1303,12 @@ class ArtifactEngine:
             raise ValueError(
                 "direction must be 'artifact_to_code' or 'code_to_artifact'"
             )
-        # H5: 阻塞 storage 读卸到线程池
+        # H5: offload blocking storage read to the thread pool
         artifact = await asyncio.to_thread(self.storage.get_artifact, artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
         path = Path(file_path).expanduser()
-        # C-1: 路径必须落在配置的 sync_root 内，杜绝任意文件写/读 (LFI)
+        # C-1: the path must resolve inside the configured sync_root; blocks arbitrary file write/read (LFI)
         sync_root = self.config.sync_root
         if sync_root is None:
             raise PermissionError(
@@ -1358,8 +1358,8 @@ class ArtifactEngine:
         }
 
     def close(self) -> None:
-        # A-4: 优雅停机——先 flush share access 缓冲防计数丢失，再通知 EventBus 关流
-        # 让 SSE handler 退出，最后关 storage，避免线程悬在已关闭 storage handle 上
+        # A-4: graceful shutdown - first flush the share access buffer to prevent count loss, then notify EventBus to close streams
+        # so SSE handlers exit, and finally close storage, avoiding threads stuck on a closed storage handle
         try:
             self.shutdown_share_buffer()
         except Exception:

@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class Geometry2DCompiler(BaseCompiler):
-    # 3-5年级 周长/面积/拼剪。DSL → HTML+SVG 2D 画布。
-    # 动画：polygon draw / translate / rotate / overlap。
+    # Grades 3-5: perimeter/area/compose-and-cut. DSL → HTML+SVG 2D canvas.
+    # Animations: polygon draw / translate / rotate / overlap.
 
     visual_type = "geometry_2d"
 

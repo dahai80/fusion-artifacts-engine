@@ -15,8 +15,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# P2-5/H12(trace): 可选 OTel tracing。模块顶层别名供 @tracing.traced 装饰器引用。
-# tracing 模块内部对 OTel 缺失/未启用均 no-op，故顶层导入安全。
+# P2-5/H12(trace): Optional OTel tracing. Module-level aliases referenced by the @tracing.traced decorator.
+# The tracing module no-ops internally when OTel is missing/disabled, so importing at top level is safe.
 from fusion_artifacts_engine import tracing as _tracing  # noqa: E402
 
 _EXT_SAFE_RE = re.compile(r"[^A-Za-z0-9]")
@@ -24,12 +24,12 @@ _META_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _log_rmtree_error(func, path, exc_info):  # noqa: ANN001
-    # M-4: rmtree 失败必须可见，勿静默吞
+    # M-4: rmtree failures must be visible; never swallow them silently
     logger.error("rmtree failed on %s during %s: %s", path, func.__name__, exc_info[1])
 
 
 def _coerce_bool(name: str, value) -> int:
-    # M-5: 用户可控 filters 值强转——接受 bool/0/1/"true"/"false"，其余显式 ValueError
+    # M-5: Coerce user-controlled filters values — accept bool/0/1/"true"/"false", raise ValueError for anything else
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int) and value in (0, 1):
@@ -42,7 +42,7 @@ def _coerce_bool(name: str, value) -> int:
 
 
 def _coerce_float(name: str, value) -> float:
-    # M-5: since/until 必须可转 float，ISO 串等明确报错而非 500
+    # M-5: since/until must be convertible to float; ISO strings etc. fail with an explicit error instead of a 500
     try:
         return float(value)
     except (TypeError, ValueError) as e:
@@ -64,10 +64,10 @@ from fusion_artifacts_engine.rpc.errors import (
 
 
 def _translate_sqlite_error(e: sqlite3.Error):
-    # P0-3/H8: SQLite 写路径 OperationalError 按消息映射——
-    # "database is locked"/"database table is locked"→ConflictError(-32002, 可重试)；
+    # P0-3/H8: Map SQLite write-path OperationalError by message —
+    # "database is locked"/"database table is locked" -> ConflictError(-32002, retryable);
     # "disk I/O error"/"database disk image is malformed"/"disk full"→ResourceLimitError(-32003)；
-    # 其余 OperationalError 原样上抛（连接损坏等由上层兜底）。
+    # Re-raise other OperationalError as-is (corrupted connections etc. handled upstream).
     if isinstance(e, sqlite3.OperationalError):
         msg = str(e).lower()
         if "locked" in msg:
@@ -80,7 +80,7 @@ def _translate_sqlite_error(e: sqlite3.Error):
 
 
 def _enforce_content_limit(content: str, limit: int) -> None:
-    # P0-5/H9: 内容字节超 max_content_bytes 拒绝写入（0=不限）
+    # P0-5/H9: Reject writes whose content bytes exceed max_content_bytes (0 = unlimited)
     if limit <= 0:
         return
     size = len(content.encode("utf-8"))
@@ -92,7 +92,7 @@ def _enforce_content_limit(content: str, limit: int) -> None:
 
 
 def _enforce_metadata_limit(metadata: dict | None, limit: int) -> None:
-    # P0-5/H9: metadata JSON 字节超 max_metadata_bytes 拒绝写入（0=不限）
+    # P0-5/H9: Reject writes whose metadata JSON bytes exceed max_metadata_bytes (0 = unlimited)
     if limit <= 0 or not metadata:
         return
     size = len(json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
@@ -104,8 +104,8 @@ def _enforce_metadata_limit(metadata: dict | None, limit: int) -> None:
 
 
 def _clamp_pagination(page, page_size, max_size: int = 500) -> tuple[int, int]:
-    # P1-5/M5: 分页入参硬化——page>=1、page_size<=max_size、非整数 try/except 回退默认。
-    # 防 page_size=10**9 拉全表 DoS、page<=0 负偏移、page="abc" TypeError。
+    # P1-5/M5: Harden pagination inputs — page>=1, page_size<=max_size, non-int falls back to defaults via try/except.
+    # Prevents page_size=10**9 full-table DoS, page<=0 negative offsets, and page="abc" TypeError.
     try:
         page = int(page) if page is not None else 1
     except (ValueError, TypeError):
@@ -120,8 +120,8 @@ def _clamp_pagination(page, page_size, max_size: int = 500) -> tuple[int, int]:
 
 
 def _decode_cursor(cursor: str) -> tuple[float | None, str]:
-    # P2-7/F6: 解析 "<float>:<id>" 游标。非法返回 (None, "") 回退 OFFSET。
-    # id 段可能含 ':' 之外的任意字符，故只在第一个 ':' 处分割。
+    # P2-7/F6: Parse a "<float>:<id>" cursor. Invalid input returns (None, "") to fall back to OFFSET.
+    # The id segment may contain any character except ':', so split only at the first ':'.
     if not cursor or ":" not in cursor:
         return None, ""
     head, _, tail = cursor.partition(":")
@@ -132,13 +132,13 @@ def _decode_cursor(cursor: str) -> tuple[float | None, str]:
 
 
 def _encode_cursor(col_val: float, row_id: str) -> str:
-    # P2-7/F6: 编码游标 "<float>:<id>"。RPC 层据结果末行构造，回传客户端做下次请求。
+    # P2-7/F6: Encode a "<float>:<id>" cursor. The RPC layer builds it from the result last row and returns it to the client for the next request.
     return f"{col_val}:{row_id}"
 
 
-# F5: 大 content 分块读写。write_text/read_text 一次性 encode/decode 全文字符串，
-# 10MB content 会在内存中再翻倍（str + bytes）。分块以 1MB 为单位 encode/decode +
-# 流式写盘，避免单次 I/O 占用 = content 大小的临时内存。
+# F5: Chunked read/write for large content. write_text/read_text encode/decode the full string in one shot;
+# a 10MB content doubles in memory (str + bytes). Chunking encodes/decodes in 1MB units +
+# streams to disk, avoiding transient memory equal to the content size per I/O.
 _CHUNK_IO_BYTES = 1024 * 1024
 
 
@@ -149,7 +149,7 @@ def _write_text_chunked(path, content: str) -> None:
             for off in range(0, len(encoded), _CHUNK_IO_BYTES):
                 f.write(encoded[off:off + _CHUNK_IO_BYTES])
     except OSError as e:
-        # P0-4: 磁盘满/配额超限映射为 ResourceLimitError（可重试/降级）。
+        # P0-4: Map disk-full/quota-exceeded to ResourceLimitError (retryable/degradable).
         if e.errno in (errno.ENOSPC, errno.EDQUOT):
             logger.error("disk full writing content file %s: %s", path, e)
             try:
@@ -275,7 +275,7 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         try:
             metadata = json.loads(meta_raw)
         except (json.JSONDecodeError, TypeError):
-            # M-3: 损坏 JSON 必须大声告警，区分"无 metadata"与"损坏 metadata"
+            # M-3: Corrupt JSON must fail loudly; distinguish "no metadata" from "corrupt metadata"
             logger.error(
                 "Corrupt metadata JSON for artifact %s: %s", row["id"], meta_raw[:200]
             )
@@ -337,7 +337,7 @@ def _version_from_row(row: sqlite3.Row) -> ArtifactVersion:
 
 
 def _ts_to_float(raw) -> float | None:
-    # E1: 统一时间戳读出 float epoch。兼容旧 ISO 串与 None。
+    # E1: Read timestamps uniformly as float epoch. Compatible with legacy ISO strings and None.
     if raw is None:
         return None
     try:
@@ -395,7 +395,7 @@ def _event_from_row(row: sqlite3.Row) -> ArtifactEvent:
         try:
             payload = json.loads(payload_raw)
         except (json.JSONDecodeError, TypeError):
-            # M-3: 损坏 payload JSON 记 ERROR
+            # M-3: Log ERROR for corrupt payload JSON
             logger.error(
                 "Corrupt event payload JSON for event %s: %s",
                 row["event_id"],
@@ -423,34 +423,34 @@ class SQLiteStorage(StorageDriver):
         self.db_path = db_path
         self.content_dir = content_dir
         self.small_content_limit = small_content_limit
-        # R9: 单 artifact 版本上限，0=不限。超限淘汰最旧非快照版本（防磁盘无限增长）
+        # R9: Per-artifact version cap, 0 = unlimited. Over-cap evicts the oldest non-snapshot version (prevents unbounded disk growth)
         self.max_versions_per_artifact = max_versions_per_artifact
-        # 运维4: 磁盘水位告警百分比（0-100），0=禁用预检。写前预检，超阈拒绝写
+        # Ops-4: Disk watermark warning percentage (0-100), 0 = disable pre-check. Pre-check before write; reject writes over threshold
         self.disk_space_warning_pct = max(0, int(disk_space_warning_pct))
-        # P0-5/H9: 单版本内容字节上限，0=不限。超限拒绝写入防 OOM/磁盘耗尽
+        # P0-5/H9: Per-version content byte cap, 0 = unlimited. Reject over-limit writes to prevent OOM/disk exhaustion
         self.max_content_bytes = max(0, int(max_content_bytes))
-        # P0-5/H9: 单 artifact metadata JSON 字节上限，0=不限。超限拒绝写入
+        # P0-5/H9: Per-artifact metadata JSON byte cap, 0 = unlimited. Reject over-limit writes
         self.max_metadata_bytes = max(0, int(max_metadata_bytes))
-        # P2-7/F6: metadata 高频过滤字段名。仅保留安全标识符（防 DDL 注入）。
-        # 对每个 key 建 json_extract 表达式索引，metadata_filter 走索引而非全表扫。
+        # P2-7/F6: High-frequency metadata filter field names. Only safe identifiers allowed (prevents DDL injection).
+        # Builds a json_extract expression index per key so metadata_filter uses the index instead of a full scan.
         self.metadata_indexed_keys = [
             k for k in (metadata_indexed_keys or []) if _META_KEY_RE.fullmatch(k)
         ]
         db_path.parent.mkdir(parents=True, exist_ok=True)
         content_dir.mkdir(parents=True, exist_ok=True)
-        # H1: 写连接池决策——SQLite WAL 下 BEGIN IMMEDIATE 由 DB 级锁序列化写，
-        # 多写连接无法并行写（物理上限）。故写连接池 size=1（单 self._conn + _write_lock）
-        # 是正确架构。审计 H1 的真正痛点是「文件 I/O 持 _write_lock 拖长持锁时长」，
-        # 已由 H2 修复（文件写移出事务/锁外）。读侧并发由 E7 只读连接池承担。
-        # 未来换 Postgres/对象存储时（H8）再引入真写连接池。
+        # H1: Write-pool decision — under SQLite WAL, BEGIN IMMEDIATE serializes writes with a DB-level lock;
+        # multiple write connections cannot write in parallel (physical limit). So write pool size=1
+        # (single self._conn + _write_lock) is the correct architecture. The real H1 pain point was 'file I/O holding _write_lock and stretching lock hold time',
+        # fixed by H2 (file writes moved outside the transaction/lock). Read-side concurrency is handled by the E7 read-only pool.
+        # Introduce a real write pool later when switching to Postgres/object storage (H8).
         self._write_lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        # E7: 只读连接池——复用只读连接，避免高频读反复 connect/close。
-        # WAL 允许并发读，池大小 4 兼顾并发与连接开销。
+        # E7: Read-only connection pool — reuse read-only connections to avoid repeated connect/close on hot reads.
+        # WAL allows concurrent reads; pool size 4 balances concurrency and connection overhead.
         self._read_pool_size = 4
         self._read_pool: queue.Queue = queue.Queue(maxsize=self._read_pool_size)
         for _ in range(self._read_pool_size):
@@ -459,17 +459,17 @@ class SQLiteStorage(StorageDriver):
             self._read_pool.put(rc)
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
-        # R5: 迁移按版本门控——先建 schema_meta，再经注册表逐个跑未记录的迁移。
-        # 已跑过的迁移记入 schema_meta.applied_migrations，跳过，避免每次启动全量重检查。
-        # 迁移方法仍需幂等（兼容无 applied_migrations 记录的既有 DB 首次升级）。
+        # R5: Version-gated migrations — create schema_meta first, then run unrecorded migrations one by one from the registry.
+        # Applied migrations are recorded in schema_meta.applied_migrations and skipped, avoiding a full re-check on every startup.
+        # Migration methods must still be idempotent (first upgrade of existing DBs without applied_migrations records).
         self._migrate_schema_meta()
         self._run_migrations_gated()
-        # P2-7/F6: 建配置的 metadata 表达式索引。幂等（IF NOT EXISTS），
-        # 配置改 key 后旧索引保留（无害），新 key 运行时即时建。
+        # P2-7/F6: Create the configured metadata expression indexes. Idempotent (IF NOT EXISTS);
+        # after a config key change the old index is kept (harmless); new keys are created on the fly at runtime.
         self._ensure_metadata_indexes()
-        # P1-4: WAL 周期 checkpoint 后台线程。PASSIVE 模式不阻塞读写，控制 -wal 文件增长，
-        # 让 scripts/backup.sh 的 sqlite3 .backup（需 WAL 已 checkpoint 才能完整快照）可靠。
-        # interval=0 禁用（依赖 SQLite 默认 1000 页自动 checkpoint）。daemon 线程，stop event 退出。
+        # P1-4: Background periodic WAL checkpoint thread. PASSIVE mode does not block reads/writes and controls -wal file growth,
+        # making scripts/backup.sh's sqlite3 .backup reliable (needs a checkpointed WAL for a complete snapshot).
+        # interval=0 disables it (relies on SQLite's default 1000-page auto-checkpoint). Daemon thread; exits via stop event.
         self._wal_checkpoint_interval = max(0, int(wal_checkpoint_interval))
         self._checkpoint_stop = threading.Event()
         self._checkpoint_thread: threading.Thread | None = None
@@ -487,10 +487,10 @@ class SQLiteStorage(StorageDriver):
 
     @contextmanager
     def _read_conn(self):
-        # E7: 从只读连接池借连接，用完归还。WAL 允许并发读；复用连接省 connect/close 开销。
-        # 池为空则限时等待（读并发受池大小约束，防连接泄漏）。已关闭或池饿死必须
-        # 快速失败而非永久阻塞——后台长上下文任务可能在 close 之后才被事件循环
-        # 执行，无限 get() 会把整个进程挂死（#100 验收测试暴露）。
+        # E7: Borrow a read-only connection from the pool and return it after use. WAL allows concurrent reads; reuse saves connect/close overhead.
+        # If the pool is empty, wait with a timeout (read concurrency bounded by pool size, preventing connection leaks). On close or pool starvation we must
+        # fail fast instead of blocking forever — background long-context tasks may only be run by the event loop
+        # after close; an unbounded get() would hang the whole process (exposed by #100 acceptance tests).
         if self._conn is None:
             raise RuntimeError("storage closed: read pool unavailable")
         try:
@@ -503,8 +503,8 @@ class SQLiteStorage(StorageDriver):
             self._read_pool.put(conn)
 
     def _checkpoint_loop(self) -> None:
-        # P1-4: 后台周期 PASSIVE checkpoint。PASSIVE 不阻塞读写，把已提交的 WAL 帧合并回主库。
-        # 控制 -wal 文件无限增长（默认 1000 页才自动 checkpoint，长事务下会堆积）。
+        # P1-4: Background periodic PASSIVE checkpoint. PASSIVE does not block reads/writes; it merges committed WAL frames back into the main DB.
+        # Controls unbounded -wal growth (default auto-checkpoint only at 1000 pages, which piles up under long transactions).
         while not self._checkpoint_stop.wait(self._wal_checkpoint_interval):
             try:
                 self._run_checkpoint("PASSIVE")
@@ -512,12 +512,12 @@ class SQLiteStorage(StorageDriver):
                 logger.warning("WAL PASSIVE checkpoint failed: %s", e)
 
     def _run_checkpoint(self, mode: str = "PASSIVE") -> None:
-        # P1-4: 执行一次 wal_checkpoint。PASSIVE=非阻塞合并；TRUNCATE=合并后截断 -wal 文件。
-        # TRUNCATE 在 close 时用，确保停机后 -wal 文件清空（备份/迁移只拷 meta.db 即可）。
+        # P1-4: Run one wal_checkpoint. PASSIVE = non-blocking merge; TRUNCATE = merge then truncate the -wal file.
+        # TRUNCATE is used on close to guarantee an empty -wal after shutdown (backup/migration only needs to copy meta.db).
         with self._write_lock:
             cur = self._conn.execute(f"PRAGMA wal_checkpoint({mode})")
             row = cur.fetchone()
-            # (busy, log, checkpointed)：busy=1 表示有读写未完成（PASSIVE 正常），不报错
+            # (busy, log, checkpointed): busy=1 means reads/writes still in flight (normal for PASSIVE), not an error
             logger.debug("WAL checkpoint(%s): busy=%s log=%s ckpt=%s", mode, row[0], row[1], row[2])
 
     def _artifact_content_dir(self, artifact_id: str) -> Path:
@@ -530,7 +530,7 @@ class SQLiteStorage(StorageDriver):
     ) -> str:
         d = self._artifact_content_dir(artifact_id)
         path = d / f"v{version_num}.{ext}"
-        # C-10/C-6 纵深防御：拒绝任何穿越出 content_dir 的路径
+        # C-10/C-6 defense in depth: reject any path escaping content_dir
         if not path.resolve().is_relative_to(d.resolve()):
             logger.error(
                 "Refusing content write outside content_dir: %s (ext=%s)", path, ext
@@ -543,9 +543,9 @@ class SQLiteStorage(StorageDriver):
     def _write_content_file_tmp(
         self, artifact_id: str, content: str, ext: str = "txt"
     ) -> tuple[str, str, str]:
-        # H2: 文件先写临时路径（事务外），事务提交成功后再 rename 到最终路径。
-        # 回滚则删临时文件——不留孤儿。返回 (tmp_path, final_path_template, ext)。
-        # final 路径含占位 {version_num}，提交后用实际版本号填充再 rename。
+        # H2: Write the file to a temp path (outside the transaction), rename to the final path after the transaction commits.
+        # On rollback delete the temp file — no orphans. Returns (tmp_path, final_path_template, ext).
+        # The final path contains a {version_num} placeholder, filled with the real version number before rename after commit.
         d = self._artifact_content_dir(artifact_id)
         tmp_name = f".tmp_v{uuid.uuid4().hex}.{ext}"
         tmp_path = d / tmp_name
@@ -567,8 +567,8 @@ class SQLiteStorage(StorageDriver):
     # ── artifact CRUD ──────────────────────────────────────────
 
     def check_disk_space(self) -> tuple[int, int, float] | None:
-        # 运维4: 写前磁盘预检。返回 (used_pct, free_bytes, total) 或 None（禁用）。
-        # 0=禁用监控。超阈值由调用方判定是否拒绝写。
+        # Ops-4: Pre-write disk check. Returns (used_pct, free_bytes, total) or None (disabled).
+        # 0 = monitoring disabled. The caller decides whether to reject the write when over threshold.
         if self.disk_space_warning_pct <= 0:
             return None
         try:
@@ -580,8 +580,8 @@ class SQLiteStorage(StorageDriver):
         return (used_pct, usage.free, usage.total)
 
     def ensure_disk_available(self) -> None:
-        # 运维4: 写前预检——磁盘使用率超阈值则拒绝写并抛 ResourceLimitError。
-        # 阈值 0 禁用。调用方在写路径入口调用。
+        # Ops-4: Pre-write check — reject the write and raise ResourceLimitError when disk usage exceeds the threshold.
+        # Threshold 0 disables it. Callers invoke this at the write-path entry.
         if self.disk_space_warning_pct <= 0:
             return
         info = self.check_disk_space()
@@ -598,9 +598,9 @@ class SQLiteStorage(StorageDriver):
             )
 
     def save_artifact(self, artifact: Artifact) -> None:
-        # 运维4: 写前磁盘预检，超阈值拒绝写
+        # Ops-4: Pre-write disk check; reject writes over threshold
         self.ensure_disk_available()
-        # P0-5/H9: metadata 字节上限校验
+        # P0-5/H9: metadata byte-cap validation
         _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
@@ -682,13 +682,13 @@ class SQLiteStorage(StorageDriver):
     def save_artifact_and_version(
         self, artifact: Artifact, version: ArtifactVersion
     ) -> None:
-        # 运维4: 写前磁盘预检，超阈值拒绝写
+        # Ops-4: Pre-write disk check; reject writes over threshold
         self.ensure_disk_available()
-        # P0-5/H9: metadata + 内容字节上限校验
+        # P0-5/H9: metadata + content byte-cap validation
         _enforce_metadata_limit(artifact.metadata, self.max_metadata_bytes)
         _enforce_content_limit(version.content, self.max_content_bytes)
-        # P1-8/H10: 内容文件两阶段写——先写临时路径（事务外），提交成功后 rename 到最终。
-        # 回滚删临时文件，不留孤儿；文件 I/O 不在 BEGIN IMMEDIATE 内，缩短 _write_lock 持锁。
+        # P1-8/H10: Two-phase content file write — write to a temp path (outside the transaction) first, rename to final after commit.
+        # Rollback deletes the temp file, no orphans; file I/O stays outside BEGIN IMMEDIATE, shortening _write_lock hold time.
         with self._write_lock:
             meta_json = json.dumps(artifact.metadata) if artifact.metadata else None
             tmp_path = None
@@ -795,7 +795,7 @@ class SQLiteStorage(StorageDriver):
                     ),
                 )
                 self._conn.commit()
-                # P1-8/H10: 提交成功后 rename 临时文件到最终路径
+                # P1-8/H10: After successful commit, rename the temp file to the final path
                 if tmp_path is not None and content_path is not None:
                     try:
                         Path(tmp_path).rename(content_path)
@@ -807,7 +807,7 @@ class SQLiteStorage(StorageDriver):
                         )
                         tmp_path = None
             except sqlite3.Error as e:
-                # P1-8/H10: 事务失败——清理临时文件，不留孤儿
+                # P1-8/H10: Transaction failed — clean up the temp file, no orphans
                 if tmp_path is not None:
                     try:
                         Path(tmp_path).unlink(missing_ok=True)
@@ -825,7 +825,7 @@ class SQLiteStorage(StorageDriver):
     def get_artifact(
         self, artifact_id: str, project_id: str | None = None
     ) -> Artifact | None:
-        # P2-5/H12(trace): db.storage.duration 标记读路径。tracing.span 未启用时 no-op。
+        # P2-5/H12(trace): db.storage.duration marks the read path. tracing.span is a no-op when tracing is disabled.
         from fusion_artifacts_engine import tracing
 
         with tracing.span(
@@ -854,7 +854,7 @@ class SQLiteStorage(StorageDriver):
         project_id: str | None = None,
         metadata_filter: dict | None = None,
     ) -> list[Artifact]:
-        # P2-5/H12(trace): db.storage.duration 标记读路径。
+        # P2-5/H12(trace): db.storage.duration marks the read path.
         from fusion_artifacts_engine import tracing
 
         with tracing.span(
@@ -870,13 +870,13 @@ class SQLiteStorage(StorageDriver):
                 params.append(project_id)
             if metadata_filter:
                 for key, value in metadata_filter.items():
-                    # P-4: 校验 key 仅含安全标识符字符，拒绝 JSONPath 注入（. [ " 空白）
+                    # P-4: Validate that the key contains only safe identifier characters, rejecting JSONPath injection (. [ " whitespace)
                     if not _META_KEY_RE.fullmatch(key):
                         logger.warning("Reject metadata filter key (unsafe): %s", key)
                         continue
                     json_path = f"$.{key}"
                     conditions.append("json_extract(metadata, ?) = ?")
-                    # L-15: 原生类型绑定，bool 用 int，避免 str() 把数字过滤变永不命中
+                    # L-15: Bind native types, bool as int, to avoid str() turning numeric filters into never-matching predicates
                     bind_val = int(value) if isinstance(value, bool) else value
                     params.extend([json_path, bind_val])
             where = " AND ".join(conditions)
@@ -895,7 +895,7 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 20,
         cursor: str | None = None,
     ) -> tuple[list[Artifact], int]:
-        # P1-5/M5: 分页入参硬化
+        # P1-5/M5: Harden pagination inputs
         page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0"]
         params: list = []
@@ -955,9 +955,9 @@ class SQLiteStorage(StorageDriver):
                 conditions.append("created_at <= ?")
                 params.append(_coerce_float("until", until))
         where = " AND ".join(conditions)
-        # P2-7/F6: keyset 分页——updated_at/created_at 单列 DESC 排序支持游标，
-        # WHERE (sort_col, id) < (cursor_val, cursor_id) 替代 OFFSET 深分页（避免扫+丢行）。
-        # cursor 格式 "<float>:<id>"；非法或排序不支持时回退 OFFSET（向后兼容）。
+        # P2-7/F6: Keyset pagination — single-column DESC sort on updated_at/created_at supports cursors;
+        # WHERE (sort_col, id) < (cursor_val, cursor_id) replaces OFFSET deep pagination (avoids scan + dropped rows).
+        # Cursor format "<float>:<id>"; falls back to OFFSET when invalid or the sort is unsupported (backward compatible).
         keyset_cols = {"updated_at": "updated_at", "created_at": "created_at"}
         use_keyset = False
         cursor_params: list = []
@@ -982,7 +982,7 @@ class SQLiteStorage(StorageDriver):
             }
             order = sort_map.get(sort, "updated_at DESC")
             if use_keyset:
-                # keyset: 排序加 id DESC 做 tiebreaker（保证游标严格有序，不漏不重）。
+                # keyset: add id DESC to the sort as tiebreaker (guarantees strict cursor ordering, no gaps or dupes).
                 keyset_order = f"{keyset_cols[sort]} DESC, id DESC"
                 cur = conn.execute(
                     f"SELECT * FROM artifacts WHERE {where}{cursor_cond} "
@@ -1010,8 +1010,8 @@ class SQLiteStorage(StorageDriver):
         session_id: str | None = None,
         project_id: str | None = None,
     ) -> tuple[int, list[dict]]:
-        # P-2: 一条 SQL JOIN artifacts→artifact_versions(current_version) 聚合 token，
-        # 替代逐 artifact get_version_content 的 N+1 往返与全量内容入内存。
+        # P-2: One SQL JOIN artifacts -> artifact_versions(current_version) to aggregate tokens,
+        # replacing per-artifact get_version_content N+1 round trips and loading full content into memory.
         conditions = ["a.is_deleted = 0"]
         params: list = []
         if session_id is not None:
@@ -1051,7 +1051,7 @@ class SQLiteStorage(StorageDriver):
         soft_delete: bool = True,
         project_id: str | None = None,
     ) -> bool:
-        # P2-5/H12(trace): db.storage.duration 标记写路径。
+        # P2-5/H12(trace): db.storage.duration marks the write path.
         from fusion_artifacts_engine import tracing
 
         with tracing.span(
@@ -1080,7 +1080,7 @@ class SQLiteStorage(StorageDriver):
                 ok = cur.rowcount > 0
             else:
                 with self._write_lock:
-                    # 硬删先清无 FK 的关联表，避免孤儿行 (P2-5)。
+                    # Hard delete clears FK-less related tables first to avoid orphan rows (P2-5).
                     self._conn.execute(
                         "DELETE FROM artifact_tag_map WHERE artifact_id = ?", (artifact_id,)
                     )
@@ -1117,8 +1117,8 @@ class SQLiteStorage(StorageDriver):
     def update_artifact_summary(
         self, artifact_id: str, summary: str, metadata_patch: dict | None = None
     ) -> bool:
-        # v0.7.1 #91: 滚动摘要写回。summary 进 artifact.summary 列（ref_text 经
-        # 既有管道自动携带）；metadata_patch 合并进 metadata JSON（单事务原子）。
+        # v0.7.1 #91: Rolling summary write-back. summary goes into the artifact.summary column (ref_text is carried
+        # automatically by the existing pipeline); metadata_patch is merged into the metadata JSON (atomic in a single transaction).
         with self._write_lock:
             row = self._conn.execute(
                 "SELECT metadata FROM artifacts WHERE id = ?",
@@ -1180,7 +1180,7 @@ class SQLiteStorage(StorageDriver):
         art = self.get_artifact(artifact_id)
         if art is None:
             return None
-        # L-14: 拒绝覆盖碰巧同 ID 的已有 artifact
+        # L-14: Refuse to overwrite an existing artifact that happens to share the ID
         if self.get_artifact(new_id) is not None:
             logger.error("Duplicate target id %s already exists", new_id)
             raise ValueError(f"Artifact id already exists: {new_id}")
@@ -1254,7 +1254,7 @@ class SQLiteStorage(StorageDriver):
     def list_recycle(
         self, page: int = 1, page_size: int = 20
     ) -> tuple[list[Artifact], int]:
-        # P1-5/M5: 分页入参硬化
+        # P1-5/M5: Harden pagination inputs
         page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 1"]
         params: list = []
@@ -1302,7 +1302,7 @@ class SQLiteStorage(StorageDriver):
                 self._conn.execute(
                     "DELETE FROM artifact_events WHERE artifact_id = ?", (aid,)
                 )
-                # L-9: 漏删 artifact_shares 留孤儿行——补上
+                # L-9: Missing artifact_shares deletion left orphan rows — added
                 self._conn.execute(
                     "DELETE FROM artifact_shares WHERE artifact_id = ?", (aid,)
                 )
@@ -1315,8 +1315,8 @@ class SQLiteStorage(StorageDriver):
                     purged_dirs.append(content_dir)
                 count += 1
             self._conn.commit()
-            # 先 commit 再删盘：commit 失败则不留孤儿行指向缺失文件 (P2-6)
-            # E5: 不用 ignore_errors=True 静默吞错；onerror 记日志，让磁盘/权限问题可见
+            # Commit before deleting from disk: on commit failure no orphan rows point at missing files (P2-6)
+            # E5: No ignore_errors=True silent swallowing; onerror logs so disk/permission problems are visible
             for content_dir in purged_dirs:
                 def _on_rm_err(func, fpath, exc_info):
                     logger.warning("Failed to purge content %s: %s", fpath, exc_info[1])
@@ -1330,11 +1330,11 @@ class SQLiteStorage(StorageDriver):
 
     @_tracing.traced("db.storage.duration", db_operation="save_version")
     def save_version(self, version: ArtifactVersion) -> None:
-        # 运维4: 写前磁盘预检，超阈值拒绝写
+        # Ops-4: Pre-write disk check; reject writes over threshold
         self.ensure_disk_available()
-        # C-11/C-12/H2: 文件写事务外临时路径，提交后 rename 到最终路径。
-        # 重试改 version_num 时只重算最终路径（tmp 文件不变），避免覆盖历史版本与串号，
-        # 旧版本号不再写盘（tmp 单文件），彻底消除孤儿。
+        # C-11/C-12/H2: File writes go to a temp path outside the transaction; rename to final after commit.
+        # On retry with a new version_num only the final path is recomputed (tmp file unchanged), avoiding overwriting historical versions and cross-numbering;
+        # stale version numbers never hit disk (single tmp file), eliminating orphans entirely.
         with self._write_lock:
             max_retries = 3
             tmp_path = None
@@ -1386,7 +1386,7 @@ class SQLiteStorage(StorageDriver):
                         ),
                     )
                     self._conn.commit()
-                    # H2: 提交成功后 rename 临时文件到最终路径
+                    # H2: After successful commit, rename the temp file to the final path
                     if tmp_path is not None and content_path is not None:
                         try:
                             Path(tmp_path).rename(content_path)
@@ -1397,7 +1397,7 @@ class SQLiteStorage(StorageDriver):
                                 "orphan/tmp left for GC", tmp_path, content_path, e,
                             )
                             tmp_path = None
-                    # R9: 写入后按版本上限淘汰最旧非快照版本
+                    # R9: After the write, evict oldest non-snapshot versions per the version cap
                     self._enforce_version_limit(version.artifact_id)
                     logger.info(
                         "Saved version: %s v%d size=%d tokens=%d",
@@ -1409,7 +1409,7 @@ class SQLiteStorage(StorageDriver):
                     return
                 except sqlite3.IntegrityError:
                     if attempt >= max_retries - 1:
-                        # 重试耗尽——清理 tmp 文件，不留孤儿
+                        # Retries exhausted — clean up the tmp file, no orphans
                         if tmp_path is not None:
                             try:
                                 Path(tmp_path).unlink(missing_ok=True)
@@ -1422,7 +1422,7 @@ class SQLiteStorage(StorageDriver):
                         version.artifact_id,
                         version.version_num,
                     )
-            # 循环正常结束（理论不会到这）——清理 tmp
+            # Loop ended normally (theoretically unreachable) — clean up tmp
             if tmp_path is not None:
                 try:
                     Path(tmp_path).unlink(missing_ok=True)
@@ -1439,9 +1439,9 @@ class SQLiteStorage(StorageDriver):
             return row[0]
 
     def _enforce_version_limit(self, artifact_id: str) -> None:
-        # R9: 超过 max_versions_per_artifact 时淘汰最旧非快照版本（含其磁盘文件）。
-        # 必须在 _write_lock 内调。快照（snapshot_type='named'）不计入上限、不被淘汰。
-        # 当前版本（artifacts.current_version）绝不被淘汰，避免误删活版本。
+        # R9: When over max_versions_per_artifact, evict the oldest non-snapshot versions (including their disk files).
+        # Must be called under _write_lock. Snapshots (snapshot_type='named') do not count toward the cap and are never evicted.
+        # The current version (artifacts.current_version) is never evicted, preventing deletion of a live version.
         if self.max_versions_per_artifact <= 0:
             return
         cur = self._conn.execute(
@@ -1454,7 +1454,7 @@ class SQLiteStorage(StorageDriver):
             "ORDER BY version_num ASC",
             (artifact_id,),
         ).fetchall()
-        # 可淘汰数 = 非快照版本数 - max（已超 max 才淘汰）
+        # Evictable count = non-snapshot version count - max (only evict when over max)
         excess = len(rows) - self.max_versions_per_artifact
         if excess <= 0:
             return
@@ -1478,15 +1478,15 @@ class SQLiteStorage(StorageDriver):
             excess -= 1
             purged += 1
         if purged:
-            # E11/R9: DELETE 隐式开事务，显式提交，否则下次 BEGIN IMMEDIATE 报
+            # E11/R9: DELETE implicitly opens a transaction; commit explicitly, otherwise the next BEGIN IMMEDIATE fails with
             # "cannot start a transaction within a transaction"
             self._conn.commit()
             logger.info("Version limit enforced: %s evicted %d old version(s)", artifact_id, purged)
 
     def gc_orphan_files(self) -> int:
-        # H2: 孤儿文件 GC——扫描 content_dir，删无 DB 行指向的文件 + 残留 .tmp_ 文件。
-        # DB 行指向的 content_path 集合与磁盘文件集合做差，多余即孤儿。
-        # 返回清理的文件数。调用方应在低峰期或周期触发。
+        # H2: Orphan file GC — scan content_dir, delete files no DB row points at + leftover .tmp_ files.
+        # Set-difference between the content_path set referenced by DB rows and the on-disk file set; the excess are orphans.
+        # Returns the number of cleaned files. Callers should trigger this off-peak or periodically.
         with self._write_lock:
             valid_paths: set[str] = set()
             for r in self._conn.execute(
@@ -1503,7 +1503,7 @@ class SQLiteStorage(StorageDriver):
             for f in art_dir.iterdir():
                 if not f.is_file():
                     continue
-                # .tmp_ 前缀=两阶段写残留（rename 失败/进程崩溃），直接清
+                # .tmp_ prefix = two-phase write leftovers (failed rename / process crash); delete directly
                 if f.name.startswith(".tmp_"):
                     try:
                         f.unlink()
@@ -1531,17 +1531,17 @@ class SQLiteStorage(StorageDriver):
         summary: str | None,
         expected_content_hash: str | None = None,
     ) -> int:
-        # 运维4: 写前磁盘预检，超阈值拒绝写
+        # Ops-4: Pre-write disk check; reject writes over threshold
         self.ensure_disk_available()
-        # P0-5/H9: 内容字节上限校验
+        # P0-5/H9: content byte-cap validation
         _enforce_content_limit(version.content, self.max_content_bytes)
-        # C-8: 乐观锁校验+写入收进单事务，BEGIN IMMEDIATE 序列化并发写，
-        # 事务内重读 current_version/content_hash 校验，分配 version_num，
-        # 写 version 行并更新 artifact.current_version/content_hash，原子提交。
-        # H2: 文件写移出事务——先写临时文件（事务外），事务提交后 rename 到最终路径。
-        # 回滚则删临时文件，不留孤儿。返回实际分配的 version_num。
+        # C-8: Optimistic-lock validation + write in a single transaction; BEGIN IMMEDIATE serializes concurrent writes,
+        # current_version/content_hash re-read and validated inside the transaction, version_num allocated,
+        # the version row written and artifact.current_version/content_hash updated, committed atomically.
+        # H2: File write moved out of the transaction — write a temp file first (outside), rename to the final path after commit.
+        # On rollback delete the temp file, no orphans. Returns the actually allocated version_num.
         with self._write_lock:
-            # H2 阶段1：文件写事务外临时路径（version_num 未知，先写 tmp）
+            # H2 phase 1: file write to a temp path outside the transaction (version_num unknown, write tmp first)
             tmp_path = None
             final_template = None
             content = version.content
@@ -1562,7 +1562,7 @@ class SQLiteStorage(StorageDriver):
                 db_content_hash = row["content_hash"]
                 db_summary = row["summary"]
                 if expected_content_hash is not None and db_content_hash != expected_content_hash:
-                    # P0-2: 乐观锁冲突映射 ConflictError(-32002, 可重试)，而非 -32602。
+                    # P0-2: Map optimistic-lock conflicts to ConflictError(-32002, retryable), not -32602.
                     raise ConflictError(
                         f"Optimistic lock failed: expected hash {expected_content_hash},"
                         f" got {db_content_hash}"
@@ -1576,7 +1576,7 @@ class SQLiteStorage(StorageDriver):
                 version.version_num = new_version_num
                 content_path = None
                 if tmp_path is not None:
-                    # H2 阶段2：事务内只记最终路径（实际 rename 在提交后）
+                    # H2 phase 2: only record the final path inside the transaction (actual rename happens after commit)
                     content_path = str(
                         self.content_dir / version.artifact_id
                         / final_template.format(version_num=new_version_num)
@@ -1615,20 +1615,20 @@ class SQLiteStorage(StorageDriver):
                     (new_version_num, version.created_at, content_hash, final_summary, artifact.id),
                 )
                 self._conn.execute("COMMIT")
-                # H2 阶段3：提交成功后 rename 临时文件到最终路径
+                # H2 phase 3: after successful commit, rename the temp file to the final path
                 if tmp_path is not None and content_path is not None:
                     try:
                         Path(tmp_path).rename(content_path)
                     except OSError as e:
-                        # rename 失败：DB 行已指向 content_path 但文件在 tmp_path。
-                        # 不回滚 DB（已提交）；gc_orphan_files 会清理，且下次读该版本
-                        # content_path 会 FileNotFoundError——记 ERROR 便于定位
+                        # rename failure: the DB row already points at content_path but the file is at tmp_path.
+                        # Do not roll back the DB (already committed); gc_orphan_files will clean up, and the next read of that version
+                        # of content_path hits FileNotFoundError — log ERROR for easier diagnosis
                         logger.error(
                             "Failed to rename tmp content %s -> %s: %s; "
                             "DB row committed, orphan/tmp file left for GC",
                             tmp_path, content_path, e,
                         )
-                # R9: 提交后按版本上限淘汰最旧非快照版本（独立于事务，淘汰失败不影响版本写入）
+                # R9: After commit, evict oldest non-snapshot versions per the cap (independent of the transaction; eviction failure does not affect the version write)
                 try:
                     self._enforce_version_limit(artifact.id)
                 except Exception as e:
@@ -1648,13 +1648,13 @@ class SQLiteStorage(StorageDriver):
                     self._conn.execute("ROLLBACK")
                 except sqlite3.Error:
                     pass
-                # H2: 回滚则删临时文件，不留孤儿
+                # H2: On rollback delete the temp file, no orphans
                 if tmp_path is not None:
                     try:
                         Path(tmp_path).unlink(missing_ok=True)
                     except OSError as e:
                         logger.warning("Failed to clean tmp content %s: %s", tmp_path, e)
-                # P0-3/H8: SQLite OperationalError 按消息映射为可重试 ConflictError / ResourceLimitError
+                # P0-3/H8: Map SQLite OperationalError by message to retryable ConflictError / ResourceLimitError
                 if isinstance(exc, sqlite3.Error):
                     raise _translate_sqlite_error(exc) from exc
                 raise
@@ -1664,7 +1664,7 @@ class SQLiteStorage(StorageDriver):
             try:
                 ver.content = self._read_content_file(ver.content_path)
             except FileNotFoundError:
-                # L-16: 内容文件缺失是数据损坏，不伪造空版本——上抛让引擎/调用方决定
+                # L-16: A missing content file is data corruption; do not fabricate an empty version — raise and let the engine/caller decide
                 logger.error(
                     "Corrupt version: content file missing for %s v%s at %s",
                     artifact_id,
@@ -1693,8 +1693,8 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
-        # P-3: 分页 + 可选跳过内容文件读，避免无界扫描全量入内存
-        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        # P-3: Pagination + optionally skipping content file reads avoids unbounded full scans into memory
+        # P1-5: Route through _clamp_pagination uniformly — page>=1, page_size<=500, non-int falls back to defaults
         page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
@@ -1724,7 +1724,7 @@ class SQLiteStorage(StorageDriver):
         page_size: int = 200,
         include_content: bool = True,
     ) -> list[ArtifactVersion]:
-        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        # P1-5: Route through _clamp_pagination uniformly — page>=1, page_size<=500, non-int falls back to defaults
         page, page_size = _clamp_pagination(page, page_size)
         offset = (page - 1) * page_size
         with self._read_conn() as conn:
@@ -1805,7 +1805,7 @@ class SQLiteStorage(StorageDriver):
                 "UPDATE artifact_shares SET revoked = 1 WHERE share_id = ?",
                 (share_id,),
             )
-            # L-12: 同步置空 artifacts.share_id，避免唯一索引占位阻塞新分享
+            # L-12: Clear artifacts.share_id in sync to keep the unique index from blocking new shares
             self._conn.execute(
                 "UPDATE artifacts SET share_id = NULL WHERE share_id = ?",
                 (share_id,),
@@ -1816,7 +1816,7 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def update_share_permission(self, share_id: str, permission: str) -> bool:
-        # #77: 同链接改权限 —— view/remix 下次打开即生效
+        # #77: Change permission on the same link — view/remix takes effect on next open
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE artifact_shares SET permission = ? WHERE share_id = ? AND revoked = 0",
@@ -1829,8 +1829,8 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def increment_share_access(self, share_id: str, delta: int = 1) -> None:
-        # E1: last_access_at 写 float epoch，与列定义 REAL 一致
-        # R2: delta 支持批量刷盘（公开 GET 内存缓冲聚合后一次写）
+        # E1: Write last_access_at as float epoch, consistent with the REAL column definition
+        # R2: delta supports batched flushing (public GET memory buffer aggregated then written once)
         if delta <= 0:
             return
         now_ts = time.time()
@@ -1842,9 +1842,9 @@ class SQLiteStorage(StorageDriver):
             self._conn.commit()
 
     def try_increment_share_access(self, share_id: str, max_accesses: int | None) -> bool:
-        # P1-2/H5: 原子 check-and-increment——单条条件 UPDATE 在 _write_lock 下原子完成
-        # "未达上限才 +1"，消除 get_shared_artifact 里先读 access_count 再 increment 的 TOCTOU。
-        # 返回 True=已增计数（允许），False=已达上限或 share 不存在（拒绝）。
+        # P1-2/H5: Atomic check-and-increment — a single conditional UPDATE completes atomically under _write_lock
+        # "increment only if under the cap", eliminating the TOCTOU in get_shared_artifact of reading access_count then incrementing.
+        # Returns True = counter incremented (allowed), False = cap reached or share missing (denied).
         now_ts = time.time()
         with self._write_lock:
             cur = self._conn.execute(
@@ -1909,7 +1909,7 @@ class SQLiteStorage(StorageDriver):
         return ok
 
     def delete_folder(self, folder_id: str) -> bool:
-        # L-13: 收集后代 folder，避免子文件夹留悬挂 parent_id 指向已删 folder
+        # L-13: Collect descendant folders so child folders never keep a dangling parent_id pointing at a deleted folder
         with self._write_lock:
             self._conn.execute(
                 "UPDATE artifacts SET folder_id = NULL WHERE folder_id = ?",
@@ -1929,7 +1929,7 @@ class SQLiteStorage(StorageDriver):
                     break
                 descendant_ids.extend(children)
                 pending = children
-            # nullify 直接/间接后代 artifact 的 folder_id
+            # Nullify folder_id of direct/indirect descendant artifacts
             self._conn.execute(
                 "UPDATE artifacts SET folder_id = NULL WHERE folder_id IN ({})".format(
                     ",".join("?" * len(descendant_ids))
@@ -1983,7 +1983,7 @@ class SQLiteStorage(StorageDriver):
         return _tag_from_row(row)
 
     def get_tag_by_name(self, name: str, scope: str | None = None) -> ArtifactTag | None:
-        # L-7: 按 scope 查询；scope=None 时回退全局（兼容无作用域调用）
+        # L-7: Query by scope; scope=None falls back to global (compatible with scope-less callers)
         with self._read_conn() as conn:
             if scope is None:
                 cur = conn.execute(
@@ -2001,7 +2001,7 @@ class SQLiteStorage(StorageDriver):
         return _tag_from_row(row)
 
     def list_tags(self, scope: str | None = None) -> list[ArtifactTag]:
-        # L-7: list_tags 按 scope 过滤；不传则返回全部（向后兼容）
+        # L-7: list_tags filters by scope; returns all when not given (backward compatible)
         with self._read_conn() as conn:
             if scope is None:
                 cur = conn.execute("SELECT * FROM artifact_tags ORDER BY name")
@@ -2053,7 +2053,7 @@ class SQLiteStorage(StorageDriver):
 
     def save_event(self, event: ArtifactEvent) -> None:
         payload_json = json.dumps(event.payload) if event.payload else None
-        # A-8: created_at 统一 REAL epoch；旧 model 传 ISO 串也转 epoch
+        # A-8: created_at unified as REAL epoch; legacy models passing ISO strings are converted too
         created_at = self._coerce_since_ts(event.created_at) if event.created_at else time.time()
         with self._write_lock:
             self._conn.execute(
@@ -2077,7 +2077,7 @@ class SQLiteStorage(StorageDriver):
         )
 
     def _coerce_since_ts(self, since_ts) -> float:
-        # A-8: since_ts 兼容 REAL epoch 与 ISO 串，统一转 REAL 与 REAL 列比较
+        # A-8: since_ts accepts both REAL epoch and ISO strings, normalized to REAL for comparison with REAL columns
         try:
             return float(since_ts)
         except (TypeError, ValueError):
@@ -2097,7 +2097,7 @@ class SQLiteStorage(StorageDriver):
         page: int = 1,
         page_size: int = 50,
     ) -> tuple[list[ArtifactEvent], int]:
-        # P1-5/M5: 分页入参硬化
+        # P1-5/M5: Harden pagination inputs
         page, page_size = _clamp_pagination(page, page_size)
         conditions = []
         params: list = []
@@ -2144,7 +2144,7 @@ class SQLiteStorage(StorageDriver):
     # ── migrations ─────────────────────────────────────────────
 
     def _guess_ext(self, artifact_id: str, content: str) -> str:
-        # C-10: 扩展名取自用户输入 name，必须限定安全字符集，拒绝路径穿越片段
+        # C-10: The extension comes from user-supplied name; restrict to a safe charset and reject path-traversal fragments
         art = self.get_artifact(artifact_id)
         if art and "." in art.name:
             raw = art.name.rsplit(".", 1)[-1]
@@ -2355,8 +2355,8 @@ class SQLiteStorage(StorageDriver):
         page: int = 1,
         page_size: int = 200,
     ) -> list[Artifact]:
-        # P-3: 分页避免无界扫描
-        # P1-5: 统一走 _clamp_pagination——page>=1、page_size<=500、非 int 兜底默认
+        # P-3: Pagination avoids unbounded scans
+        # P1-5: Route through _clamp_pagination uniformly — page>=1, page_size<=500, non-int falls back to defaults
         page, page_size = _clamp_pagination(page, page_size)
         conditions = ["is_deleted = 0", "source_module = ?"]
         params: list = [source_module]
@@ -2377,12 +2377,12 @@ class SQLiteStorage(StorageDriver):
         return [_artifact_from_row(row) for row in rows]
 
     def close(self) -> None:
-        # 幂等：重复 close（如测试显式 close 后 fixture teardown 再 close）不应崩溃。
-        # _conn 已为 None 说明此前已关闭，直接返回。
+        # Idempotent: repeated close (e.g. test closes explicitly, then fixture teardown closes again) must not crash.
+        # _conn already None means previously closed; return directly.
         if self._conn is None:
             logger.debug("SQLiteStorage.close() no-op: already closed")
             return
-        # P1-4: 先停 checkpoint 后台线程，再做最终 TRUNCATE checkpoint，确保停机后 -wal 清空。
+        # P1-4: Stop the checkpoint background thread first, then run the final TRUNCATE checkpoint, ensuring an empty -wal after shutdown.
         if self._checkpoint_thread is not None:
             self._checkpoint_stop.set()
             self._checkpoint_thread.join(timeout=5)
@@ -2391,7 +2391,7 @@ class SQLiteStorage(StorageDriver):
             self._run_checkpoint("TRUNCATE")
         except Exception as e:
             logger.warning("WAL final TRUNCATE checkpoint failed: %s", e)
-        # E7: 关连接池里的只读连接（非阻塞取出，取不到说明正被借出，跳过）
+        # E7: Close the pool's read-only connections (non-blocking get; a miss means it is borrowed, skip)
         while True:
             try:
                 rc = self._read_pool.get_nowait()
@@ -2403,8 +2403,8 @@ class SQLiteStorage(StorageDriver):
         logger.info("SQLiteStorage closed")
 
     def health_check(self) -> bool:
-        # 运维5: /readyz 探针依赖——SELECT 1 验证 DB 连接可用，content_dir 可写。
-        # 不做实质写入，仅探活。失败返回 False 不抛（调用方按状态码处理）。
+        # Ops-5: /readyz probe dependency — SELECT 1 verifies DB connectivity and content_dir writability.
+        # No real writes, liveness only. Returns False on failure instead of raising (the caller maps it to a status code).
         try:
             with self._write_lock:
                 row = self._conn.execute("SELECT 1").fetchone()
@@ -2457,10 +2457,10 @@ class SQLiteStorage(StorageDriver):
             logger.warning("Migration size_bytes failed: %s", e)
 
     def _rebuild_table_keep_data(self, table: str, new_ddl: str) -> None:
-        # 表重建通用工具：新表名与旧表并存，复制数据后 drop 旧表、rename 新表就位。
-        # 关键约束：全程不改名旧表——ALTER TABLE RENAME 会把其他表的 FK 引用
-        # 改写到旧表名，旧表一删引用即悬空（v0.7.6 首版迁移的生产缺陷）。
-        # new_ddl 必须以 rebuild 名建表，调用方负责替换表名与 CHECK 等子句。
+        # Generic table-rebuild helper: the new table coexists with the old, data is copied, then the old is dropped and the new renamed into place.
+        # Key constraint: never rename the old table — ALTER TABLE RENAME rewrites other tables' FK references
+        # to the old table name; once the old table is dropped the references dangle (production defect in the v0.7.6 first-cut migration).
+        # new_ddl must create the table under the rebuild name; the caller is responsible for swapping table names and CHECK clauses etc.
         rebuild = f"{table}__rebuild"
         self._conn.execute("PRAGMA foreign_keys=OFF")
         try:
@@ -2494,10 +2494,10 @@ class SQLiteStorage(StorageDriver):
             self._conn.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_artifact_type_check(self) -> None:
-        # #100-1: 旧库 artifacts.type 的 CHECK 约束缺少 'svg'/'mermaid'，插入被
-        # IntegrityError 拒绝。SQLite 无法 ALTER CHECK，只能重建表。重建走
-        # _rebuild_table_keep_data（新旧表并存复制，不做 RENAME 旧表），
-        # 索引 DDL 从 sqlite_master 原样捕获（含表达式索引），换表后逐条重建。
+        # #100-1: The legacy artifacts.type CHECK constraint lacks 'svg'/'mermaid', so inserts are
+        # rejected with IntegrityError. SQLite cannot ALTER a CHECK, so the table must be rebuilt. The rebuild uses
+        # _rebuild_table_keep_data (new/old tables coexist with data copied; the old table is never renamed),
+        # index DDL is captured verbatim from sqlite_master (expression indexes included) and recreated one by one after the swap.
         row = self._conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='artifacts'"
         ).fetchone()
@@ -2517,11 +2517,11 @@ class SQLiteStorage(StorageDriver):
         logger.info("Migrated artifacts.type CHECK done: svg/mermaid now accepted")
 
     def _migrate_artifact_type_fk_repair(self) -> None:
-        # 修复 v0.7.6 首版迁移的生产缺陷：首版用 ALTER TABLE RENAME 换表，SQLite
-        # 会把子表 FK 引用改写到临时表名 artifacts_type_check_tmp（带引号形式
-        # "artifacts_type_check_tmp"），临时表删除后引用悬空，子表 insert 报
-        # "no such table: main.artifacts_type_check_tmp"。本迁移重建所有引用
-        # 悬空的子表，把 REFERENCES 指回 artifacts（兼容带引号/不带引号两种 DDL）。
+        # Fixes the production defect in the v0.7.6 first-cut migration: that version swapped tables via ALTER TABLE RENAME, and SQLite
+        # rewrote child-table FK references to the temp name artifacts_type_check_tmp (in quoted form
+        # "artifacts_type_check_tmp"); after the temp table was dropped the references dangled and child-table inserts failed with
+        # "no such table: main.artifacts_type_check_tmp". This migration rebuilds every child table with
+        # dangling references, pointing REFERENCES back at artifacts (handles both quoted and unquoted DDL).
         broken = "artifacts_type_check_tmp"
         rows = self._conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql LIKE ?",
@@ -2546,11 +2546,11 @@ class SQLiteStorage(StorageDriver):
     _SCHEMA_VERSION = 2
 
     def _migrate_schema_meta(self) -> None:
-        # A-6: schema_meta 记录 schema_version，支持迁移框架与版本检测
+        # A-6: schema_meta records schema_version, enabling the migration framework and version detection
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value INTEGER)"
         )
-        # R5: applied_migrations 记录已跑过的迁移名，支持按版本跳过
+        # R5: applied_migrations records applied migration names, enabling version-based skipping
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS applied_migrations "
             "(name TEXT PRIMARY KEY, applied_at REAL)"
@@ -2568,13 +2568,13 @@ class SQLiteStorage(StorageDriver):
         else:
             db_ver = row[0]
             if db_ver > self._SCHEMA_VERSION:
-                # A-6: DB 版本高于代码——拒绝启动，避免未知 schema 静默损坏
+                # A-6: DB version newer than the code — refuse to start, avoiding silent corruption from an unknown schema
                 raise RuntimeError(
                     f"DB schema_version {db_ver} > code {self._SCHEMA_VERSION}; "
                     "downgrade unsupported"
                 )
 
-    # R5: 迁移注册表——顺序即执行顺序。新增迁移追加到末尾，勿改既有顺序。
+    # R5: Migration registry — order is execution order. Append new migrations at the end; never reorder existing ones.
     _MIGRATIONS: list[tuple[str, str]] = [
         ("migrate_kind_column", "_migrate_kind_column"),
         ("migrate_source_column", "_migrate_source_column"),
@@ -2599,7 +2599,7 @@ class SQLiteStorage(StorageDriver):
     ]
 
     def _run_migrations_gated(self) -> None:
-        # R5: 仅跑未记入 applied_migrations 的迁移，跑完记录。避免每次启动全量重检查。
+        # R5: Run only migrations not recorded in applied_migrations, then record them. Avoids a full re-check on every startup.
         applied = {
             r["name"]
             for r in self._conn.execute("SELECT name FROM applied_migrations").fetchall()
@@ -2617,7 +2617,7 @@ class SQLiteStorage(StorageDriver):
 
 
     def _migrate_remix_lineage(self) -> None:
-        # #77: remix lineage — artifacts.parent_artifact_id（派生自哪个产物，NULL=原创）
+        # #77: remix lineage — artifacts.parent_artifact_id (which artifact this derives from, NULL = original)
         cur = self._conn.execute("PRAGMA table_info(artifacts)")
         columns = {row["name"] for row in cur.fetchall()}
         if "parent_artifact_id" not in columns:
@@ -2632,7 +2632,7 @@ class SQLiteStorage(StorageDriver):
         self._conn.commit()
 
     def _migrate_share_permission(self) -> None:
-        # #77: share permission level — 'view'（只读，默认）/ 'remix'（可派生）
+        # #77: share permission level — 'view' (read-only, default) / 'remix' (derivable)
         cur = self._conn.execute("PRAGMA table_info(artifact_shares)")
         columns = {row["name"] for row in cur.fetchall()}
         if "permission" not in columns:
@@ -2644,7 +2644,7 @@ class SQLiteStorage(StorageDriver):
             logger.info("Migrated: added 'permission' column to artifact_shares table")
 
     def _migrate_event_timestamps(self) -> None:
-        # A-8: artifact_events.created_at 统一 REAL epoch。旧 ISO 串转 epoch。
+        # A-8: artifact_events.created_at unified as REAL epoch. Legacy ISO strings converted to epoch.
         from datetime import datetime
 
         rows = self._conn.execute(
@@ -2680,9 +2680,9 @@ class SQLiteStorage(StorageDriver):
             logger.info("Migrated %d event timestamps ISO -> REAL", len(updates))
 
     def _ensure_metadata_indexes(self) -> None:
-        # P2-7/F6: 对配置的 metadata 高频字段建 json_extract 表达式索引。
-        # metadata_filter 走索引而非全表扫。key 已在 __init__ 过 _META_KEY_RE 校验，
-        # 二次校验防内部误传。索引名 idx_meta_<key>，幂等建。
+        # P2-7/F6: Create json_extract expression indexes for the configured high-frequency metadata fields.
+        # metadata_filter uses the index instead of a full scan. Keys already passed _META_KEY_RE validation in __init__;
+        # this second check guards against internal misuse. Index name idx_meta_<key>, created idempotently.
         if not self.metadata_indexed_keys:
             return
         created = []
@@ -2701,8 +2701,8 @@ class SQLiteStorage(StorageDriver):
             logger.info("Ensured %d metadata indexes: %s", len(created), created)
 
     def _migrate_share_max_accesses_and_timestamps(self) -> None:
-        # E1/E2: artifact_shares 加 max_accesses 列；created_at/last_access_at
-        # 由 TEXT ISO 迁移为 REAL epoch（schema_version 2）。
+        # E1/E2: Add max_accesses column to artifact_shares; created_at/last_access_at
+        # migrated from TEXT ISO to REAL epoch (schema_version 2).
         cols = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(artifact_shares)").fetchall()
@@ -2717,13 +2717,13 @@ class SQLiteStorage(StorageDriver):
         self._coerce_text_ts_to_real(
             "artifact_shares", "share_id", ["created_at", "last_access_at"]
         )
-        # folder created_at 同样迁移
+        # folder created_at migrated the same way
         self._coerce_text_ts_to_real("artifact_folders", "folder_id", ["created_at"])
 
     def _coerce_text_ts_to_real(
         self, table: str, id_col: str, ts_cols: list[str]
     ) -> None:
-        # E1: 把 TEXT(ISO 串) 行的 created_at 类列转 REAL epoch；已是 float 的跳过。
+        # E1: Convert created_at-like columns of TEXT (ISO string) rows to REAL epoch; rows already float are skipped.
         from datetime import datetime
 
         for col in ts_cols:
@@ -2759,7 +2759,7 @@ class SQLiteStorage(StorageDriver):
                 )
 
     def _migrate_tag_scope_column(self) -> None:
-        # L-7: artifact_tags 加 scope 列，name 唯一约束改为 (name, scope) 复合唯一
+        # L-7: Add scope column to artifact_tags; name uniqueness becomes a (name, scope) composite unique
         cols = {
             row["name"]
             for row in self._conn.execute("PRAGMA table_info(artifact_tags)").fetchall()
@@ -2768,15 +2768,15 @@ class SQLiteStorage(StorageDriver):
             self._conn.execute("ALTER TABLE artifact_tags ADD COLUMN scope TEXT")
             self._conn.commit()
             logger.info("Added scope column to artifact_tags")
-        # 旧库 name 是 UNIQUE 单列约束，与新增 UNIQUE(name, scope) 冲突——重建索引。
-        # SQLite 无法直接 ALTER 约束，删除自动索引名（sqlite_autoindex_*）需重建表。
-        # 这里检测并重建：若存在单列 name 唯一索引则重建表为复合唯一。
+        # Legacy DBs have name as a single-column UNIQUE constraint, conflicting with the new UNIQUE(name, scope) — rebuild the index.
+        # SQLite cannot ALTER constraints directly; dropping the auto index name (sqlite_autoindex_*) requires rebuilding the table.
+        # Detect and rebuild here: if a single-column name unique index exists, rebuild the table with composite uniqueness.
         idx_rows = self._conn.execute(
             "PRAGMA index_list(artifact_tags)"
         ).fetchall()
         needs_rebuild = False
         for ir in idx_rows:
-            # origin='u' = UNIQUE constraint autoindex；查其列
+            # origin='u' = UNIQUE constraint autoindex; inspect its columns
             if ir["origin"] == "u":
                 info = self._conn.execute(
                     f"PRAGMA index_info({ir['name']})"

@@ -4,9 +4,9 @@ logger = logging.getLogger(__name__)
 
 
 class VisualErrorBoundary:
-    # #59: 包裹 compiler.compile() 调用，捕获任何异常，
-    # 记录 DSL 元数据（visual_type / meta.id），返回 fallback compiler 输出。
-    # 绝不向调用方传播异常——100% 返回 HTML 字符串。
+    # #59: wraps compiler.compile() calls, catches any exception,
+    # logs the DSL metadata (visual_type / meta.id), and returns the fallback compiler output.
+    # Never propagates exceptions to callers — always returns an HTML string (100%).
 
     def __init__(self, fallback_compiler):
         self._fallback = fallback_compiler

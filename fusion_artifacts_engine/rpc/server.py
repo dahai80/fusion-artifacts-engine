@@ -36,13 +36,13 @@ from fusion_artifacts_engine.rpc.methods import RPCHandler
 
 logger = logging.getLogger(__name__)
 
-# LOW-1: share_id 公开端点格式预校验。合法 share_id 形如 shr_<12 hex>（见 share.py）。
-# 非法格式直接 400，省掉一次 DB 往返，且不泄露「该 share 是否存在」。
+# LOW-1: format pre-validation for share_id on public endpoints. A valid share_id looks like shr_<12 hex> (see share.py).
+# Invalid format returns 400 directly, saving a DB round-trip and not leaking 'whether that share exists'.
 _SHARE_ID_RE = re.compile(r"^shr_[A-Za-z0-9]{12}$")
 
 
 def _share_notice_page(title: str, message: str) -> str:
-    # #83: 过期/已撤销/不存在页 —— 静态文案，无脚本，纯内联样式（无外部资源）。
+    # #83: expired/revoked/not-found page - static copy, no script, pure inline styles (no external resources).
     import html as _html
 
     return (
@@ -59,11 +59,11 @@ def _share_notice_page(title: str, message: str) -> str:
         f"<p>{_html.escape(message)}</p></main></body></html>"
     )
 
-# #76: web GUI 静态资源目录（vite build 产物，package-data 随包分发）。
-# gateway /shell/fusion-artifacts/ 代理剥前缀后 GET / 落到这里。
+# #76: web GUI static asset directory (vite build output, shipped as package-data).
+# The gateway /shell/fusion-artifacts/ proxy strips the prefix; GET / lands here.
 _WEBUI_DIST = Path(__file__).resolve().parent.parent / "webui_dist"
-# CSP：frame-ancestors 放行 gateway 同源 iframe（web-shell 宿主在 11432）；
-# blob: 供 GUI 详情页预览 iframe（blob URL 不继承父页 CSP，sandbox 隔离）。
+# CSP: frame-ancestors allows the gateway same-origin iframe (web-shell host on 11432);
+# blob: is for the GUI detail-page preview iframe (blob URLs do not inherit the parent page CSP; sandbox isolated).
 _WEBUI_CSP = (
     "default-src 'self'; "
     "style-src 'self' 'unsafe-inline'; "
@@ -73,14 +73,14 @@ _WEBUI_CSP = (
     "frame-ancestors 'self' http://127.0.0.1:11432 http://localhost:11432"
 )
 
-# P1-3/H12: 每请求生成 uuid4 request ID，回写 X-Request-ID 响应头 + 绑入日志 extra，
-# 让运维从客户端回溯到服务端日志行。BaseHTTPRequestHandler 每请求新建 handler 实例，
-# 故 _request_id 天然 per-request，无需清理。
+# P1-3/H12: generate a uuid4 request ID per request, echo it in the X-Request-ID response header + bind it into log extra,
+# so ops can trace from the client back to the server log line. BaseHTTPRequestHandler creates a fresh handler instance per request,
+# so _request_id is naturally per-request; no cleanup needed.
 _REQUEST_ID_HEADER = "X-Request-ID"
 
 
 class _RequestIdLogger(logging.LoggerAdapter):
-    # P1-3: 注入 request_id 到每条日志的 extra，格式器可引用 %(request_id)s。
+    # P1-3: inject request_id into the extra of every log record; formatters can reference %(request_id)s.
     def process(self, msg, kwargs):
         rid = self.extra.get("request_id", "-") if self.extra else "-"
         kwargs.setdefault("extra", {})
@@ -91,20 +91,20 @@ class _RequestIdLogger(logging.LoggerAdapter):
 
 _MAX_BODY_SIZE = 10 * 1024 * 1024
 
-# R4: 大请求体阈值。超过此值判定为「重写入」，用更长超时档并记日志便于运维定位写锁占用。
+# R4: large request body threshold. Above it the request is treated as a 'heavy write'; use the longer timeout tier and log it so ops can locate write-lock occupancy.
 _LARGE_BODY_THRESHOLD = 2 * 1024 * 1024
 
-# 导入时快照，向后兼容测试/旧用法；_is_authed 优先读 env 以支持运行时旋转 (P1-10)。
+# Snapshot at import time for backward compat with tests/old usage; _is_authed reads env first to support runtime rotation (P1-10).
 _API_KEY = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
 
 _API_CSP = "default-src 'none'; frame-ancestors 'none'"
 
-# P1-7/M7: 合法 ArtifactKind 值集合，SSE kind_filter 校验用。非法 kind 拒绝连接。
+# P1-7/M7: set of valid ArtifactKind values, used for SSE kind_filter validation. Invalid kinds are rejected.
 _VALID_ARTIFACT_KINDS = set(typing.get_args(ArtifactKind))
 
 
 def _parse_json_query(query: dict, key: str) -> dict | None:
-    # REST GET 无 body，metadata_filter/filters 通过 JSON 编码的查询参数传递。
+    # REST GET has no body; metadata_filter/filters are passed via JSON-encoded query params.
     raw = query.get(key, [None])[0]
     if not raw:
         return None
@@ -117,9 +117,9 @@ def _parse_json_query(query: dict, key: str) -> dict | None:
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    # R1: ThreadingMixIn 默认每连接一线程、无上限。SSE 长连接独占线程，
-    # 大量连接即线程/fd 耗尽。用并发信号量封顶：超过 _max_workers 的请求
-    # 阻塞在 acquire（而非无界开线程），保护进程内存与上下文切换。
+    # R1: ThreadingMixIn defaults to one thread per connection, unbounded. SSE long connections hold a thread each,
+    # so many connections exhaust threads/fds. Cap with a concurrency semaphore: requests beyond _max_workers
+    # block on acquire (instead of spawning unbounded threads), protecting process memory and context switching.
     daemon_threads = True
     request_queue_size = 128
 
@@ -129,25 +129,25 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         self._worker_sem = threading.BoundedSemaphore(self._max_workers)
         self._rejected_count = 0
         self._rate_limiter = RateLimiter()
-        # P2-1/F1/H3: SSE 独立并发信号量。SSE 握手成功后释放 _worker_sem 并占此信号量，
-        # 使 SSE 长连接不再独占 64 RPC 线程——64 SSE 客户端不再打满后端导致新 RPC 全 503。
-        # 0=不设独立上限（回退旧行为：SSE 继续占 worker 槽，不推荐）。
+        # P2-1/F1/H3: dedicated SSE concurrency semaphore. After a successful SSE handshake, release _worker_sem and take this semaphore,
+        # so SSE long connections no longer occupy the 64 RPC threads - 64 SSE clients no longer saturate the backend and turn new RPCs all 503.
+        # 0 = no dedicated cap (falls back to old behavior: SSE keeps occupying worker slots; not recommended).
         self._sse_max_connections = max(0, int(sse_max_connections))
         self._sse_sem = (
             threading.BoundedSemaphore(self._sse_max_connections)
             if self._sse_max_connections > 0
             else None
         )
-        # P2-1: 记录已移交到 SSE 信号量的连接 id。socket 对象无 __dict__ 不能挂属性，
-        # 改用 server 级 set 跟踪；process_request_thread 见此 id 即跳过 _worker_sem 释放。
-        # 连接生命周期内 id 不复用；process_request_thread finally 必清理，防泄漏。
+        # P2-1: track connection ids handed off to the SSE semaphore. socket objects have no __dict__ and cannot carry attributes,
+        # so use a server-level set instead; process_request_thread skips the _worker_sem release when it sees this id.
+        # ids are not reused within a connection lifetime; process_request_thread must clean up in finally to prevent leaks.
         self._sse_handoffs: set[int] = set()
         self._sse_handoffs_lock = threading.Lock()
         super().__init__(server_address, handler_cls)
 
     def process_request(self, request, client_address):
-        # R1: 拿不到许可（并发已满）即拒绝连接，而非无界开线程。
-        # acquire 超时后立即回 503 关连接，调用方可重试。
+        # R1: reject the connection when no permit is available (concurrency full), rather than spawning unbounded threads.
+        # Return 503 and close the connection immediately after acquire times out; callers may retry.
         if not self._worker_sem.acquire(timeout=0.01):
             self._rejected_count += 1
             logger.warning(
@@ -179,9 +179,9 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            # P2-1: SSE 握手已把本连接从 _worker_sem 移交到 _sse_sem，此处不可再释放
-            # _worker_sem（否则信号量计数溢出抛 ValueError）。socket 无 __dict__ 不能挂属性，
-            # 改查 server 级 _sse_handoffs set；命中即跳过释放并清理记录。
+            # P2-1: the SSE handshake already handed this connection from _worker_sem to _sse_sem; never release
+            # _worker_sem again here (otherwise the semaphore count overflows and raises ValueError). socket has no __dict__,
+            # so check the server-level _sse_handoffs set; on a hit, skip the release and clean up the record.
             if self._sse_sem is not None:
                 with self._sse_handoffs_lock:
                     if id(request) in self._sse_handoffs:
@@ -192,8 +192,8 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
     def _is_authed(self) -> bool:
-        # C-4: api_key 优先 env（支持运行时旋转），其次 config.api_key；
-        # 无 key 时按 allow_no_auth 决定，默认 False（fail-closed）
+        # C-4: api_key prefers env (supports runtime rotation), then config.api_key;
+        # with no key, allow_no_auth decides; default False (fail-closed)
         engine = self.server._rpc_handler.engine
         api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "") or _API_KEY or getattr(
             engine.config, "api_key", None
@@ -206,9 +206,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 "Auth rejected: no API_KEY configured and allow_no_auth=False"
             )
             return False
-        # #75: 双通道鉴权。X-API-Key 为传统通道（fusion-studio/fusion-code 直连）；
-        # Authorization: Bearer 为 gateway /shell/<id>/ 代理注入通道（代理剥离调用方
-        # 凭据后只注入 Bearer）。两者常量时间比较，任一匹配即通过。
+        # #75: dual-channel auth. X-API-Key is the legacy channel (fusion-studio/fusion-code direct);
+        # Authorization: Bearer is the gateway /shell/<id>/ proxy-injected channel (the proxy strips the caller
+        # credentials and only injects Bearer). Both compared in constant time; either match passes.
         provided = self.headers.get("X-API-Key", "")
         if not provided:
             auth_header = self.headers.get("Authorization", "")
@@ -216,8 +216,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 provided = auth_header[len("Bearer "):].strip()
         if hmac.compare_digest(provided, api_key):
             return True
-        # #82: gateway 签发的 fm- service key 是代理注入凭据（gateway #294 契约：
-        # 模块须校验该 key）。从持久化文件读取（mtime 缓存），缺失即跳过。
+        # #82: the gateway-issued fm- service key is a proxy-injected credential (gateway #294 contract:
+        # modules must validate this key). Read from the persisted file (mtime-cached); skip when missing.
         service_key = load_service_key(engine.config.gateway_service_key_path)
         return bool(service_key) and hmac.compare_digest(provided, service_key)
 
@@ -235,7 +235,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(401, {"error": "Unauthorized"})
 
     def _send_rate_limited(self, jsonrpc: bool = True) -> None:
-        # 运维1: 令牌桶耗尽。JSON-RPC 用 -32003 ResourceLimitError（可重试），REST 用 429。
+        # Ops-1: token bucket exhausted. JSON-RPC uses -32003 ResourceLimitError (retryable), REST uses 429.
         if jsonrpc:
             self._send_response(
                 429,
@@ -260,7 +260,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self):
-        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        # P1-3: generate a uuid4 request ID per request, bind it into logs + response header for ops end-to-end tracing.
         self._request_id = uuid.uuid4().hex
         self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
         if self.path.startswith("/api/v1/"):
@@ -269,11 +269,11 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=True)
             return
-        # 运维1: 鉴权后、解析前限流，避免被刷量请求拖垮解析+dispatch
+        # Ops-1: rate limit after auth, before parsing, so request floods do not drag down parse+dispatch
         if not self.server._rate_limiter.check_default():
             self._send_rate_limited(jsonrpc=True)
             return
-        # 运维2: 计量——活跃连接 +1，请求计数，延迟直方图，错误计数
+        # Ops-2: metering - active connections +1, request counter, latency histogram, error counters
         metrics = get_metrics()
         metrics.inc_gauge("rpc_active_conns")
         metrics.inc_counter("rpc_requests_total", labels={"path": "jsonrpc"})
@@ -319,7 +319,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             method_name = request.get("method", "")
             timeout = self._timeout_for(method_name, length)
             if length >= _LARGE_BODY_THRESHOLD:
-                # R4: 大请求体重写入占写锁时间长，记日志便于运维定位全站写停摆窗口。
+                # R4: large request body heavy writes hold the write lock for a long time; log it so ops can locate site-wide write-stall windows.
                 self._log.warning(
                     "Large RPC body %d bytes for %s, timeout tier=%ds",
                     length,
@@ -331,8 +331,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 errored = True
             self._send_response(200, response)
         except TimeoutError:
-            # H5: 协程排队超时（慢操作拖累全站）。返回 -32603 并标记 retryable，
-            # 调用方可退避重试而非当致命错误。区分 R8 的业务错误码。
+            # H5: coroutine queueing timeout (slow ops dragging down the whole site). Return -32603 marked retryable,
+            # so callers can back off and retry instead of treating it as fatal. Distinct from the R8 business error codes.
             errored = True
             self._log.warning("RPC timeout for %s (tier=%ds)", method_name, timeout)
             self._send_response(
@@ -365,29 +365,29 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             metrics.dec_gauge("rpc_active_conns")
 
     def do_GET(self):
-        # P1-3: 每请求生成 uuid4 request ID，绑入日志 + 响应头，便于运维端到端追踪。
+        # P1-3: generate a uuid4 request ID per request, bind it into logs + response header for ops end-to-end tracing.
         self._request_id = uuid.uuid4().hex
         self._log = _RequestIdLogger(logger, {"request_id": self._request_id})
-        # 运维5: /healthz（liveness）+ /readyz（readiness）分离，无鉴权（K8s probe 标配）
+        # Ops-5: /healthz (liveness) + /readyz (readiness) separation, unauthenticated (standard K8s probes)
         if self.path == "/healthz":
             self._handle_healthz()
             return
         if self.path == "/readyz":
             self._handle_readyz()
             return
-        # 运维2: /metrics 端点——Prometheus 文本格式，无鉴权（监控 scrape 标配）
+        # Ops-2: /metrics endpoint - Prometheus text format, unauthenticated (standard for monitoring scrapes)
         if self.path == "/metrics":
             self._handle_metrics()
             return
-        # #59: SSE 流式可视化渲染——按 pipeline step 逐步推送 HTML 片段
+        # #59: SSE streaming visual rendering - push HTML fragments progressively per pipeline step
         if self.path.startswith("/api/v1/render-visual/stream"):
             self._handle_render_visual_sse()
             return
-        # SSE 事件流。三种形态共用 _handle_sse：
-        #   /api/v1/events/stream[?kind=...]                 全局流
-        #   /api/v1/artifacts/{artifactId}/events[?kind=...] 按 artifact 过滤 (#55)
-        #   /api/v1/sessions/{sessionId}/events[?kind=...]   按 session 过滤 (#55)
-        # fusion-studio bridge artifactEventStream/sessionEventStream 调后两者。
+        # SSE event streams. Three forms share _handle_sse:
+        # /api/v1/events/stream[?kind=...]                 global stream
+        # /api/v1/artifacts/{artifactId}/events[?kind=...] filtered by artifact (#55)
+        # /api/v1/sessions/{sessionId}/events[?kind=...]   filtered by session (#55)
+        # fusion-studio bridge artifactEventStream/sessionEventStream call the latter two.
         parsed_get = urlparse(self.path)
         gp = [p for p in parsed_get.path.split("/") if p]
         if (
@@ -400,20 +400,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/v1/"):
             self._handle_rest_v1_get()
             return
-        # #83: 公开 share 页面（无鉴权，公开限流桶）。/s/<share_id> 渲染只读预览，
-        # remix 权限时附带「Remix to my library」入口（跳 gateway shell 登录流）。
+        # #83: public share page (unauthenticated, public rate-limit bucket). /s/<share_id> renders a read-only preview,
+        # with a 'Remix to my library' entry when remix permission is granted (routes through the gateway shell login flow).
         sp = [p for p in parsed_get.path.split("/") if p]
         if len(sp) == 2 and sp[0] == "s":
             self._handle_share_page(sp[1])
             return
-        # #76: web GUI。GET / 返回 index.html，GET /assets/* 返回构建产物。
-        # 仅在 webui_dist 存在时生效（源码安装无 dist 时保持 404，REST/RPC 不受影响）。
+        # #76: web GUI. GET / returns index.html, GET /assets/* returns build output.
+        # Only active when webui_dist exists (stays 404 on source installs without dist; REST/RPC unaffected).
         if self._try_serve_webui():
             return
         self._send_rest_response(404, {"error": "Not found"})
 
     def _try_serve_webui(self) -> bool:
-        # #76: 静态服务仅 GET；webui_dist 缺失（开发/最小安装）直接跳过。
+        # #76: static serving is GET-only; skipped entirely when webui_dist is missing (dev/minimal installs).
         if not _WEBUI_DIST.is_dir():
             return False
         path = unquote(urlparse(self.path).path)
@@ -422,7 +422,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if path.startswith("/assets/") or path in ("/favicon.svg", "/favicon.ico"):
             rel = path.lstrip("/")
             target = (_WEBUI_DIST / rel).resolve()
-            # 路径穿越防护：解析后必须仍在 dist 目录内
+            # Path traversal guard: the resolved path must remain inside the dist directory
             if not str(target).startswith(str(_WEBUI_DIST.resolve())):
                 self._log.warning("webui path traversal rejected: %s", path)
                 self._send_rest_response(404, {"error": "Not found"})
@@ -442,7 +442,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        # index.html 永不缓存（入口页钉死旧 bundle hash）；assets 文件名带 hash 可长期缓存
+        # index.html is never cached (the entry page pins old bundle hashes); assets have hashed filenames and can be cached long-term
         if no_store:
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Security-Policy", _WEBUI_CSP)
@@ -453,12 +453,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle_healthz(self) -> None:
-        # 运维5: liveness——进程能响应即 200。不查依赖，避免依赖抖动导致重启循环。
+        # Ops-5: liveness - 200 as long as the process responds. No dependency checks, avoiding dependency flapping causing restart loops.
         self._send_rest_response(200, {"status": "ok", "check": "liveness"})
 
     def _handle_readyz(self) -> None:
-        # 运维5: readiness——存储可用 + EventBus 未关闭才 200，否则 503。
-        # 依赖未就绪时 K8s 不导流量，但 liveness 仍 200 不重启。
+        # Ops-5: readiness - 200 only when storage is usable + EventBus not closed, else 503.
+        # K8s routes no traffic while dependencies are unready, but liveness stays 200 so no restart.
         engine = self.server._rpc_handler.engine
         checks = {"storage": False, "event_bus": False}
         ok = True
@@ -487,8 +487,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if not getattr(engine.config, "metrics_enabled", True):
             self._send_rest_response(404, {"error": "metrics disabled"})
             return
-        # LOW-4: 配置 metrics_token 时 /metrics 需 X-Metrics-Token 头匹配（常量时间比较）。
-        # 未配置则依赖 127.0.0.1 绑定；暴露 0.0.0.0 必须设值，防运维指标泄露。
+        # LOW-4: when metrics_token is configured, /metrics requires a matching X-Metrics-Token header (constant-time compare).
+        # Without it, rely on the 127.0.0.1 binding; exposing 0.0.0.0 must set a value to prevent ops metric leaks.
         expected_token = getattr(engine.config, "metrics_token", None)
         if expected_token:
             supplied = self.headers.get("X-Metrics-Token", "")
@@ -498,7 +498,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         body = get_metrics().expose().encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-        # P1-3: 回写 request ID
+        # P1-3: echo the request ID
         rid = getattr(self, "_request_id", None)
         if rid:
             self.send_header(_REQUEST_ID_HEADER, rid)
@@ -507,8 +507,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle_share_page(self, share_id: str) -> None:
-        # #83: 公开 share 页。渲染管道复用 share.get_public_share（权限/过期/
-        # 访问计数判定）与 render.render_share_html（净化 + nonce CSP）。
+        # #83: public share page. The render pipeline reuses share.get_public_share (permission/expiry/
+        # access-count checks) and render.render_share_html (sanitization + nonce CSP).
         engine = self.server._rpc_handler.engine
         if not self.server._rate_limiter.check_public():
             self._send_share_html(429, _share_notice_page("Too many requests", "Please retry shortly."))
@@ -569,7 +569,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         # Public share endpoint — no auth required (#38, #26-B)
         if len(path_parts) == 4 and path_parts[2] == "share":
-            # 运维1: 公开端点独立令牌桶，防刷量拖垮鉴权后端
+            # Ops-1: dedicated token bucket for public endpoints, so floods do not drag down the authed backend
             if not self.server._rate_limiter.check_public():
                 self._send_rest_response(
                     429,
@@ -577,7 +577,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 )
                 return
             share_id = path_parts[3]
-            # LOW-1: share_id 格式预校验。非法格式 400，省 DB 往返且不泄露存在性。
+            # LOW-1: share_id format pre-validation. Invalid format returns 400, saving a DB round-trip and not leaking existence.
             if not _SHARE_ID_RE.fullmatch(share_id):
                 self._send_rest_response(
                     400, {"error": "Invalid share_id format", "code": -32602}
@@ -597,14 +597,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_auth_denied(jsonrpc=False)
             return
 
-        # #83: GUI 分享链接拼接用的公开页面 base URL（鉴权，仅返回配置值）
+        # #83: public page base URL used for GUI share-link construction (authed; returns the config value only)
         if len(path_parts) == 3 and path_parts[2] == "share-base":
             self._send_rest_response(200, {"base_url": engine.config.share_base_url})
             return
 
-        # #100-3: REST 读事件——与 JSON-RPC artifact.list_events 对等。
-        # 注意 /api/v1/artifacts/{id}/events 已是 SSE 流（#55），故 REST 读
-        # 端点用集合路径 /api/v1/events?artifact_id=，避免与流路由冲突。
+        # #100-3: REST event reads - on par with JSON-RPC artifact.list_events.
+        # Note /api/v1/artifacts/{id}/events is already an SSE stream (#55), so the REST read
+        # endpoint uses the collection path /api/v1/events?artifact_id=, avoiding conflict with the stream route.
         if len(path_parts) == 3 and path_parts[2] == "events":
             artifact_id = query.get("artifact_id", [None])[0]
             session_id = query.get("session_id", [None])[0]
@@ -727,10 +727,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(400, {"error": f"Invalid JSON: {e}"})
             return
 
-        # REST create/update/delete 复用 RPC handler.dispatch，继承 SSE 发布与参数校验，
-        # 保持 REST 与 RPC 能力对等 (P1-3 / P1-4)。
-        # #100-3: POST /api/v1/artifacts（集合路径）= create 别名——验收发现只认
-        # /create 别名导致 POST 集合 404，补齐常规 REST 语义。
+        # REST create/update/delete reuse RPC handler.dispatch, inheriting SSE publishing and param validation,
+        # keeping REST and RPC capability parity (P1-3 / P1-4).
+        # #100-3: POST /api/v1/artifacts (collection path) = create alias - acceptance found only the
+        # /create alias was recognized, so POST to the collection 404ed; added standard REST semantics.
         if len(path_parts) == 3 and path_parts[2] == "artifacts":
             try:
                 result = self._run_async(rpc_handler.dispatch("artifact.create", data))
@@ -781,7 +781,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._send_rest_response(404, {"error": "Not found"})
             return
 
-        # #59: POST /api/v1/render-visual — DSL → HTML（3 级兜底渲染）
+        # #59: POST /api/v1/render-visual - DSL -> HTML (3-level fallback rendering)
         if len(path_parts) == 3 and path_parts[2] == "render-visual":
             try:
                 result = self._run_async(
@@ -802,10 +802,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         kind_filter = query.get("kind", [None])[0]
-        # #55: 路径携带的 scope 过滤。
+        # #55: scope filter carried in the path.
         #   /api/v1/artifacts/{id}/events → artifact_id_filter
         #   /api/v1/sessions/{id}/events  → session_id_filter
-        # 事件 payload 中 artifact_id/session_id 不匹配即丢弃（与 kind_filter 同一机制）。
+        # Events whose payload artifact_id/session_id does not match are dropped (same mechanism as kind_filter).
         sse_path_parts = [p for p in parsed.path.split("/") if p]
         artifact_id_filter = None
         session_id_filter = None
@@ -813,7 +813,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             artifact_id_filter = sse_path_parts[3]
         elif len(sse_path_parts) == 5 and sse_path_parts[2] == "sessions" and sse_path_parts[4] == "events":
             session_id_filter = sse_path_parts[3]
-        # P1-7/M7: kind_filter 校验——非 None 时必须为合法 ArtifactKind，否则拒绝连接。
+        # P1-7/M7: kind_filter validation - when not None it must be a valid ArtifactKind, otherwise the connection is rejected.
         if kind_filter is not None and kind_filter not in _VALID_ARTIFACT_KINDS:
             self._log.warning(
                 "SSE rejected invalid kind_filter=%s (allowed: %s)",
@@ -821,10 +821,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             )
             self._send_rest_response(400, {"error": f"Invalid kind: {kind_filter}"})
             return
-        # P2-1/F1/H3: SSE 独立并发信号量。握手前先占专用槽；占不到即 503 拒绝，
-        # 不让 SSE 客户端把 RPC worker 池吃光。占成功后释放 _worker_sem 把 RPC 槽还回，
-        # 并打 handoff 标志——process_request_thread 见此标志不再 release _worker_sem。
-        # sse_max_connections==0（_sse_sem 为 None）= 回退旧行为，SSE 继续占 worker 槽。
+        # P2-1/F1/H3: dedicated SSE concurrency semaphore. Take a dedicated slot before the handshake; 503 if unavailable,
+        # never letting SSE clients eat the whole RPC worker pool. On success release _worker_sem to return the RPC slot,
+        # and set the handoff flag - process_request_thread sees the flag and does not release _worker_sem again.
+        # sse_max_connections==0 (_sse_sem None) = fall back to old behavior, SSE keeps occupying worker slots.
         sse_sem = self.server._sse_sem
         sse_handoff = False
         if sse_sem is not None:
@@ -837,7 +837,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 return
             sse_handoff = True
             self.server._worker_sem.release()
-            # socket 无 __dict__，用 server 级 set 记录已移交连接 id（见 process_request_thread）
+            # socket has no __dict__; use a server-level set to record handed-off connection ids (see process_request_thread)
             with self.server._sse_handoffs_lock:
                 self.server._sse_handoffs.add(id(self.request))
         self.send_response(200)
@@ -845,7 +845,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
-        # P1-3: 回写 request ID，SSE 客户端可凭此查服务端日志
+        # P1-3: echo the request ID, SSE clients can use it to look up server logs
         rid = getattr(self, "_request_id", None)
         if rid:
             self.send_header(_REQUEST_ID_HEADER, rid)
@@ -853,10 +853,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         watcher_id = f"sse_{id(self)}"
         engine = self.server._rpc_handler.engine
-        # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
+        # A-2: use the EventBus of the engine instance, avoiding cross-engine streaming
         sub = engine.event_bus.subscribe()
         heartbeat_interval = engine.config.sse_heartbeat_interval
-        # P1-7/M7: 单连接最大存活。0=不限；超时主动关流促客户端重连，防僵尸长连接占线程。
+        # P1-7/M7: max lifetime per connection. 0 = unlimited; close the stream proactively on timeout to prompt client reconnect, preventing zombie long connections from holding threads.
         max_lifetime = max(0, getattr(engine.config, "sse_max_lifetime", 0))
 
         self._log.info(
@@ -867,7 +867,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + max_lifetime if max_lifetime > 0 else None
         try:
             while True:
-                # P1-7: 到达存活上限主动关流
+                # P1-7: close the stream proactively when the lifetime cap is reached
                 if deadline is not None and time.monotonic() >= deadline:
                     self._log.info(
                         "SSE max_lifetime reached, closing watcher=%s", watcher_id
@@ -878,17 +878,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     except (BrokenPipeError, ConnectionResetError):
                         pass
                     break
-                # P2-1: 客户端断开检测。阻塞在 sub.get(heartbeat) 上时，客户端关流后
-                # 服务端最长等一个 heartbeat_interval（默认 30s）才在下次 write 失败时发现，
-                # 期间 _sse_sem 槽不归还——高频连断客户端可耗尽 16 槽。
-                # 故每次循环用 select 非阻塞探活：socket 可读且无数据=对端关连接(EOF)，立即 break。
-                # read fd 设超时上限 1s，使探活频率不低于每秒一次，槽归还延迟≤1s 而非 30s。
+                # P2-1: client disconnect detection. While blocked on sub.get(heartbeat), after the client closes the stream
+                # the server waits up to one heartbeat_interval (default 30s) before noticing on the next failed write,
+                # during which the _sse_sem slot is not returned - high-frequency connect/disconnect clients can exhaust the 16 slots.
+                # So each loop uses select for non-blocking liveness probing: socket readable with no data = peer closed (EOF), break immediately.
+                # read fd timeout capped at 1s, keeping the probe frequency at least once per second; slot return delay <= 1s instead of 30s.
                 try:
                     rready, _, _ = select.select(
                         [self.request], [], [], min(1.0, heartbeat_interval)
                     )
                     if rready:
-                        # 可读但 recv 0 字节=EOF；>0 字节=客户端发了垃圾数据，也按断开处理
+                        # readable but recv 0 bytes = EOF; >0 bytes = the client sent garbage data, also treated as a disconnect
                         try:
                             if not self.request.recv(1, socket.MSG_PEEK):
                                 break
@@ -897,7 +897,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 except (OSError, ValueError):
                     break
                 try:
-                    # P1-7: 取事件时不超过到 deadline 的剩余时间，避免超期仍阻塞整段心跳间隔
+                    # P1-7: when fetching events, never exceed the remaining time to the deadline, avoiding blocking a full heartbeat interval past it
                     wait = heartbeat_interval
                     if deadline is not None:
                         wait = max(0.1, min(wait, deadline - time.monotonic()))
@@ -905,7 +905,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     if event is None:
                         break
                     etype = event.get("event_type")
-                    # A-3/A-4: __dropped__ 队列满被驱逐，__closed__ 停机——关流促重连
+                    # A-3/A-4: __dropped__ evicted on a full queue, __closed__ on shutdown - close the stream to prompt reconnect
                     if etype in ("__dropped__", "__closed__"):
                         logger.info(
                             "SSE stream %s, closing watcher=%s", etype, watcher_id
@@ -920,24 +920,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                             pass
                         break
                     if kind_filter and event.get("kind") != kind_filter:
-                        # E10: kind 缺失或被过滤时记日志，避免静默丢事件难排查。
-                        # kind None 通常因 publish 时未传 kind 且 artifact 已删（回查取不到）。
+                        # E10: log when kind is missing or filtered out, avoiding silent event drops that are hard to debug.
+                        # kind None usually means publish omitted kind and the artifact was deleted (the backfill lookup fails).
                         if event.get("kind") is None:
                             self._log.warning(
                                 "SSE event %s has no kind, dropped by filter=%s (watcher=%s)",
                                 etype, kind_filter, watcher_id,
                             )
                         continue
-                    # #55: artifact_id / session_id scope 过滤。
-                    # 事件 payload 无该字段或不匹配即丢弃。folder/系统事件不带这俩字段，
-                    # scope 流自然收不到——符合 fusion-studio 按产物/会话订阅的语义。
+                    # #55: artifact_id / session_id scope filtering.
+                    # Events missing the field or mismatching are dropped. folder/system events carry neither field,
+                    # so scope streams naturally never receive them - matching the fusion-studio per-artifact/per-session subscription semantics.
                     if artifact_id_filter and event.get("artifact_id") != artifact_id_filter:
                         continue
                     if session_id_filter and event.get("session_id") != session_id_filter:
                         continue
                     data = json.dumps(event)
-                    # F5: 单事件体积上限。超限丢弃（仅记日志），防大 payload 阻塞连接线程
-                    # + 客户端缓冲爆炸。0=不限（向后兼容）。
+                    # F5: per-event size cap. Oversized events are dropped (log only), preventing large payloads from blocking the connection thread
+                    # + exploding client buffers. 0 = unlimited (backward compatible).
                     max_event_bytes = max(
                         0, getattr(engine.config, "sse_max_event_bytes", 0)
                     )
@@ -963,19 +963,19 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                     break
         finally:
             engine.event_bus.unsubscribe(sub)
-            # P2-1: 归还 SSE 专用信号量槽（仅当握手时做了移交）
+            # P2-1: return the dedicated SSE semaphore slot (only when the handshake performed the handoff)
             if sse_handoff and sse_sem is not None:
                 try:
                     sse_sem.release()
                 except ValueError:
-                    # 防御：极端竞态下重复 release（不应发生），忽略而非崩溃
+                    # Defensive: duplicate release under an extreme race (should not happen); ignore rather than crash
                     self._log.warning("SSE sse_sem double-release guarded, watcher=%s", watcher_id)
             self._log.info("SSE disconnected: watcher=%s", watcher_id)
 
     def _handle_render_visual_sse(self) -> None:
-        # #59: SSE 流式可视化渲染。接受 ?dsl=<urlencoded_json> 或 ?raw_text=<urlencoded>，
-        # 解析 DSL 后按 pipeline 各 step 的 progress_range 中点逐段渲染 HTML 并推送。
-        # 有限流——推送完所有 step 后主动关流（非长连接 event bus）。
+        # #59: SSE streaming visual rendering. Accepts ?dsl=<urlencoded_json> or ?raw_text=<urlencoded>,
+        # parses the DSL then renders HTML segment by segment at each pipeline step's progress_range midpoint and pushes it.
+        # Rate limited - the stream is closed proactively after all steps are pushed (not a long-lived event bus).
         if not self._is_authed():
             self._send_auth_denied(jsonrpc=False)
             return
@@ -1000,7 +1000,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        # 有限流——推送完所有 step 后主动关流，非长连接 event bus，故用 close 而非 keep-alive
+        # Rate limited - close the stream proactively after all steps are pushed; not a long-lived event bus, so close rather than keep-alive
         self.send_header("Connection", "close")
         self.send_header("X-Accel-Buffering", "no")
         rid = getattr(self, "_request_id", None)
@@ -1056,7 +1056,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
-        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        # P1-3: echo the request ID, clients can use it to look up server logs
         rid = getattr(self, "_request_id", None)
         if rid:
             self.send_header(_REQUEST_ID_HEADER, rid)
@@ -1065,9 +1065,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _rest_error_response(self, exc: Exception) -> None:
-        # R8: REST 复用 RPC dispatch，按异常类型映射 HTTP 状态与可重试标记。
+        # R8: REST reuses RPC dispatch, mapping exception types to HTTP status and retryable flags.
         # NotFoundError→404, ConflictError→409(retryable), ResourceLimitError→503(retryable),
-        # BusinessRuleError→422, RpcError 其他→按 code 推断, ValueError→400(校验), 兜底→500。
+        # BusinessRuleError->422, other RpcError->inferred from code, ValueError->400 (validation), fallback->500.
         if isinstance(exc, NotFoundError):
             self._send_rest_response(404, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, ConflictError):
@@ -1077,13 +1077,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         elif isinstance(exc, BusinessRuleError):
             self._send_rest_response(422, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, PermissionError):
-            # P2-3/MEDIUM-4: IDOR 越权——403 Forbidden
+            # P2-3/MEDIUM-4: IDOR unauthorized access - 403 Forbidden
             self._send_rest_response(403, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, NotImplementedError):
-            # 运维6: 占位方法下线——501 Not Implemented
+            # Ops-6: placeholder method retired - 501 Not Implemented
             self._send_rest_response(501, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, RpcError):
-            # 未细分的 RpcError：负 32000 段按业务推断，否则当服务端错误
+            # Ungrouped RpcError: negative 32000-range inferred as business, otherwise treated as a server error
             status = 400 if exc.code == -32602 else 500
             self._send_rest_response(status, {"error": exc.message, "code": exc.code})
         elif isinstance(exc, ValueError):
@@ -1092,8 +1092,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             logger.exception("REST dispatch error")
             self._send_rest_response(500, {"error": "Internal error"})
 
-    # H5: 按操作分级超时，取代单 30s 硬超时。快操作不绑长超时（无意义），
-    # 重操作（render/auto_compact/large write）给够时间避免雪崩误杀。
+    # H5: per-operation timeout tiers, replacing a single 30s hard timeout. Fast ops are not bound to long timeouts (pointless),
+    # heavy ops (render/auto_compact/large write) get enough time to avoid avalanche false kills.
     _TIMEOUT_TIERS = {
         "ping": 5,
         "context.budget": 10,
@@ -1108,8 +1108,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
     _TIMEOUT_DEFAULT = 30
 
     def _timeout_for(self, method: str, body_size: int = 0) -> int:
-        # H5: 方法命中 tier 用 tier；R4: 接近 10MB 的大写自动升档到重操作超时，
-        # 避免大 artifact 的 hash+文件写+DB INSERT 在默认 30s 内被误杀。
+        # H5: a method hit uses its tier; R4: large writes near 10MB auto-promote to the heavy-op timeout,
+        # avoiding large artifact hash+file write+DB INSERT being falsely killed by the default 30s.
         t = self._TIMEOUT_TIERS.get(method, self._TIMEOUT_DEFAULT)
         if body_size >= _LARGE_BODY_THRESHOLD and t < 120:
             return 120
@@ -1117,8 +1117,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def _run_async(self, coro, timeout: int | None = None):
         loop = self.server._async_loop
-        # P1-9/M17: 捕获 future，超时后显式 cancel()，否则已提交任务在 event loop 里
-        # 孤儿般继续跑（占线程/内存/锁），超时只是放弃等待不放弃执行。
+        # P1-9/M17: capture the future and cancel() explicitly after timeout, otherwise the submitted task keeps running
+        # orphaned in the event loop (holding threads/memory/locks); the timeout only abandons waiting, not execution.
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return future.result(timeout=timeout or self._TIMEOUT_DEFAULT)
@@ -1136,8 +1136,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = request.get("id")
         try:
             rpc_handler = self.server._rpc_handler
-            # P2-5/H12(trace): rpc.server.duration span 由 RPCHandler.dispatch 内部发出，
-            # 覆盖所有调用路径（server / REST / 直接调用）。此处不再重复包 span。
+            # P2-5/H12(trace): the rpc.server.duration span is emitted inside RPCHandler.dispatch,
+            # covering all call paths (server / REST / direct). No duplicate span wrapping here.
             result = await rpc_handler.dispatch(method, params)
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except RpcError as e:
@@ -1182,7 +1182,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Security-Policy", _API_CSP)
-        # P1-3: 回写 request ID，客户端可凭此查服务端日志
+        # P1-3: echo the request ID, clients can use it to look up server logs
         rid = getattr(self, "_request_id", None)
         if rid:
             self.send_header(_REQUEST_ID_HEADER, rid)
@@ -1268,8 +1268,8 @@ class ArtifactRPCServer:
 
     def stop(self) -> None:
         if self._server:
-            # P0-7: shutdown() 停止 accept 循环，server_close() 释放监听 socket。
-            # 不调 server_close 会泄漏 listen socket 与端口（TIME_WAIT 后才回收）。
+            # P0-7: shutdown() stops the accept loop, server_close() releases the listening socket.
+            # Skipping server_close leaks the listen socket and port (only reclaimed after TIME_WAIT).
             self._server.shutdown()
             self._server.server_close()
         if self._async_loop and self._async_loop.is_running():

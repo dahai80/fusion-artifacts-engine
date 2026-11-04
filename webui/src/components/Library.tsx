@@ -41,8 +41,8 @@ const TAB_DEFS: { key: TabKey; match: (a: Artifact) => boolean }[] = [
     { key: "code", match: (a) => a.type === "code" },
 ];
 
-// 分类色为低饱和 tint（非 §3.1 状态语义色，不与 success/running/warning/error 冲突）；
-// @fusion/web-ui preset 就绪前以 zinc/indigo + 类别 tint 过渡（§12.3）
+// Category colors are low-saturation tints (not the §3.1 status semantic colors, so they do not clash with success/running/warning/error);
+// zinc/indigo + category tints bridge until the @fusion/web-ui preset is ready (§12.3)
 const TYPE_TILE: Record<string, string> = {
     html: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
     react: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
@@ -214,7 +214,7 @@ function Thumb({ a }: { a: Artifact }) {
     );
 }
 
-// §3.3: 平面卡片用边框不用阴影；rounded-lg 卡片 + rounded-md 内嵌元素
+// §3.3: flat cards use borders, not shadows; rounded-lg cards + rounded-md inset elements
 function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: string) => void }) {
     const d = t(lang);
     const tile = TYPE_TILE[a.type] || "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
@@ -301,7 +301,7 @@ function timeBucket(ts: number): TimeBucket {
 
 const BUCKET_ORDER: TimeBucket[] = ["today", "yesterday", "week", "earlier"];
 
-// 新建模板：类型映射 文档=markdown / PPT=html(自包含幻灯) / 设计=data(JSON 画布)
+// New-artifact templates: type mapping doc=markdown / PPT=html(self-contained slides) / design=data(JSON canvas)
 const DOC_TEMPLATE = `# 未命名文档
 
 在这里开始写正文。
@@ -350,7 +350,7 @@ const DESIGN_TEMPLATE = JSON.stringify(
     4
 );
 
-// #97: AI 生成类型系统提示——只输出内容本体，禁止围栏/解释
+// #97: AI generation per-type system prompts — output only the content body, no fences/explanations
 const GEN_SYS: Record<string, string> = {
     markdown: "生成完整的 markdown 文档。只输出正文内容，不要解释，不要 markdown 代码围栏。",
     html: "生成完整自包含的 HTML 单文件（内联 CSS/JS，可引用公共 CDN）。只输出从 <!DOCTYPE html> 开始的代码，不要解释，不要代码围栏。",
@@ -375,7 +375,7 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
     const [error, setError] = useState("");
     const [recycleOpen, setRecycleOpen] = useState(false);
     const [creating, setCreating] = useState<string | null>(null);
-    // #97: AI 生成面板
+    // #97: AI generation panel
     const [aiOpen, setAiOpen] = useState(false);
     const [aiPrompt, setAiPrompt] = useState("");
     const [aiType, setAiType] = useState("markdown");
@@ -453,8 +453,8 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
         return list;
     }, [artifacts, tab, query]);
 
-    // claude.ai 时间分段（今天/昨天/7天内/更早）替代 v0.6.3 的 session 碎组——
-    // session id 对用户不可读，碎组头是主要视觉噪音。名称排序时退化为平铺。
+    // claude.ai time buckets (today/yesterday/this week/earlier) replace the v0.6.3 per-session grouping —
+    // session ids are unreadable to users and group headers were the main visual noise. Falls back to a flat list when sorting by name.
     const sections = useMemo(() => {
         const sorted = [...shown].sort((x, y) => {
             if (sort === "name") return x.name.localeCompare(y.name);
