@@ -9,12 +9,12 @@ from fusion_artifacts_engine.__main__ import _set_process_title, main
 
 
 def test_set_process_title_no_throw():
-    # #68: 无论 setproctitle/fusion_core 是否可用，调用不得抛异常（fallback safe）
+    # #68: regardless of setproctitle/fusion_core availability, the call must not raise (fallback safe)
     _set_process_title("fusion-artifacts-engine-test")
 
 
 def test_set_process_title_actual():
-    # #68: setproctitle 已安装时进程标题真实生效（CI 未装则跳过）
+    # #68: process title takes real effect when setproctitle is installed (skipped if CI lacks it)
     pytest.importorskip("setproctitle")
     import setproctitle
 
@@ -31,7 +31,7 @@ def test_version_command(capsys):
 
 
 def test_status_not_running(capsys):
-    # L-20: status 不健康须 exit 1；捕获 SystemExit 验证退出码
+    # L-20: unhealthy status must exit 1; catch SystemExit to verify the exit code
     with patch.object(sys, "argv", ["fusion-artifacts-engine", "status"]):
         with pytest.raises(SystemExit) as exc:
             main()

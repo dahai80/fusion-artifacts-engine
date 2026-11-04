@@ -18,7 +18,7 @@ def _engine(tmp_path, max_versions=0):
     return eng
 
 
-# ── E11 / H2: 两阶段写回滚不残留孤儿文件 ──────────────────────
+# ── E11 / H2: two-phase write rollback leaves no orphan files ────────────
 def test_h2_rollback_no_orphan(tmp_path):
     eng = _engine(tmp_path)
     try:
@@ -36,7 +36,8 @@ def test_h2_rollback_no_orphan(tmp_path):
             for p in content_dir.rglob("*"):
                 if p.is_file():
                     before.add(p.name)
-        # 模拟事务失败：写入大内容后让 save_version 持有非法 version_num 触发回滚路径
+        # Simulate transaction failure: after writing large content, make save_version
+        # hold an invalid version_num to trigger the rollback path
         bad = ArtifactVersion(
             artifact_id=art.id,
             version_num=999,
@@ -51,7 +52,8 @@ def test_h2_rollback_no_orphan(tmp_path):
             author=None,
             parent_version=None,
         )
-        # save_version 内部按 next_version_num 重排，不会用 999；正常保存后应无 .tmp_ 残留
+        # save_version renumbers internally via next_version_num and never uses 999;
+        # after a normal save there should be no .tmp_ residue
         eng.storage.save_version(bad)
         tmp_residue = []
         if content_dir.exists():
@@ -63,7 +65,7 @@ def test_h2_rollback_no_orphan(tmp_path):
         eng.close()
 
 
-# ── E11 / H2: gc_orphan_files 清理孤儿 ────────────────────────
+# ── E11 / H2: gc_orphan_files cleans up orphans ──────────────────────────
 def test_h2_gc_orphan_files(tmp_path):
     eng = _engine(tmp_path)
     try:
@@ -76,7 +78,7 @@ def test_h2_gc_orphan_files(tmp_path):
             )
         )
         content_dir = eng.storage.content_dir
-        # 手造一个孤儿文件 + 一个 .tmp_ 残留
+        # Hand-craft one orphan file + one .tmp_ residue
         art_dir = content_dir / art.id
         art_dir.mkdir(parents=True, exist_ok=True)
         (art_dir / "v_orphan.txt").write_text("orphan")
@@ -89,7 +91,7 @@ def test_h2_gc_orphan_files(tmp_path):
         eng.close()
 
 
-# ── E11 / R9: 版本上限强制执行 ────────────────────────────────
+# ── E11 / R9: version limit enforcement ──────────────────────────────────
 def test_r9_version_limit_eviction(tmp_path):
     eng = _engine(tmp_path, max_versions=2)
     try:
@@ -111,7 +113,7 @@ def test_r9_version_limit_eviction(tmp_path):
         eng.close()
 
 
-# ── E11 / R9: max_versions=0 不限制 ───────────────────────────
+# ── E11 / R9: max_versions=0 means unlimited ─────────────────────────────
 def test_r9_no_limit_when_zero(tmp_path):
     eng = _engine(tmp_path, max_versions=0)
     try:
@@ -133,7 +135,8 @@ def test_r9_no_limit_when_zero(tmp_path):
         eng.close()
 
 
-# ── E11 / R2: 公开 share 访问走内存 buffer，不每次写锁 ─────────
+# ── E11 / R2: public share access goes through an in-memory buffer,
+# ── not a write lock per access ──────────────────────────────────────────
 def test_r2_share_access_buffered(tmp_path):
     eng = _engine(tmp_path)
     try:
@@ -146,12 +149,12 @@ def test_r2_share_access_buffered(tmp_path):
             )
         )
         share = eng.create_share(art.id, max_accesses=100)
-        # 连续访问：buffer 累计，不触发每次写
+        # Consecutive accesses: buffer accumulates, no write per access
         for _ in range(10):
             got = eng.get_public_share(share.share_id)
             assert got["status"] == "ok"
-        # buffer 中应有计数（未达刷盘阈值 50）
-        # H7: share buffer 移到 ShareManager（eng.share_mgr）
+        # The buffer should hold the count (flush threshold 50 not reached)
+        # H7: share buffer moved to ShareManager (eng.share_mgr)
         with eng.share_mgr._lock:
             buffered = eng.share_mgr._buffer.get(share.share_id, 0)
         assert buffered >= 10, f"R2 buffer should hold accesses: {buffered}"
@@ -159,7 +162,7 @@ def test_r2_share_access_buffered(tmp_path):
         eng.close()
 
 
-# ── E11 / R2: max_accesses 达限后 gone ────────────────────────
+# ── E11 / R2: gone after max_accesses is exhausted ───────────────────────
 def test_r2_share_max_accesses_exhausted(tmp_path):
     eng = _engine(tmp_path)
     try:
@@ -182,7 +185,7 @@ def test_r2_share_max_accesses_exhausted(tmp_path):
         eng.close()
 
 
-# ── E11 / H6: token 计数缓存命中 ──────────────────────────────
+# ── E11 / H6: token count cache hit ──────────────────────────────────────
 def test_h6_token_cache_hit():
     clear_token_cache()
     text = "def f():\n    return 42\n" * 200
@@ -190,14 +193,14 @@ def test_h6_token_cache_hit():
     n2 = count_tokens(text)
     assert n1 == n2
     assert n1 > 0
-    # 短文本不缓存
+    # Short text is not cached
     short = "x"
     clear_token_cache()
     count_tokens(short)
     count_tokens(short)
 
 
-# ── E11 / R8: NotFoundError 错误码 ────────────────────────────
+# ── E11 / R8: NotFoundError error code ───────────────────────────────────
 def test_r8_not_found_error_code():
     from fusion_artifacts_engine.rpc.errors import NotFoundError, RpcError
 
@@ -225,7 +228,7 @@ def test_r8_error_subclasses():
     assert BusinessRuleError().code == -32004
 
 
-# ── E11 / H8: StorageDriver ABC 完整契约 ──────────────────────
+# ── E11 / H8: StorageDriver ABC complete contract ────────────────────────
 def test_h8_storage_abc_complete():
     from fusion_artifacts_engine.storage.base import StorageDriver
     from fusion_artifacts_engine.storage.sqlite_storage import SQLiteStorage
@@ -236,7 +239,7 @@ def test_h8_storage_abc_complete():
     assert missing == [], f"H8 LSP breach, missing impls: {missing}"
 
 
-# ── E11 / H8: engine 调用的 storage 方法全在 ABC ──────────────
+# ── E11 / H8: every storage method the engine calls is in the ABC ────────
 def test_h8_engine_calls_in_abc():
     import inspect
     import re
@@ -251,7 +254,7 @@ def test_h8_engine_calls_in_abc():
     assert not not_in_abc, f"engine calls not in ABC: {sorted(not_in_abc)}"
 
 
-# ── E11 / R1: 服务器线程上限拒绝 ──────────────────────────────
+# ── E11 / R1: server thread cap enforcement ──────────────────────────────
 def test_r1_server_max_workers_cap(tmp_path):
     import socket
 
@@ -274,7 +277,7 @@ def test_r1_server_max_workers_cap(tmp_path):
     server.start_async()
     time.sleep(0.5)
     try:
-        # 验证 server 实例的 worker 上限生效
+        # Verify the worker cap takes effect on the server instance
         assert server._server._max_workers == 2
         assert server._server._worker_sem._value <= 2
     finally:
@@ -282,7 +285,7 @@ def test_r1_server_max_workers_cap(tmp_path):
         eng.close()
 
 
-# ── E11 / E7: 读连接池复用 ────────────────────────────────────
+# ── E11 / E7: read connection pool reuse ─────────────────────────────────
 def test_e7_read_pool_reuse(tmp_path):
     eng = _engine(tmp_path)
     try:
@@ -294,17 +297,17 @@ def test_e7_read_pool_reuse(tmp_path):
                 content="pool test",
             )
         )
-        # 池大小 4，多次读应复用连接而非每次新建
+        # Pool size 4: repeated reads should reuse connections, not open new ones
         for _ in range(20):
             got = eng.storage.get_artifact(art.id)
             assert got is not None
-        # 池中仍应有连接对象
+        # The pool should still hold connection objects
         assert eng.storage._read_pool.qsize() >= 0
     finally:
         eng.close()
 
 
-# ── E11 / R5: 迁移版本门控（重复初始化不重跑） ───────────────
+# ── E11 / R5: migration version gating (re-init does not re-run) ─────────
 def test_r5_migration_gating_idempotent(tmp_path):
     db_path = tmp_path / "meta.db"
     content_dir = tmp_path / "content"
@@ -324,7 +327,7 @@ def test_r5_migration_gating_idempotent(tmp_path):
     )
     st1.save_artifact(art)
     st1.close()
-    # 第二次初始化同一 DB：applied_migrations 应已记录，不重跑
+    # Second init of the same DB: applied_migrations should already be recorded, no re-run
     st2 = SQLiteStorage(db_path=db_path, content_dir=content_dir, small_content_limit=10)
     rows = st2._conn.execute("SELECT COUNT(*) FROM applied_migrations").fetchone()[0]
     assert rows >= 1, f"R5 applied_migrations empty: {rows}"
@@ -333,10 +336,11 @@ def test_r5_migration_gating_idempotent(tmp_path):
     st2.close()
 
 
-# ── H5: 异步方法内阻塞 storage 调用卸到线程池 ─────────────────
+# ── H5: blocking storage calls inside async methods offload to a thread pool ──
 def test_h5_to_thread_offload(tmp_path):
-    # H5: create_artifact 是 async，内部 storage 写应经 asyncio.to_thread，
-    # 在事件循环线程外执行（to_thread 用默认 ThreadPoolExecutor，非 loop 线程）。
+    # H5: create_artifact is async, its internal storage writes must go through
+    # asyncio.to_thread and run outside the event-loop thread (to_thread uses the
+    # default ThreadPoolExecutor, not the loop thread).
     import asyncio as _asyncio
     import threading
 
@@ -359,7 +363,7 @@ def test_h5_to_thread_offload(tmp_path):
             return art
 
         art = _asyncio.run(run())
-        # to_thread 执行的 storage 写应在与 loop 线程不同的线程
+        # The to_thread storage write must run on a thread different from the loop thread
         assert captured["caller_thread"] is not None
         assert captured["caller_thread"] is not captured["loop_thread"], (
             "H5: storage write ran on event-loop thread (not offloaded)"
@@ -369,9 +373,9 @@ def test_h5_to_thread_offload(tmp_path):
         eng.close()
 
 
-# ── H7: engine.py 拆分——新模块存在且 engine 委托 ──────────────
+# ── H7: engine.py split — new modules exist and engine delegates ─────────
 def test_h7_modules_extracted():
-    # H7: share/token_budget/section_index 模块抽出，engine 委托调用
+    # H7: share/token_budget/section_index extracted as modules, engine delegates
     import fusion_artifacts_engine.section_index as si_mod
     import fusion_artifacts_engine.share as share_mod
     import fusion_artifacts_engine.token_budget as tb_mod
@@ -387,11 +391,13 @@ def test_h7_modules_extracted():
 
 
 def test_h7_engine_not_god_class(tmp_path):
-    # H7: engine.py 应从 1709 行降到 ~1300（god-class 缓解）。
-    # #58/#59/#60: 阈值放宽到 1370——新增 render_visual 是 2 行委托（逻辑在 visual_dispatcher.py），
-    # 符合 H7 薄包装模式，非 god-class 回潮。
-    # v0.7.3: 阈值放宽到 1373——_truncate_summary 增加 JSON 内容守卫（design DSL 落 summary
-    # 变文本墙），+3 行纯防御逻辑，非结构回潮。
+    # H7: engine.py should shrink from 1709 lines to ~1300 (god-class mitigation).
+    # #58/#59/#60: threshold relaxed to 1370 — the new render_visual is a 2-line
+    # delegation (logic lives in visual_dispatcher.py), matching the H7 thin-wrapper
+    # pattern, not a god-class relapse.
+    # v0.7.3: threshold relaxed to 1373 — _truncate_summary gained a JSON content
+    # guard (design DSL landing in the summary became a text wall), +3 lines of pure
+    # defensive logic, not a structural relapse.
     from pathlib import Path
 
     engine_path = Path(__file__).resolve().parent.parent / "fusion_artifacts_engine" / "engine.py"
@@ -402,7 +408,7 @@ def test_h7_engine_not_god_class(tmp_path):
 
 
 def test_h7_patch_section_delegated(tmp_path):
-    # H7: patch replace_section/delete_section 走 section_index 模块，行为不变
+    # H7: patch replace_section/delete_section route through the section_index module, behavior unchanged
     eng = _engine(tmp_path)
     try:
         py_code = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"

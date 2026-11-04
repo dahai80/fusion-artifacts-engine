@@ -22,8 +22,8 @@ def _free_port():
 
 
 def _make_server():
-    # allow_no_auth=True 让 SSE 握手免 key，测试聚焦 scope 过滤而非鉴权。
-    # heartbeat=1 保证流上周期有数据，_drain 读到目标事件或超时即关流。
+    # allow_no_auth=True skips the API key during SSE handshake; the test focuses on scope filtering, not auth.
+    # heartbeat=1 guarantees periodic data on the stream; _drain closes the stream once it reads the target event or times out.
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts",
@@ -53,7 +53,7 @@ def _cleanup(srv, eng, tmp):
 
 
 def _drain_until(base, path, predicate, timeout=5.0):
-    # 开 SSE 流，读到第一个满足 predicate 的 event dict 返回；超时返回 None。
+    # Open an SSE stream and return the first event dict matching the predicate; return None on timeout.
     cm = httpx.stream("GET", f"{base}{path}", timeout=timeout)
     resp = cm.__enter__()
     found = None
@@ -141,13 +141,13 @@ def test_artifact_scoped_sse_filters_other_artifact():
         t = threading.Thread(target=reader)
         t.start()
         time.sleep(0.6)
-        # art_bbb 事件——scope 流不应收到
+        # art_bbb event — the scoped stream must NOT receive it
         eng.event_bus.publish(
             "artifact.updated",
             {"event_type": "artifact.updated", "artifact_id": "art_bbb", "kind": "code"},
         )
         time.sleep(0.4)
-        # art_aaa 事件——应收到
+        # art_aaa event — must be received
         eng.event_bus.publish(
             "artifact.updated",
             {"event_type": "artifact.updated", "artifact_id": "art_aaa", "kind": "code"},
@@ -212,13 +212,13 @@ def test_session_scoped_sse_filters_other_session():
         t = threading.Thread(target=reader)
         t.start()
         time.sleep(0.6)
-        # 别的 session 事件——应被过滤
+        # event from another session — must be filtered
         eng.event_bus.publish(
             "artifact.created",
             {"event_type": "artifact.created", "session_id": "sess-Y", "kind": "code"},
         )
         time.sleep(0.4)
-        # 目标 session 事件——应收到
+        # target session event — must be received
         eng.event_bus.publish(
             "artifact.created",
             {"event_type": "artifact.created", "session_id": "sess-X", "kind": "code"},
@@ -232,7 +232,7 @@ def test_session_scoped_sse_filters_other_session():
 
 
 def test_scope_sse_endpoints_not_404():
-    # 握手应返回 200（SSE 流头），不是 404。
+    # Handshake must return 200 (SSE stream headers), not 404.
     srv, eng, port, tmp = _make_server()
     base = f"http://127.0.0.1:{port}"
     try:

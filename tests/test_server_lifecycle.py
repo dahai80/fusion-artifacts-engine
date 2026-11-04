@@ -227,7 +227,7 @@ def test_server_rest_body_too_large():
 
 
 def test_server_sse_invalid_kind_filter_rejected():
-    # P1-7/M7: kind_filter 非法值应直接拒绝连接（400），不建立 SSE 流。
+    # P1-7/M7: invalid kind_filter values must be rejected outright (400), no SSE stream established.
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1
@@ -251,7 +251,7 @@ def test_server_sse_invalid_kind_filter_rejected():
 
 
 def test_server_sse_valid_kind_filter_accepted():
-    # P1-7/M7: kind_filter 合法值应正常建立 SSE 流。
+    # P1-7/M7: valid kind_filter values must establish the SSE stream normally.
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts", allow_no_auth=True, sse_heartbeat_interval=1
@@ -283,7 +283,7 @@ def test_server_sse_valid_kind_filter_accepted():
 
 
 def test_server_sse_max_lifetime_closes_stream():
-    # P1-7/M7: sse_max_lifetime 到期后服务端主动关流，发 __max_lifetime__ 事件促重连。
+    # P1-7/M7: after sse_max_lifetime expires the server closes the stream and emits __max_lifetime__ to prompt reconnect.
     tmp = Path(tempfile.mkdtemp())
     cfg = ArtifactEngineConfig(
         storage_root=tmp / "artifacts",

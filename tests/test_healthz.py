@@ -72,10 +72,10 @@ def test_readyz_not_ready_when_event_bus_closed(tmp_path):
 
 
 def test_healthz_no_auth_required(tmp_path):
-    # healthz/readyz 应无鉴权（K8s probe 无 API key）
+    # healthz/readyz must require no auth (K8s probes carry no API key)
     server, eng, port = _server(tmp_path)
     try:
-        # 显式不传 X-API-Key
+        # Explicitly omit X-API-Key
         r = httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=5, headers={})
         assert r.status_code == 200
     finally:

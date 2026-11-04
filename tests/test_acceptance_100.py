@@ -41,7 +41,7 @@ def rpc_server():
     shutil.rmtree(tmp)
 
 
-# ── #100-1: svg / mermaid 类型 ────────────────────────────────
+# ── #100-1: svg / mermaid types ──────────────────────────────
 
 
 async def test_create_svg_artifact(handler):
@@ -64,7 +64,7 @@ async def test_create_mermaid_artifact(handler):
     assert r["artifact"]["kind"] == "document"
 
 
-# ── #100-2: 事件持久化 ────────────────────────────────────────
+# ── #100-2: event persistence ────────────────────────────────
 
 
 async def test_events_persisted_after_create_and_update(handler):
@@ -99,7 +99,7 @@ async def test_version_dump_excludes_internal_id(handler):
         assert "id" not in v
 
 
-# ── #100-3: REST 集合路径 + 事件读端点 ────────────────────────
+# ── #100-3: REST collection path + event read endpoint ───────
 
 
 def test_rest_post_collection_creates(rpc_server):
@@ -130,7 +130,7 @@ def test_rest_get_artifact_events_nonempty(rpc_server):
         timeout=5.0,
     ).json()
     aid = r["artifact"]["id"]
-    # /api/v1/artifacts/{id}/events 已被 SSE 流（#55）占用，REST 读走集合路径
+    # /api/v1/artifacts/{id}/events is taken by the SSE stream (#55); REST reads go through the collection path
     resp = httpx.get(
         f"http://127.0.0.1:{PORT}/api/v1/events",
         params={"artifact_id": aid},
@@ -142,8 +142,10 @@ def test_rest_get_artifact_events_nonempty(rpc_server):
     assert any(e["event_type"] == "artifact.created" for e in body["events"])
 
 
-# ── #100-1 迁移回归：旧库 CHECK 放宽 + 子表数据完整（首版 rename 换表曾把
-#    子表 FK 引用改写到已删除的临时表名，生产 insert 全挂，见 fk_repair 用例）──
+# ── #100-1 migration regression: relaxed CHECK on old DBs + child table data
+#    integrity (the first rename-table migration rewrote child-table FK
+#    references to a dropped temp table name, breaking all production inserts;
+#    see the fk_repair test) ──
 
 
 def _seed_db(root: Path, ddl: str) -> None:
@@ -193,7 +195,7 @@ async def test_migration_relaxes_check_keeps_children(tmp_path):
 
 
 async def test_migration_fk_repair(tmp_path):
-    # 生产真实受损形态：ALTER RENAME 改写出的引用带引号
+    # Real production corruption shape: ALTER RENAME rewrote references with quotes
     ddl = _SCHEMA_SQL.replace(
         'REFERENCES artifacts(id)', 'REFERENCES "artifacts_type_check_tmp"(id)'
     )

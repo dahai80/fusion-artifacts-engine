@@ -36,7 +36,7 @@ def test_disk_check_returns_usage(tmp_path):
 
 
 def test_disk_check_rejects_write_at_threshold(tmp_path):
-    # 设阈值 1%——本机磁盘几乎必然超 1%，触发拒绝写
+    # Set threshold to 1% — the local disk is almost certainly above 1%, triggering write rejection
     st = SQLiteStorage(
         db_path=tmp_path / "meta.db",
         content_dir=tmp_path / "content",
@@ -67,7 +67,7 @@ def test_disk_check_config_passed_to_storage(tmp_path):
 
 
 def test_engine_publishes_disk_alarm_on_full(tmp_path):
-    # 设阈值 1% 触发磁盘预检拒绝，engine 应发 disk_full_alarm 事件
+    # Set threshold to 1% to trigger the disk pre-check rejection; the engine should publish a disk_full_alarm event
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
         server_host="127.0.0.1",
@@ -83,7 +83,7 @@ def test_engine_publishes_disk_alarm_on_full(tmp_path):
                     session_id="disk", name="full", artifact_type="code", content="x",
                 )
             )
-        # 应收到 disk_full_alarm 事件
+        # A disk_full_alarm event should arrive
         event = sub.get(timeout=1)
         assert event["event_type"] == "disk_full_alarm"
         assert event["kind"] == "system.alarm"

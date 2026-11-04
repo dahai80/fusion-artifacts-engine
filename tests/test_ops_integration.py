@@ -33,18 +33,18 @@ def _server(tmp_path, **cfg_overrides):
     return server, eng, port
 
 
-# ── 运维1: rate-limit 集成 (do_POST JSON-RPC) ────────────────
+# ── Ops-1: rate-limit integration (do_POST JSON-RPC) ────────────────
 
 
 def test_jsonrpc_rate_limit_returns_429(tmp_path):
-    # rps=1, burst=1 — 第二个请求应被限流
+    # rps=1, burst=1 — the second request should be rate-limited
     server, eng, port = _server(tmp_path, rate_limit_rps=1, rate_limit_burst=1)
     try:
         url = f"http://127.0.0.1:{port}/"
         headers = {"Content-Type": "application/json"}
         r1 = httpx.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, headers=headers, timeout=5)
         assert r1.status_code == 200
-        # 立即发第二个——桶未补充，应 429
+        # Fire the second request immediately — bucket not refilled yet, expect 429
         r2 = httpx.post(url, json={"jsonrpc": "2.0", "id": 2, "method": "ping"}, headers=headers, timeout=5)
         assert r2.status_code == 429
         body = r2.json()
@@ -56,7 +56,7 @@ def test_jsonrpc_rate_limit_returns_429(tmp_path):
 
 
 def test_jsonrpc_rate_limit_rps_zero_unlimited(tmp_path):
-    # rps=0 = 无限，连发不限流
+    # rps=0 = unlimited, burst of requests never throttled
     server, eng, port = _server(tmp_path, rate_limit_rps=0, rate_limit_burst=0)
     try:
         url = f"http://127.0.0.1:{port}/"
@@ -69,17 +69,17 @@ def test_jsonrpc_rate_limit_rps_zero_unlimited(tmp_path):
         eng.close()
 
 
-# ── 运维1: public share rate-limit (do_GET) ────────────────
+# ── Ops-1: public share rate-limit (do_GET) ────────────────
 
 
 def test_public_share_rate_limit_returns_429(tmp_path):
     server, eng, port = _server(tmp_path, public_rate_limit_rps=1, public_rate_limit_burst=1)
     try:
-        # LOW-1: 合法格式 share_id（12 hex）过格式校验进 DB 查不到 → 404，且消耗 public 桶
+        # LOW-1: a well-formed share_id (12 hex) passes format validation, misses in DB → 404, and consumes the public bucket
         url = f"http://127.0.0.1:{port}/api/v1/share/shr_000000000000"
-        # 第一个请求消耗桶（404 但过了限流），第二个应 429
+        # First request drains the bucket (404 but past rate limit), the second should get 429
         r1 = httpx.get(url, timeout=5)
-        assert r1.status_code in (400, 404, 410)  # share 不存在，但未被限流
+        assert r1.status_code in (400, 404, 410)  # share not found, but not rate-limited
         r2 = httpx.get(url, timeout=5)
         assert r2.status_code == 429
         assert r2.json()["code"] == -32003
@@ -88,13 +88,13 @@ def test_public_share_rate_limit_returns_429(tmp_path):
         eng.close()
 
 
-# ── 运维2: /metrics 集成 ────────────────
+# ── Ops-2: /metrics integration ────────────────
 
 
 def test_metrics_endpoint_prometheus_content(tmp_path):
     server, eng, port = _server(tmp_path)
     try:
-        # 先发一个 RPC 触发计数器
+        # Fire one RPC first to trigger the counter
         httpx.post(
             f"http://127.0.0.1:{port}/",
             json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
@@ -107,7 +107,7 @@ def test_metrics_endpoint_prometheus_content(tmp_path):
         text = r.text
         assert "rpc_requests_total" in text
         assert "rpc_active_conns" in text
-        # counter 类型声明
+        # counter type declaration
         assert "# TYPE rpc_requests_total counter" in text
         assert "# TYPE rpc_active_conns gauge" in text
     finally:
@@ -126,13 +126,13 @@ def test_metrics_disabled_returns_404(tmp_path):
         eng.close()
 
 
-# ── 运维5: readyz storage 不可用 → 503 ────────────────
+# ── Ops-5: readyz storage unavailable → 503 ────────────────
 
 
 def test_readyz_503_when_storage_fails(tmp_path):
     server, eng, port = _server(tmp_path)
     try:
-        # 篡改 storage.health_check 抛异常，模拟存储不可用
+        # Tamper with storage.health_check to raise, simulating storage unavailability
         eng.storage.health_check = lambda: False
         r = httpx.get(f"http://127.0.0.1:{port}/readyz", timeout=5)
         assert r.status_code == 503
@@ -145,7 +145,7 @@ def test_readyz_503_when_storage_fails(tmp_path):
 
 
 def test_readyz_503_when_storage_raises(tmp_path):
-    # storage.health_check 抛异常（非返回 False）—— except 分支仍 503
+    # storage.health_check raises (instead of returning False) — except branch still 503
     server, eng, port = _server(tmp_path)
     try:
         eng.storage.health_check = lambda: (_ for _ in ()).throw(RuntimeError("db down"))
@@ -157,7 +157,7 @@ def test_readyz_503_when_storage_raises(tmp_path):
         eng.close()
 
 
-# ── 运维6: inject/interact JSON-RPC 集成层 ────────────────
+# ── Ops-6: inject/interact JSON-RPC integration layer ────────────────
 
 
 def test_jsonrpc_inject_returns_not_implemented(tmp_path):

@@ -4,11 +4,11 @@ from fusion_artifacts_engine.rate_limiter import RateLimiter, TokenBucket
 
 
 def test_token_bucket_allows_burst():
-    # burst=5 桶初始满，连续 5 次 acquire 应全过
+    # burst=5 bucket starts full, so 5 consecutive acquires should all pass
     bucket = TokenBucket(rps=1.0, burst=5)
     results = [bucket.acquire() for _ in range(5)]
     assert all(results), f"burst should allow 5 immediate: {results}"
-    # 第 6 次应被拒
+    # The 6th should be rejected
     assert bucket.acquire() is False
 
 
@@ -17,20 +17,20 @@ def test_token_bucket_refills_over_time():
     bucket.acquire()
     bucket.acquire()
     assert bucket.acquire() is False
-    # 100 rps = 10ms 补一个令牌，等 30ms 应至少补一个
+    # 100 rps = one token per 10ms; waiting 30ms should refill at least one
     time.sleep(0.03)
     assert bucket.acquire() is True
 
 
 def test_token_bucket_rps_zero_unlimited():
-    # rps=0 表示不限流（默认，向后兼容）
+    # rps=0 means unlimited (default, backward compatible)
     bucket = TokenBucket(rps=0, burst=1)
     for _ in range(100):
         assert bucket.acquire() is True
 
 
 def test_rate_limiter_disabled_by_default():
-    # 默认 rps=0 不限流
+    # Default rps=0 is unlimited
     rl = RateLimiter()
     assert rl.check_default() is True
     assert rl.check_public() is True
@@ -47,12 +47,12 @@ def test_rate_limiter_default_bucket_enforced():
 
 
 def test_rate_limiter_public_bucket_independent():
-    # public 桶与 default 桶独立：public 耗尽不影响 default
+    # public and default buckets are independent: exhausting public does not affect default
     rl = RateLimiter(rps=10.0, burst=2, public_rps=10.0, public_burst=2)
     assert rl.check_public() is True
     assert rl.check_public() is True
     assert rl.check_public() is False
-    # default 桶未动
+    # default bucket untouched
     assert rl.check_default() is True
 
 
@@ -60,7 +60,7 @@ def test_rate_limiter_snapshot_has_counts():
     rl = RateLimiter(rps=1.0, burst=2, public_rps=1.0, public_burst=2)
     rl.check_default()
     rl.check_default()
-    rl.check_default()  # 拒一次
+    rl.check_default()  # reject once
     snap = rl.metrics()
     assert snap["default"]["rejected"] >= 1
     assert snap["default"]["burst"] == 2

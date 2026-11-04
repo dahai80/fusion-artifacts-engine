@@ -22,8 +22,8 @@ def handler():
 
 
 def _wrap_to_thread(record):
-    # 包裹真 asyncio.to_thread：记录每次调用被卸载的可调用对象，仍透传执行。
-    # 这样既证明 handler 走 to_thread 卸载，又不破坏返回值正确性。
+    # Wrap the real asyncio.to_thread: record each callable offloaded through it, while still passing execution through.
+    # This both proves handlers offload via to_thread and keeps return values correct.
     real = asyncio.to_thread
 
     async def recording_to_thread(func, /, *args, **kwargs):
@@ -34,7 +34,7 @@ def _wrap_to_thread(record):
 
 
 async def test_get_offloads_storage_read_to_thread(handler, monkeypatch):
-    # P2-2/M1+F2: 读路径经 asyncio.to_thread 卸载，不阻塞 event loop。
+    # P2-2/M1+F2: read paths are offloaded via asyncio.to_thread and do not block the event loop.
     h, eng = handler
     cr = await eng.create_artifact("s1", "a.py", "code", "print(1)")
     aid = cr[0].id
@@ -49,7 +49,7 @@ async def test_get_offloads_storage_read_to_thread(handler, monkeypatch):
     assert res["artifact"]["id"] == aid
     assert any(
         getattr(fn, "__name__", "") == "get_artifact" for fn in record
-    ), "artifact.get 必须 get_artifact 经 to_thread 卸载"
+    ), "artifact.get must fetch get_artifact offloaded via to_thread"
 
 
 async def test_list_offloads_storage_read_to_thread(handler, monkeypatch):
@@ -66,12 +66,12 @@ async def test_list_offloads_storage_read_to_thread(handler, monkeypatch):
     assert len(res["artifacts"]) == 1
     assert any(
         getattr(fn, "__name__", "") == "list_artifacts" for fn in record
-    ), "artifact.list 必须 list_artifacts 经 to_thread 卸载"
+    ), "artifact.list must fetch list_artifacts offloaded via to_thread"
 
 
 async def test_create_uses_async_engine_and_async_publish(handler, monkeypatch):
-    # P2-2: create 调的是 async engine.create_artifact（自身已非阻塞，RPC 层无需 to_thread）。
-    # _publish 改为 async（不再同步回查阻塞）。验证：返回正确 + _publish 不抛（async 调通）。
+    # P2-2: create calls the async engine.create_artifact (non-blocking itself, RPC layer needs no to_thread).
+    # _publish is now async (no more blocking synchronous read-back). Verify: correct return + _publish does not raise (async path works).
     h, _eng = handler
 
     publish_called = []
@@ -89,7 +89,7 @@ async def test_create_uses_async_engine_and_async_publish(handler, monkeypatch):
     )
     aid = res["artifact"]["id"]
     assert aid.startswith("art_")
-    assert "artifact.created" in publish_called, "_publish 须以 await 调用（async）"
+    assert "artifact.created" in publish_called, "_publish must be invoked with await (async)"
 
 
 async def test_delete_offloads_read_and_write_to_thread(handler, monkeypatch):
@@ -106,13 +106,13 @@ async def test_delete_offloads_read_and_write_to_thread(handler, monkeypatch):
     res = await h.dispatch("artifact.delete", {"artifact_id": aid})
     assert res["ok"] is True
     names = [getattr(fn, "__name__", "") for fn in record]
-    assert "get_artifact" in names, "delete 需先经 to_thread 读删除前 artifact"
-    assert "delete_artifact" in names, "delete 写须经 to_thread 卸载"
+    assert "get_artifact" in names, "delete must first read the pre-delete artifact via to_thread"
+    assert "delete_artifact" in names, "delete write must be offloaded via to_thread"
 
 
 async def test_offload_runs_in_worker_thread(handler, monkeypatch):
-    # P2-2 关键点：to_thread 把同步 storage 调用放到 worker 线程，event loop 不阻塞。
-    # 替身记录调用时所在线程，断言 != 主线程（事件循环线程）。
+    # P2-2 key point: to_thread runs synchronous storage calls on a worker thread so the event loop is not blocked.
+    # The stub records the thread it was called on; assert != main thread (the event-loop thread).
     import threading
 
     h, eng = handler
@@ -136,5 +136,5 @@ async def test_offload_runs_in_worker_thread(handler, monkeypatch):
 
     res = await h.dispatch("artifact.list", {"session_id": "s1"})
     assert res["artifacts"]
-    assert seen_tids, "list 路径须经 to_thread"
-    assert all(t != main_tid for t in seen_tids), "卸载须在 worker 线程执行，非 event loop 线程"
+    assert seen_tids, "list path must go through to_thread"
+    assert all(t != main_tid for t in seen_tids), "offloaded work must run on a worker thread, not the event-loop thread"

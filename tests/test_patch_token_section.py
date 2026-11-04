@@ -216,7 +216,7 @@ async def test_patch_optimistic_lock(engine_with_tmp):
         artifact_type="markdown",
         content=content,
     )
-    # P0-2: 乐观锁失败映射 ConflictError(-32002, 可重试) 而非 ValueError(-32603)
+    # P0-2: optimistic-lock failure maps to ConflictError(-32002, retryable) instead of ValueError(-32603)
     from fusion_artifacts_engine.rpc.errors import ConflictError
 
     with pytest.raises(ConflictError, match="Optimistic lock failed"):

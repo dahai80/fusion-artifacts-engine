@@ -28,7 +28,7 @@ def _get(port, path, headers=None):
 
 
 def _start(tmp_path, monkeypatch):
-    # dist 目录指到临时目录（不动真实 webui_dist），写最小 index + asset
+    # Point the dist dir at a temp dir (leave real webui_dist untouched); write a minimal index + asset
     fake_dist = tmp_path / "dist"
     (fake_dist / "assets").mkdir(parents=True)
     (fake_dist / "index.html").write_text("<html><body>fae-webui-test</body></html>")
@@ -50,7 +50,7 @@ def _start(tmp_path, monkeypatch):
 
 
 def test_webui_index_served(tmp_path, monkeypatch):
-    # #76: GET / 返回 index.html，带 CSP + no-store（入口页不可缓存）
+    # #76: GET / serves index.html with CSP + no-store (entry page must not be cached)
     srv, eng, port = _start(tmp_path, monkeypatch)
     try:
         status, headers, body = _get(port, "/")
@@ -66,7 +66,7 @@ def test_webui_index_served(tmp_path, monkeypatch):
 
 
 def test_webui_asset_served_immutable(tmp_path, monkeypatch):
-    # #76: hash 文件名 asset 长缓存
+    # #76: hashed-filename assets get long caching
     srv, eng, port = _start(tmp_path, monkeypatch)
     try:
         status, headers, body = _get(port, "/assets/app.js")
@@ -80,7 +80,7 @@ def test_webui_asset_served_immutable(tmp_path, monkeypatch):
 
 
 def test_webui_path_traversal_rejected(tmp_path, monkeypatch):
-    # #76: 路径穿越必须 404，不能读到 dist 外文件
+    # #76: path traversal must 404, no reads outside dist
     srv, eng, port = _start(tmp_path, monkeypatch)
     try:
         status, _, _ = _get(port, "/assets/..%2f..%2fconfig.py")
@@ -93,7 +93,7 @@ def test_webui_path_traversal_rejected(tmp_path, monkeypatch):
 
 
 def test_webui_missing_dist_keeps_404(tmp_path, monkeypatch):
-    # #76: 无 dist（最小安装）时 GET / 保持 404，RPC/REST 不受影响
+    # #76: with no dist (minimal install) GET / stays 404, RPC/REST unaffected
     monkeypatch.setattr(
         server_mod, "_WEBUI_DIST", tmp_path / "no-such-dist"
     )
@@ -111,7 +111,7 @@ def test_webui_missing_dist_keeps_404(tmp_path, monkeypatch):
     try:
         status, _, _ = _get(port, "/")
         assert status == 404
-        # JSON-RPC POST / 仍然正常
+        # JSON-RPC POST / still works
         body = json.dumps({"jsonrpc": "2.0", "method": "ping", "id": 1}).encode()
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/",
@@ -127,7 +127,7 @@ def test_webui_missing_dist_keeps_404(tmp_path, monkeypatch):
 
 
 def test_webui_real_dist_shipped():
-    # #76: 包内真实构建产物存在（CI 防丢——dist 是 package-data，漏 commit 即菜单 404）
+    # #76: real build artifacts ship inside the package (CI guard against loss — dist is package-data; a missed commit breaks the menu with 404s)
     dist = server_mod._WEBUI_DIST
     assert (dist / "index.html").is_file(), "webui_dist/index.html missing — run `bun run build` in webui/"
     assets = list((dist / "assets").glob("*.js"))

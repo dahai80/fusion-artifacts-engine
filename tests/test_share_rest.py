@@ -14,7 +14,7 @@ from fusion_artifacts_engine.rpc.server import ArtifactRPCServer
 
 
 def _free_port():
-    # P0-9/M26: 固定端口在并发/重跑下撞 TIME_WAIT → Errno 48。动态取空闲端口。
+    # P0-9/M26: a fixed port collides with TIME_WAIT under concurrency/reruns -> Errno 48. Pick a free port dynamically.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -77,7 +77,7 @@ def test_share_rest_ok(share_server):
 
 def test_share_rest_not_found(share_server):
     _server, _engine, base = share_server
-    # LOW-1: 合法格式但不存在 → 404
+    # LOW-1: valid format but nonexistent -> 404
     resp = rest_get(base, "/api/v1/share/shr_000000000000")
     assert resp.status_code == 404
     assert "not found" in resp.json()["error"].lower()
@@ -85,7 +85,7 @@ def test_share_rest_not_found(share_server):
 
 def test_share_rest_invalid_format_400(share_server):
     _server, _engine, base = share_server
-    # LOW-1: 非法 share_id 格式 → 400，不查 DB
+    # LOW-1: invalid share_id format -> 400, no DB lookup
     resp = rest_get(base, "/api/v1/share/shr_nonexistent")
     assert resp.status_code == 400
     assert resp.json()["code"] == -32602
@@ -93,7 +93,7 @@ def test_share_rest_invalid_format_400(share_server):
 
 def test_share_rest_malicious_share_id_400(share_server):
     _server, _engine, base = share_server
-    # LOW-1: 非法格式 id（能进入 share 分支的）→ 400。含 / 的会被 URL 切分绕过 share 分支，故排除。
+    # LOW-1: malformed ids (that reach the share branch) -> 400. Ones containing / are excluded since URL splitting bypasses the share branch.
     for bad in ("shr_短", "shr_<script>", "notashr_abcabcabcabc", "shr_" + "a" * 13, "shr_ab"):
         resp = rest_get(base, f"/api/v1/share/{bad}")
         assert resp.status_code == 400, f"{bad!r} should be 400"
@@ -115,7 +115,7 @@ def test_share_rest_expired_gone(share_server):
         "artifact.create",
         {"session_id": "s_share_exp", "name": "exp.html", "type": "html", "content": "x"},
     )["result"]["artifact"]["id"]
-    # L-6 后 create_share 拒绝过去日期；直接构造过期 share 测试读取路径 fail-closed
+    # After L-6 create_share rejects past dates; construct an expired share directly to test the fail-closed read path
     import uuid
 
     from fusion_artifacts_engine.models import ArtifactShare

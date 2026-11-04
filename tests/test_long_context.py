@@ -170,7 +170,7 @@ def fake_http(monkeypatch):
 
 
 async def _drain(handler):
-    # 长上下文钩子是 create_task 后台任务——测试里必须排空再断言
+    # Long-context hooks are create_task background tasks — tests must drain before asserting
     while handler._bg_tasks:
         await asyncio.gather(*list(handler._bg_tasks))
         await asyncio.sleep(0)
@@ -218,10 +218,10 @@ class TestRollingSummary:
             await _drain(h)
             await h.dispatch("artifact.update", {"artifact_id": art.id, "content": MD2 + "b"})
             await _drain(h)
-            # 验收要求"新版本刷新摘要"——v2、v3 各生成一次
+            # Acceptance requires "a new version refreshes the summary" — one generation each for v2 and v3
             chats = [c for c in fake_http.calls if "chat/completions" in c["url"]]
             assert len(chats) == 2
-            # 同一版本号幂等：直接再调一次不产生新调用
+            # Idempotent per version number: calling again directly produces no new calls
             art2 = engine.storage.get_artifact(art.id)
             out = await long_context.maybe_generate_summary(engine, art2, art2.current_version)
             assert out is None

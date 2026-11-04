@@ -187,9 +187,10 @@ def test_rpc_concurrent_requests(tmp_path):
 
 
 def test_share_max_accesses_atomic_under_burst(tmp_path):
-    # P1-2/H5: max_accesses 在并发突发下必须精确不超限。
-    # 修复前 get_shared_artifact 先读 access_count 再 increment，TOCTOU 窗口让
-    # N 并发请求全过检查后各自 +1 → 超出 max_accesses。修复后原子条件 UPDATE 保证精确。
+    # P1-2/H5: max_accesses must stay exact under concurrent burst, never exceeded.
+    # Before the fix get_shared_artifact read access_count first and incremented after;
+    # the TOCTOU window let N concurrent requests all pass the check then each +1,
+    # overshooting max_accesses. The fix uses an atomic conditional UPDATE for exactness.
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
         allow_no_auth=True,
@@ -219,15 +220,17 @@ def test_share_max_accesses_atomic_under_burst(tmp_path):
             t.join(timeout=10)
 
         served = sum(results)
-        # 精确 5 次成功，15 次因达上限拒绝；修复前可能 >5
+        # Exactly 5 served, 15 rejected at the cap; pre-fix this could exceed 5
         assert served == 5, f"max_accesses=5 but served {served} under 20 concurrent"
     finally:
         eng.close()
 
 
 def test_public_share_max_accesses_atomic_under_burst(tmp_path):
-    # P1-2/H5: 公开端点 get_public_share 的内存缓冲 check-and-increment 同样须原子。
-    # try_consume_access 把 check 与 buffer 增计数合并到同一 _lock 段，突发下精确不超限。
+    # P1-2/H5: the in-memory buffered check-and-increment on the public endpoint
+    # get_public_share must be atomic too.
+    # try_consume_access merges the check and the buffer increment into one _lock
+    # section, staying exact under burst.
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
         allow_no_auth=True,
@@ -258,7 +261,7 @@ def test_public_share_max_accesses_atomic_under_burst(tmp_path):
 
         ok_count = sum(1 for s in statuses if s == "ok")
         gone_count = sum(1 for s in statuses if s == "gone")
-        # 精确 5 次 ok，15 次 gone(exhausted)；修复前缓冲 TOCTOU 可能 >5
+        # Exactly 5 ok, 15 gone (exhausted); pre-fix the buffered TOCTOU could exceed 5
         assert ok_count == 5, f"public max_accesses=5 but ok={ok_count} under 20 concurrent"
         assert gone_count == 15, f"expected 15 gone, got {gone_count}"
     finally:
