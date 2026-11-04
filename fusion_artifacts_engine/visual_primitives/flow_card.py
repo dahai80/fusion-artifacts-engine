@@ -6,9 +6,9 @@ logger = logging.getLogger(__name__)
 
 
 class FlowCardCompiler(BaseCompiler):
-    # 全学段 纯算式/方程/兜底。DSL → HTML+CSS 步骤卡片。
-    # 通用兜底基元——100% 渲染保证，任意输入（含空 pipeline）都不抛异常。
-    # 动画：formula highlight / equation transformation。
+    # All grade levels: pure formulas/equations/fallback. DSL → HTML+CSS step cards.
+    # Universal fallback primitive — 100% render guarantee, never throws on any input (including an empty pipeline).
+    # Animations: formula highlight / equation transformation.
 
     visual_type = "flow_card"
 

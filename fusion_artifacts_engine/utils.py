@@ -9,12 +9,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# 路径段安全字符集：artifact_id / share_id / folder_id 等会拼进文件系统路径的标识符 (C-6, C-10)
+# Safe charset for path segments: artifact_id / share_id / folder_id and other identifiers that get joined into filesystem paths (C-6, C-10)
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
-# id_prefix 允许字符：字母数字下划线连字符，禁止 / .. 空字节等 (C-6)
+# id_prefix allowed characters: alphanumerics, underscore, hyphen; blocks / .. NUL etc. (C-6)
 _SAFE_PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# 运维3: 日志轮转参数。10MB 单文件，保留 5 份轮转备份。
+# Ops-3: log rotation params. 10MB per file, 5 rotating backups retained.
 _LOG_MAX_BYTES = 10 * 1024 * 1024
 _LOG_BACKUP_COUNT = 5
 _LOG_FILE_NAME = "artifacts-engine.log"
@@ -46,8 +46,8 @@ def generate_artifact_id(prefix: str = "art_") -> str:
 
 
 class JsonFormatter(logging.Formatter):
-    # 运维3: 结构化 JSON 日志，便于 ELK/Loki 采集与检索。
-    # 每行一个 JSON 对象：ts / level / logger / msg / 可选字段。
+    # Ops-3: structured JSON logs for ELK/Loki ingestion and search.
+    # One JSON object per line: ts / level / logger / msg / optional fields.
 
     _STD_ATTRS = {
         "name", "msg", "args", "levelname", "levelno", "pathname", "filename",
@@ -72,10 +72,11 @@ class JsonFormatter(logging.Formatter):
 
 
 class LogSanitizerFilter(logging.Filter):
-    # LOW-3/CWE-117: 日志注入防护。用户输入可能含 \n / \r，未过滤可在控制台/文本日志
-    # 伪造新行（如 artifact name "ok\n[ERROR] fake"）。本过滤器把 msg 与各 args 中的
-    # CR/LF 替换为字面 \\r \\n，使注入文本留在同一日志行内。JSON 文件格式器对 \n 已
-    # 转义为字面两字符，本过滤器主要覆盖控制台文本格式器；两者并存无副作用。
+    # LOW-3/CWE-117: log injection protection. User input may contain \n / \r; unfiltered it can forge
+    # new lines in console/text logs (e.g. artifact name "ok\n[ERROR] fake"). This filter replaces CR/LF
+    # in msg and args with literal \\r \\n so injected text stays on the same log line. The JSON file
+    # formatter already escapes \n into literal two-char sequences; this filter mainly covers the console
+    # text formatter. The two coexist without side effects.
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
@@ -90,7 +91,7 @@ class LogSanitizerFilter(logging.Filter):
 
 
 def _resolve_log_dir() -> Path | None:
-    # 运维3: 日志目录优先 env，其次 storage_root/logs，最后 ~/.fusion/artifacts/logs。
+    # Ops-3: log dir resolution order — env var first, then storage_root/logs, finally ~/.fusion/artifacts/logs.
     env_dir = os.environ.get("FUSION_ARTIFACTS_LOG_DIR")
     if env_dir:
         return Path(os.path.expanduser(env_dir))
@@ -103,13 +104,13 @@ def _resolve_log_dir() -> Path | None:
 
 
 def setup_logging(level: int = logging.INFO) -> None:
-    # 运维3: 控制台人读格式 + 文件 JSON 结构化轮转。两者并存：
-    # 控制台便于本地排查，文件供日志系统采集与长期留存。
+    # Ops-3: human-readable console format + rotating structured JSON file. Both coexist:
+    # console for local troubleshooting, file for log-system ingestion and long-term retention.
     root = logging.getLogger()
     root.setLevel(level)
     for h in list(root.handlers):
         root.removeHandler(h)
-    # LOW-3/CWE-117: 全局日志注入过滤器，剥用户输入中的 CR/LF 防伪造日志行
+    # LOW-3/CWE-117: global log-injection filter, strips CR/LF from user input to prevent forged log lines
     root.addFilter(LogSanitizerFilter())
 
     console = logging.StreamHandler()
@@ -136,7 +137,7 @@ def setup_logging(level: int = logging.INFO) -> None:
         root.addHandler(file_handler)
         logger.info("Rotating JSON log initialized at %s", log_dir / _LOG_FILE_NAME)
     except OSError as e:
-        # 日志目录不可写不致命：退化为仅控制台，大声告警
+        # Unwritable log dir is not fatal: degrade to console-only, fail loudly
         logger.warning("Failed to init rotating file log at %s: %s", log_dir, e)
 
 

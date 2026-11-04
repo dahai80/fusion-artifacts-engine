@@ -6,9 +6,9 @@ logger = logging.getLogger(__name__)
 
 
 class TapeDiagramCompiler(BaseCompiler):
-    # 2-6年级 和差倍比/分数。DSL → HTML+SVG 条带/分段图。
-    # 核心兜底基元——必须处理任意数量关系。
-    # 动画：stretch / cut / highlight segments。
+    # Grades 2-6: sum/difference/multiple/ratio and fractions. DSL → HTML+SVG tape/segment diagram.
+    # Core fallback primitive — must handle any quantity relationship.
+    # Animations: stretch / cut / highlight segments.
 
     visual_type = "tape_diagram"
 

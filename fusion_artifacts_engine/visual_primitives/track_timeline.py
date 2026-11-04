@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class TrackTimelineCompiler(BaseCompiler):
-    # 4-6年级 行程/追及/流水。DSL → HTML+SVG 运动轨道。
-    # 动画：多体匀速运动 / 位置追踪。
+    # Grades 4-6: travel/chase/current problems. DSL → HTML+SVG motion tracks.
+    # Animations: multi-body constant-speed motion / position tracking.
 
     visual_type = "track_timeline"
 

@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class BucketDividerCompiler(BaseCompiler):
-    # 4-6年级 隔板/抽屉/容斥。DSL → HTML+SVG 桶/分区。
-    # 动画：element fly-in / divider drag。
+    # Grades 4-6: partition/pigeonhole/inclusion-exclusion. DSL → HTML+SVG buckets/partitions.
+    # Animations: element fly-in / divider drag.
 
     visual_type = "bucket_divider"
 
@@ -24,9 +24,9 @@ class BucketDividerCompiler(BaseCompiler):
             v = val.get("value")
             if not isinstance(v, (int, float)):
                 continue
-            if "bucket" in label or "桶" in label or "group" in label:
+            if "bucket" in label or "\u6876" in label or "group" in label:
                 bucket_count = max(1, int(v))
-            elif "element" in label or "元素" in label or "item" in label:
+            elif "element" in label or "\u5143\u7d20" in label or "item" in label:
                 element_count = max(0, int(v))
         if bucket_count <= 0:
             bucket_count = min(4, max(1, len(entities))) if entities else 3

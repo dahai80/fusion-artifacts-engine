@@ -21,7 +21,7 @@ _TYPE_TO_KIND: dict[str, str] = {
     "data": "tool",
 }
 
-# P0-5/H6: metadata 结构上限——顶层 key 数与单 key 名长度，防 DoS 式巨型/深嵌套 metadata
+# P0-5/H6: metadata structure caps — top-level key count and per-key name length, against DoS-style huge/deeply-nested metadata
 _MAX_METADATA_KEYS = 64
 _MAX_METADATA_KEY_LEN = 128
 
@@ -31,8 +31,8 @@ def infer_kind(artifact_type: str) -> ArtifactKind:
 
 
 def _validate_metadata(metadata: dict | None) -> dict | None:
-    # P0-5/H6: metadata 结构校验——非 dict 拒绝、顶层 key 数与 key 名长度上限。
-    # 字节上限由 storage 层 _enforce_metadata_limit 兜底；此处早拦截畸形结构。
+    # P0-5/H6: metadata structure validation — reject non-dict, cap top-level key count and key name length.
+    # The byte cap is enforced by the storage layer's _enforce_metadata_limit; this catches malformed structures early.
     if metadata is None:
         return None
     if not isinstance(metadata, dict):
@@ -87,8 +87,9 @@ class Artifact(BaseModel):
 
 
 class ArtifactVersion(BaseModel):
-    # #100-4: 全局自增 rowid 不外泄（泄露全局产物量且 UI 上"别家 v1 已是 id=49"）。
-    # 字段保留供存储层内部用，API 一律以 (artifact_id, version_num) 复合标识。
+    # #100-4: the global auto-increment rowid must not leak (it exposes global artifact volume and shows
+    # "another session's v1 already at id=49" in the UI).
+    # Field retained for storage-layer internal use; the API identifies versions by the (artifact_id, version_num) pair.
     id: int = Field(default=0, exclude=True)
     artifact_id: str
     version_num: int
@@ -119,15 +120,15 @@ class ArtifactShare(BaseModel):
     share_id: str
     artifact_id: str
     created_by: str | None = None
-    # E1: created_at/last_access_at 统一 float epoch，与 Artifact/Version 一致，
-    # 避免按时间排序/范围过滤时 float<str TypeError。expires_at 保留 ISO str
-    # （经 _parse_expires_at/_is_expired 解析，不参与排序比较）。
+    # E1: created_at/last_access_at are unified float epochs, consistent with Artifact/Version,
+    # avoiding float<str TypeError in time sorting/range filtering. expires_at stays an ISO str
+    # (parsed via _parse_expires_at/_is_expired, never used in sort comparisons).
     created_at: float | None = None
     expires_at: str | None = None
     revoked: bool = False
     access_count: int = 0
-    # E2: README 宣传的访问上限字段，存储 max_accesses，None=不限。
-    # get_shared/get_public_share 在 increment 前校验 access_count>=max_accesses。
+    # E2: the access cap field advertised in the README, stored as max_accesses, None=unlimited.
+    # get_shared/get_public_share check access_count>=max_accesses before incrementing.
     max_accesses: int | None = None
     last_access_at: float | None = None
     # #77: share permission level — "view" read-only (default) / "remix" viewer may remix.
@@ -153,7 +154,7 @@ class ArtifactTag(BaseModel):
     tag_id: str
     name: str
     color: str | None = None
-    # L-7: tag 作用域——按 session_id 或 project_id 隔离，避免跨用户同名 tag 泄露
+    # L-7: tag scoping — isolated by session_id or project_id, preventing cross-user leaks of same-named tags
     scope: str | None = None
 
 
@@ -163,5 +164,5 @@ class ArtifactEvent(BaseModel):
     session_id: str | None = None
     event_type: str
     payload: dict | None = None
-    # E1: 统一 float epoch，与 Artifact/Version/Share/Folder 一致
+    # E1: unified float epoch, consistent with Artifact/Version/Share/Folder
     created_at: float | None = None

@@ -8,15 +8,16 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# #84: fusion-design [Save to Artifacts] 的 file-IPC 消费端。
-# 生产者契约（fusion-design fd-ecosystem EcosystemLink::send，已冻结）：
-#   目录 <ipc_base>/fusion-artifacts-engine/
-#   文件名 <ns>_<pid>_<seq>.json（上限 8MB）
-#   消息 {"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact",
+# #84: file-IPC consumer for fusion-design [Save to Artifacts].
+# Producer contract (fusion-design fd-ecosystem EcosystemLink::send, frozen):
+#   dir <ipc_base>/fusion-artifacts-engine/
+#   filename <ns>_<pid>_<seq>.json (8MB cap)
+#   message {"target":{"Custom":"fusion-artifacts-engine"},"action":"save_artifact",
 #         "payload":{"source":"fusion-design","title":...,"session":...,"version":...,
 #                    "document":"<PenDocument JSON>","design_system":...}}
-# 处理策略：按 session 归并为一个 artifact（同一设计会话版本递进），处理成功移入
-# .processed/，畸形/超限移入 .failed/，避免重启重复摄入。
+# Processing policy: merge by session into one artifact (versions advance within the same
+# design session); on success move to .processed/, malformed/oversized to .failed/, so a
+# restart never re-ingests the same file.
 
 _SOURCE_MODULE = "fusion-design"
 _ACTION = "save_artifact"
@@ -25,7 +26,8 @@ _MAX_PARSE_ATTEMPTS = 3
 
 
 class DesignIPCConsumer:
-    # v0.7.0: 参数化为通用 file-IPC 消费端，子类只覆写来源与 _ingest。
+    # v0.7.0: parameterized into a generic file-IPC consumer; subclasses only override the
+    # source and _ingest.
     _source_module = "fusion-design"
     _thread_name = "fae-design-ipc"
     _log_tag = "design IPC"
@@ -206,7 +208,8 @@ class DesignIPCConsumer:
         return True
 
     def _publish(self, event_type: str, artifact_id: str, kind: str | None) -> None:
-        # SSE 订阅方按 kind 过滤：缺 kind 的事件会被静默丢弃（与 RPC _publish 同契约）
+        # SSE subscribers filter by kind: events missing kind are silently dropped
+        # (same contract as the RPC _publish)
         try:
             self._engine.event_bus.publish(event_type, {"kind": kind, "artifact_id": artifact_id})
         except Exception:  # noqa: BLE001
@@ -234,9 +237,10 @@ class DesignIPCConsumer:
 
 
 class OfficeIPCConsumer(DesignIPCConsumer):
-    # v0.7.0: fusion-office 文件摄取。payload 带 file_path（office 二进制不进
-    # JSON），解析为带 # 标题的 markdown（section_index 可寻址），元数据记
-    # office_format/office_source_path 供写回定位。
+    # v0.7.0: fusion-office file ingest. The payload carries file_path (office binaries do
+    # not go into JSON); it is parsed into markdown with # headings (addressable via
+    # section_index), and office_format/office_source_path are recorded in metadata for
+    # write-back targeting.
     _source_module = "fusion-office"
     _thread_name = "fae-office-ipc"
     _log_tag = "office IPC"

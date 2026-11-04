@@ -8,9 +8,9 @@ _THREEJS_CDN = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"
 
 
 class Isometric3DCompiler(BaseCompiler):
-    # 5-6年级 立体几何/切削展开。DSL → HTML+Three.js 3D 场景。
-    # 唯一使用 Three.js 的基元（其余纯 SVG）。
-    # 动画：cut / unfold / volume peel。
+    # Grades 5-6: solid geometry/cutting and unfolding. DSL → HTML+Three.js 3D scene.
+    # The only primitive that uses Three.js (the rest are pure SVG).
+    # Animations: cut / unfold / volume peel.
 
     visual_type = "isometric_3d"
 

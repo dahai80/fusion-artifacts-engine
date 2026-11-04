@@ -5,13 +5,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# v0.7.1 #91: 分层上下文压缩。compactor 保持兜底；本模块提供两层主机制：
-# 1) 滚动摘要——版本数过阈值后用 fusion-mlx 生成 changelog 摘要写回
-#    artifact.summary（ref_text 经既有管道自动带上）+ metadata.summary_version 防重。
-# 2) RAG 归档——版本被取代时把旧版本推入 fusion-rag
-#    （POST /bases/{kb}/documents/ingest，doc_name=art_x_vN，metadata 带
-#    artifact_id/version/type），metadata.archived_versions 幂等防重。
-# 两条链路失败只记日志，绝不阻断版本创建/patch 结果。
+# v0.7.1 #91: layered context compaction. compactor remains the fallback; this module provides the two primary mechanisms:
+# 1) Rolling summary — once the version count passes the threshold, fusion-mlx generates a changelog summary written back to
+#    artifact.summary (ref_text picks it up automatically via the existing pipeline) + metadata.summary_version for dedup.
+# 2) RAG archival — when a version is superseded, push the old version into fusion-rag
+#    (POST /bases/{kb}/documents/ingest, doc_name=art_x_vN, metadata carrying
+#    artifact_id/version/type); metadata.archived_versions is the idempotent dedup guard.
+# Both paths only log on failure and never block version creation/patch results.
 
 _ARCHIVE_TAG = "archived_versions"
 
@@ -34,12 +34,12 @@ def _build_changelog_digest(engine, artifact_id: str, limit: int = 40) -> str:
 
 
 async def maybe_generate_summary(engine, artifact, version_num: int) -> str | None:
-    # 版本数达阈值且该版本尚未生成过摘要时，调 fusion-mlx 生成滚动 changelog。
+    # When the version count reaches the threshold and no summary exists yet for this version, call fusion-mlx to generate the rolling changelog.
     cfg = engine.config
     threshold = cfg.long_context_summary_threshold
     if threshold <= 0:
         return None
-    # 后台任务可能晚于其它元数据写入执行——重读最新行，勿信调用方传入的快照
+    # Background tasks may run after other metadata writes — re-read the latest row, never trust the caller's snapshot
     fresh = engine.storage.get_artifact(artifact.id)
     if fresh is not None:
         artifact = fresh
@@ -105,11 +105,11 @@ async def maybe_generate_summary(engine, artifact, version_num: int) -> str | No
 
 
 async def maybe_archive_superseded(engine, artifact, superseded_version_num: int) -> str | None:
-    # 新版本取代旧版本后，把旧版本内容归档进 fusion-rag。幂等：同一版本只归档一次。
+    # After a new version supersedes the old one, archive the old version's content into fusion-rag. Idempotent: each version is archived once.
     cfg = engine.config
     if not cfg.long_context_rag_enabled:
         return None
-    # 后台任务可能晚于其它元数据写入执行——重读最新行，勿信调用方传入的快照
+    # Background tasks may run after other metadata writes — re-read the latest row, never trust the caller's snapshot
     fresh = engine.storage.get_artifact(artifact.id)
     if fresh is not None:
         artifact = fresh
@@ -182,7 +182,7 @@ async def maybe_archive_superseded(engine, artifact, superseded_version_num: int
 
 
 def history_query_hint(engine, artifact) -> dict:
-    # #91 验收：给消费者的 rag 查询模式（不做新 RPC 面proxy——文档化用法即可）。
+    # #91 acceptance: the RAG query pattern handed to consumers (no new RPC surface — documenting the usage is enough).
     cfg = engine.config
     return {
         "rag_url": cfg.long_context_rag_url,

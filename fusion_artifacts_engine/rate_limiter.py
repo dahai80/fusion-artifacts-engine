@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class TokenBucket:
-    # 令牌桶：恒定速率 rps 补令牌，桶容量 burst 封顶突发。
-    # acquire() 拿令牌；空桶返回 False（调用方回 429），不阻塞，不排队。
+    # Token bucket: tokens refill at a constant rps rate; bucket capacity burst caps the maximum burst.
+    # acquire() takes a token; an empty bucket returns False (caller replies 429), never blocks, never queues.
 
     def __init__(self, rps: float, burst: int):
         self.rps = max(0.0, float(rps))
@@ -46,9 +46,9 @@ class TokenBucket:
 
 
 class RateLimiter:
-    # 两桶：default 覆盖 JSON-RPC + authed REST；public 覆盖无鉴权公开 share 端点。
-    # public 配额独立——公开端点易被刷量，不能拖垮鉴权后端。
-    # rps=0 表示不限流（默认）。
+    # Two buckets: default covers JSON-RPC + authed REST; public covers unauthenticated public share endpoints.
+    # public has an isolated quota — public endpoints are prone to flooding and must not drag down the authed backend.
+    # rps=0 means unlimited (default).
 
     def __init__(self, rps: float = 0, burst: int = 0,
                  public_rps: float = 0, public_burst: int = 0):

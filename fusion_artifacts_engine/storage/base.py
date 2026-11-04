@@ -12,12 +12,13 @@ from fusion_artifacts_engine.models import (
 
 logger = logging.getLogger(__name__)
 
-# H8: StorageDriver 是多节点存储替换的真实契约（LSP）。
-# 原 ABC 仅 8 个抽象方法，SQLiteStorage 实际实现 40+ 且 engine 直接调用——
-# 抽象与实现脱节，替换存储（Postgres / 对象存储 / 多节点复制）时 engine 调用的
-# 半数方法无声明，调用方拿不到 LSP 保证。补全为 engine 实际依赖的完整方法集。
-# 未来换存储：实现此 ABC 全部抽象方法即可替换，engine 无需改动。
-# 注：signatures 与 SQLiteStorage 对齐，保证现有实现零改动通过。
+# H8: StorageDriver is the real contract for multi-node storage replacement (LSP).
+# The original ABC had only 8 abstract methods while SQLiteStorage actually implements 40+ that the engine
+# calls directly — abstraction and implementation had drifted apart, so when swapping storage (Postgres /
+# object store / multi-node replication) half the methods the engine calls were undeclared and callers got
+# no LSP guarantee. Completed to the full method set the engine actually depends on.
+# Future storage swap: implement every abstract method of this ABC and the engine needs no changes.
+# Note: signatures are aligned with SQLiteStorage so the existing implementation passes with zero changes.
 
 
 class StorageDriver(ABC):
@@ -171,7 +172,7 @@ class StorageDriver(ABC):
     def revoke_share(self, share_id: str) -> bool: ...
 
     def update_share_permission(self, share_id: str, permission: str) -> bool:
-        # #77: 可选能力 —— 默认不支持（返回 False），SQLite 实现已支持
+        # #77: optional capability — unsupported by default (returns False); the SQLite implementation supports it
         return False
 
     @abstractmethod

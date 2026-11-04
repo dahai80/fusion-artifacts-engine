@@ -23,12 +23,12 @@ def extract_sections(content: str, artifact_type: str) -> list[dict]:
     return sections
 
 
-# H7: 以下 section 边界/patch 逻辑从 engine.py 抽出。纯函数无状态，行为不变。
+# H7: the section boundary/patch logic below was extracted from engine.py. Pure stateless functions, behavior unchanged.
 
 
 def all_section_bounds(content: str, artifact_type: str) -> list[tuple[int, int, int, str]]:
-    # P-1: 一次线性扫预计算所有标题位置 + section 边界，避免 O(n^2)。
-    # 返回 (start, end, level, anchor) 列表，end 为下一同级/更高级标题行号。
+    # P-1: one linear pass precomputes all header positions + section boundaries, avoiding O(n^2).
+    # Returns a list of (start, end, level, anchor); end is the line number of the next same-or-higher-level header.
     lines = content.split("\n")
     headers: list[tuple[int, int, str]] = []
     for i, line in enumerate(lines):
@@ -37,9 +37,9 @@ def all_section_bounds(content: str, artifact_type: str) -> list[tuple[int, int,
             if m:
                 headers.append((i, len(m.group(1)), m.group(2).strip()))
         elif artifact_type == "code":
-            # E4: 多语言 section 检测。覆盖 Python(def/class/async def)
-            # JS/TS(function/const/export class/arrow)、Go(func)、Rust(fn/impl/struct/pub)
-            # Java(class/public..)。标识符允许 unicode（Python3 非ASCII方法名）。
+            # E4: multi-language section detection. Covers Python(def/class/async def),
+            # JS/TS(function/const/export class/arrow), Go(func), Rust(fn/impl/struct/pub),
+            # Java(class/public..). Identifiers allow unicode (Python3 non-ASCII method names).
             m = re.match(
                 r"^\s*(?:"
                 r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)"
@@ -77,7 +77,7 @@ def all_section_bounds(content: str, artifact_type: str) -> list[tuple[int, int,
 def find_section_bounds(
     content: str, anchor: str, artifact_type: str
 ) -> list[tuple[int, int, int]]:
-    # P-1: 复用 all_section_bounds 线性结果，按 anchor 过滤；保持原多重匹配语义。
+    # P-1: reuses all_section_bounds' linear result, filtered by anchor; keeps the original multi-match semantics.
     anchor = normalize_anchor(anchor)
     return [
         (s, e, lvl)
@@ -87,7 +87,7 @@ def find_section_bounds(
 
 
 def build_sections_with_tokens(content: str, artifact_type: str) -> list[dict]:
-    # P-1: 单次线性扫导出所有 section 边界，避免每标题一次 O(n) 扫。
+    # P-1: a single linear pass exports all section boundaries, avoiding one O(n) scan per header.
     lines = content.split("\n")
     sections = []
     for start, end, _lvl, anchor in all_section_bounds(content, artifact_type):
@@ -136,8 +136,8 @@ def delete_section(content: str, anchor: str, artifact_type: str) -> tuple[str, 
 
 
 def build_toc(content: str, artifact_type: str) -> list[dict]:
-    # v0.7.1 #90: 结构化目录。每 section 带 1-based 行区间 + 字节数 + token 数，
-    # 供 artifact.toc 返回；调用方按 start_line/end_line 分块按需加载。
+    # v0.7.1 #90: structured TOC. Each section carries a 1-based line range + byte count + token count,
+    # returned by artifact.toc; callers load chunks on demand by start_line/end_line.
     lines = content.split("\n")
     toc = []
     for start, end, level, anchor in all_section_bounds(content, artifact_type):
@@ -157,8 +157,8 @@ def build_toc(content: str, artifact_type: str) -> list[dict]:
 
 
 def read_line_range(content: str, offset: int = 0, limit: int | None = None) -> dict:
-    # v0.7.1 #90: 行区间分块读。offset 0-based 行号；limit None/<=0 = 读到结尾。
-    # 只 join 请求的行，不做全量切片拷贝。
+    # v0.7.1 #90: line-range chunked read. offset is 0-based; limit None/<=0 = read to the end.
+    # Joins only the requested lines, no full-slice copy.
     lines = content.split("\n")
     total_lines = len(lines)
     total_bytes = len(content.encode("utf-8"))

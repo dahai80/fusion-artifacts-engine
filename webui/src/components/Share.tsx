@@ -36,7 +36,7 @@ export default function Share({
 
     const doRemix = async () => {
         if (!data?.artifact) return;
-        // S6: 禁原生 confirm——remix 非破坏性，直接执行（误建副本可在库中删除）
+        // S6: native confirm is banned — remix is non-destructive, execute directly (accidental copies can be deleted in the library)
         setBusy(true);
         try {
             const child = await remixArtifact(data.artifact.id);

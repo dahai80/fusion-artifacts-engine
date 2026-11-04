@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 def _is_expired(expires_at: str | None) -> bool:
-    # L-1: fail-closed——无过期时间才放行；解析失败一律视为已过期，拒绝访问
+    # L-1: fail-closed - only a missing expiry passes; unparseable values are always
+    # treated as expired and access is denied
     if not expires_at:
         return False
     try:
@@ -25,7 +26,7 @@ def _is_expired(expires_at: str | None) -> bool:
 
 
 def _parse_expires_at(expires_at: str | None) -> datetime | None:
-    # L-6: 解析 expires_at 为 aware datetime；None 放行，不可解析抛 ValueError
+    # L-6: parse expires_at into an aware datetime; None passes, unparseable raises ValueError
     if not expires_at:
         return None
     try:
@@ -37,16 +38,17 @@ def _parse_expires_at(expires_at: str | None) -> datetime | None:
     return exp
 
 
-# H7: share 访问控制 + R2 内存缓冲从 engine.py 抽出为独立类。
-# engine 持有 ShareManager 实例，方法委托。行为不变。
+# H7: share access control + R2 memory buffering extracted from engine.py into this
+# standalone class. The engine holds a ShareManager instance and delegates. Behavior unchanged.
 
 
 class ShareManager:
     def __init__(self, engine):
-        # engine 引用用于回调查 storage/config/get_version_content/emit_event
+        # engine reference for looking back into storage/config/get_version_content/emit_event
         self.engine = engine
-        # R2: share access_count 内存缓冲——公开 GET 只增内存计数，后台批量刷盘，
-        # 避免病毒式传播时每次公开访问都持 _write_lock 写 SQLite（写放大 DoS）。
+        # R2: in-memory buffer for share access_count - public GETs only bump the in-memory
+        # counter, flushed to disk in batches by a background thread, so viral traffic does
+        # not take _write_lock and write SQLite on every public access (write-amplification DoS).
         self._buffer: dict[str, int] = {}
         self._lock = threading.Lock()
         self._flush_threshold = 50
@@ -66,7 +68,8 @@ class ShareManager:
         return self.engine.config
 
     def _flush_loop(self) -> None:
-        # R2: 后台定期刷盘 share access 增量。daemon 线程，stop event 退出。
+        # R2: background thread periodically flushes share access deltas. Daemon thread,
+        # exits via the stop event.
         while not self._stop.wait(self._flush_interval):
             try:
                 self._flush()
@@ -74,7 +77,8 @@ class ShareManager:
                 logger.warning("share access flush failed: %s", e)
 
     def _flush(self) -> None:
-        # R2: 原子取出缓冲增量，批量 UPDATE access_count += delta + last_access_at=now。
+        # R2: atomically take the buffered deltas, then batch UPDATE access_count += delta
+        # plus last_access_at=now.
         with self._lock:
             if not self._buffer:
                 return
@@ -86,7 +90,7 @@ class ShareManager:
                 self._storage.increment_share_access(share_id, delta=delta)
                 flushed += 1
             except Exception as e:
-                # 单条失败回填缓冲，下次再刷，不丢计数
+                # On a per-row failure, backfill the buffer and retry next flush; no count loss
                 logger.warning("flush share %s delta=%d failed: %s", share_id, delta, e)
                 with self._lock:
                     self._buffer[share_id] = self._buffer.get(share_id, 0) + delta
@@ -94,17 +98,19 @@ class ShareManager:
             logger.debug("share access flushed: %d share(s)", flushed)
 
     def buffered_access_count(self, share_id: str, persisted: int) -> int:
-        # R2: 含缓冲的总访问数，供 E2 max_accesses 上限校验
+        # R2: total access count including the buffer, for the E2 max_accesses cap check
         with self._lock:
             return persisted + self._buffer.get(share_id, 0)
 
     def try_consume_access(
         self, share_id: str, persisted: int, max_accesses: int | None
     ) -> int | None:
-        # P1-2/H5: 原子 check-and-increment。check 与 increment 合并到同一 _lock 持有段，
-        # 消除 get_public_share 里 buffered_access_count(检查) 与 _buffer_access(增计数)
-        # 之间的 TOCTOU 窗口——并发突发下 N 请求全过检查后才各自增计数 → 超出 max_accesses。
-        # 返回增计数后的 effective_count（允许）；None 表示已达上限（拒绝）。
+        # P1-2/H5: atomic check-and-increment. Check and increment are merged into a single
+        # _lock-held section, closing the TOCTOU window in get_public_share between
+        # buffered_access_count (check) and _buffer_access (bump) - under a concurrent burst,
+        # N requests could all pass the check before each bumped the count, exceeding
+        # max_accesses. Returns the effective_count after the bump (allowed); None means the
+        # cap is reached (denied).
         with self._lock:
             buffered = self._buffer.get(share_id, 0)
             effective_count = persisted + buffered
@@ -117,7 +123,7 @@ class ShareManager:
         return new_count
 
     def shutdown(self) -> None:
-        # R2: 关停刷盘线程前最终 flush，防计数丢失
+        # R2: final flush before shutting down the flush thread, so no counts are lost
         self._stop.set()
         try:
             self._flush()
@@ -132,13 +138,13 @@ class ShareManager:
         max_accesses: int | None = None,
         permission: str = "view",
     ) -> ArtifactShare:
-        # #77: 权限校验前置（模型 validator 之外的早失败点）
+        # #77: permission validation up front (early failure point beyond the model validator)
         if permission not in ("view", "remix"):
             raise ValueError(f"share permission must be 'view' or 'remix', got: {permission!r}")
         artifact = self._storage.get_artifact(artifact_id)
         if artifact is None:
             raise ValueError(f"Artifact not found: {artifact_id}")
-        # C-9: 仅拥有者可分享——artifact 有 owner_user_id 时校验 created_by 一致
+        # C-9: owner-only sharing - when the artifact has owner_user_id, created_by must match
         if artifact.owner_user_id and created_by != artifact.owner_user_id:
             logger.warning(
                 "Share denied: caller %s != owner %s for artifact %s",
@@ -147,11 +153,11 @@ class ShareManager:
                 artifact_id,
             )
             raise PermissionError(f"Only the owner can share artifact {artifact_id}")
-        # E2: 校验 max_accesses——必须为正整数，None=不限
+        # E2: validate max_accesses - must be a positive integer, None = unlimited
         if max_accesses is not None and max_accesses < 1:
             logger.warning("create_share bad max_accesses %r", max_accesses)
             raise ValueError(f"max_accesses must be >= 1 or null: {max_accesses}")
-        # L-6: 校验 expires_at 格式/范围——拒绝过去日期与超 max-TTL
+        # L-6: validate expires_at format/range - reject past dates and beyond max TTL
         if expires_at is not None:
             try:
                 exp = _parse_expires_at(expires_at)
@@ -176,7 +182,8 @@ class ShareManager:
                         )
         existing = self._storage.get_share_by_artifact(artifact_id)
         if existing is not None:
-            # #77: 同链接改权限 —— 已有 share 时 upsert permission，下次打开即生效
+            # #77: permission change on the same link - with an existing share, upsert the
+            # permission so it takes effect on the next open
             if existing.permission != permission:
                 self._storage.update_share_permission(existing.share_id, permission)
                 existing = self._storage.get_share(existing.share_id)
@@ -192,7 +199,7 @@ class ShareManager:
                 )
             return existing
         share_id = f"shr_{uuid.uuid4().hex[:12]}"
-        # E1: created_at 用 float epoch，与 Artifact/Version 一致
+        # E1: created_at as a float epoch, consistent with Artifact/Version
         share = ArtifactShare(
             share_id=share_id,
             artifact_id=artifact_id,
@@ -220,12 +227,14 @@ class ShareManager:
         if _is_expired(share.expires_at):
             logger.info("Share %s expired", share_id)
             return None
-        # L-2: artifact 存在性校验先于 access 计数，否则已删 artifact 会污染 access 统计。
+        # L-2: artifact existence check comes before the access count, otherwise a deleted
+        # artifact would pollute access stats.
         artifact = self._storage.get_artifact(share.artifact_id)
         if artifact is None:
             return None
-        # P1-2/H5: 原子 check-and-increment——单条条件 UPDATE 原子完成"未达上限才 +1"，
-        # 消除先读 access_count 再 increment 的 TOCTOU（并发突发下超出 max_accesses）。
+        # P1-2/H5: atomic check-and-increment - a single conditional UPDATE atomically does
+        # "bump only if under the cap", closing the read-access_count-then-increment TOCTOU
+        # (concurrent bursts could exceed max_accesses).
         if not self._storage.try_increment_share_access(share_id, share.max_accesses):
             logger.info("Share %s exhausted: access_count >= max_accesses %s", share_id, share.max_accesses)
             return None
@@ -260,15 +269,18 @@ class ShareManager:
         if _is_expired(share.expires_at):
             logger.info("Public share %s expired", share_id)
             return {"status": "gone", "reason": "expired"}
-        # L-2: artifact 存在性校验先于 access 计数，否则已删 artifact 会污染 access 统计。
-        # 此处无计数变更，仅读 artifact，移到 try_consume_access 之前不破坏 L-2。
+        # L-2: artifact existence check comes before the access count, otherwise a deleted
+        # artifact would pollute access stats. No count change happens here, only the artifact
+        # read, so moving it before try_consume_access does not break L-2.
         artifact = self._storage.get_artifact(share.artifact_id)
         if artifact is None:
             logger.warning("Public share %s: artifact %s missing", share_id, share.artifact_id)
             return {"status": "not_found"}
-        # P1-2/H5: 原子 check-and-increment——check 与 buffer 增计数合并到同一 _lock 段，
-        # 消除并发突发下多请求全过检查后才各自增计数 → 超出 max_accesses 的 TOCTOU 窗口。
-        # R2: 公开端点走内存缓冲（不持写锁），后台批量刷盘。
+        # P1-2/H5: atomic check-and-increment - the check and the buffer bump are merged into
+        # one _lock section, closing the TOCTOU window where, under a concurrent burst, many
+        # requests all pass the check before each bumps the count and max_accesses is exceeded.
+        # R2: the public endpoint uses the memory buffer (no write lock), flushed in batches
+        # by a background thread.
         new_count = self.try_consume_access(share_id, share.access_count, share.max_accesses)
         if new_count is None:
             logger.info(
@@ -284,8 +296,9 @@ class ShareManager:
             share_id,
             share.artifact_id,
         )
-        # C-5: 公共未认证端点只回展示字段，不泄露 session_id/project_id/
-        # owner_user_id/metadata/content_hash/folder_id/created_by 等内部 PII
+        # C-5: the public unauthenticated endpoint returns only display fields, never leaking
+        # internal PII such as session_id/project_id/owner_user_id/metadata/content_hash/
+        # folder_id/created_by
         public_share = {
             "share_id": share.share_id,
             "expires_at": share.expires_at,

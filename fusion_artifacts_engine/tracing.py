@@ -4,14 +4,14 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 
-# P2-5/H12(trace)/M20: 可选 OTel tracing 集成。
-# 审计要求「至少接 OTel Python SDK，标 rpc.server.duration + db.storage.duration」。
-# 本中间件是 local-first 单租户、stdlib HTTP server，不应把 OTel 设为硬依赖——
-# 大多数部署无需分布式追踪。故采用可选集成：
-#   - opentelemetry-api/sdk 未安装 → tracing 纯 no-op（零开销、零 import 错误）。
-#   - 安装但 tracing.enabled=false → no-op tracer。
-#   - 安装且 enabled=true → 真 tracer，rpc.server.duration / db.storage.duration span。
-# 调用方一律 `with tracing.span("name", **attrs):`，无需关心是否真采集。
+# P2-5/H12(trace)/M20: optional OTel tracing integration.
+# Audit requires "at least wire up the OTel Python SDK, with rpc.server.duration + db.storage.duration spans".
+# This middleware is local-first single-tenant on a stdlib HTTP server; OTel must not be a hard dependency —
+# most deployments do not need distributed tracing. Hence optional integration:
+#   - opentelemetry-api/sdk not installed → tracing is a pure no-op (zero overhead, zero import errors).
+#   - installed but tracing.enabled=false → no-op tracer.
+#   - installed and enabled=true → real tracer with rpc.server.duration / db.storage.duration spans.
+# Callers always use `with tracing.span("name", **attrs):` and need not care whether anything is actually collected.
 
 try:
     from opentelemetry import trace
@@ -30,10 +30,10 @@ _ENABLED = False
 
 
 def configure_tracing(enabled: bool, service_name: str = "fusion-artifacts-engine") -> None:
-    # 进程级一次性配置。enabled=False 或 OTel 不可用 → 保持 no-op。
-    # enabled=True 且 OTel 可用 → 建 TracerProvider + ConsoleSpanProcessor。
-    # Console exporter 是默认出口（本地单租户场景足够；生产可经 OTLP exporter 外接，
-    # 由部署方注入 OTEL_EXPORTER_OTLP_ENDPOINT 后 SDK 自动启用，无需改本代码）。
+    # Process-level one-time configuration. enabled=False or OTel unavailable → stays no-op.
+    # enabled=True and OTel available → builds TracerProvider + ConsoleSpanProcessor.
+    # Console exporter is the default output (sufficient for local single-tenant; production can attach an
+    # OTLP exporter externally — once the deployer injects OTEL_EXPORTER_OTLP_ENDPOINT the SDK enables it, no code change needed here).
     global _PROVIDER, _TRACER, _ENABLED
     if not enabled:
         _ENABLED = False
@@ -62,8 +62,8 @@ def configure_tracing(enabled: bool, service_name: str = "fusion-artifacts-engin
 
 @contextmanager
 def span(name: str, **attributes):
-    # 统一 span 入口。enabled+可用 → 真 span（记录属性、异常、状态）。
-    # 否则 → 纯 no-op contextmanager，调用方无感知。
+    # Unified span entry point. enabled+available → real span (records attributes, exceptions, status).
+    # Otherwise → pure no-op contextmanager, invisible to callers.
     if not _ENABLED or _TRACER is None:
         yield None
         return
@@ -89,9 +89,10 @@ def is_enabled() -> bool:
 
 
 def traced(name: str, **attributes):
-    # P2-5: 装饰器形式——用于不便用 `with` 包裹（方法体大/多 return）的同步方法。
-    # 启用判定延迟到调用时（configure_tracing 在启动后调，装饰在导入期，
-    # 故不能在 deco 里早判 _ENABLED，否则永远 no-op）。未启用时直接调原函数。
+    # P2-5: decorator form — for sync methods awkward to wrap with `with` (large bodies / many returns).
+    # Enabled check is deferred to call time (configure_tracing runs after startup while decoration happens at
+    # import time, so the deco must not test _ENABLED early, otherwise it stays no-op forever). Calls the original
+    # function directly when not enabled.
     def deco(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):
@@ -119,7 +120,7 @@ def traced(name: str, **attributes):
 
 
 def shutdown() -> None:
-    # 进程退出时优雅 flush span processor。幂等。
+    # Gracefully flush the span processor on process exit. Idempotent.
     global _PROVIDER, _TRACER, _ENABLED
     if _PROVIDER is not None:
         try:

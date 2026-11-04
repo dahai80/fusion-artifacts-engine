@@ -32,8 +32,8 @@ def compact_content(content: str, artifact_type: str, token_budget: int) -> str:
 
 
 def compact_and_count(content: str, artifact_type: str, token_budget: int) -> tuple[str, int]:
-    # F3: 压缩 + 精确计数合并，供 engine 卸线程池；压缩结果与 token 数一次返回，
-    # 避免 engine 再 count_tokens(compacted_content) 二次全量编码
+    # F3: combines compaction + exact counting so the engine can offload to a thread pool; returns the compacted
+    # result and token count in one shot, avoiding a second full count_tokens(compacted_content) encode in the engine
     compacted = compact_content(content, artifact_type, token_budget)
     return compacted, count_tokens(compacted)
 
@@ -42,8 +42,8 @@ def _remove_comments(content: str, artifact_type: str) -> str:
     lines = content.split("\n")
     out = []
     if artifact_type == "code":
-        # L-17: 仅剥整行 # 注释，保留 #! shebang 与 # -*- coding -*- 声明；
-        # 跳过三引号字符串内部以 # 开头的行，避免损坏 Python 多行字符串
+        # L-17: strips only whole-line # comments, preserving #! shebang and # -*- coding -*- declarations;
+        # skips lines starting with # inside triple-quoted strings to avoid breaking Python multiline strings
         in_triple = False
         triple_delims = ('"""', "'''")
         for idx, line in enumerate(lines):
@@ -130,8 +130,8 @@ def _truncate_sections(content: str, artifact_type: str, token_budget: int) -> s
             sections.append({"start": i, "anchor": anchor, "level": level})
         i += 1
 
-    # F3: 按行增量计 token + 前缀和，避免每个 section 边界重新 join+全量编码（O(n²)）。
-    # 仅在此函数内对每行编码一次；最终返回前用 count_tokens 对拼接结果做一次精确校验。
+    # F3: incremental per-line token counting + prefix sums, avoiding re-join + full encode at every section boundary (O(n^2)).
+    # Each line is encoded once within this function; before the final return, count_tokens validates the joined result exactly once.
     line_tokens = [count_tokens(line) for line in lines]
     prefix = [0] * (len(lines) + 1)
     for idx, t in enumerate(line_tokens):

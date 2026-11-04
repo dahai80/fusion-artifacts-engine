@@ -9,8 +9,8 @@ _CHARTJS_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.j
 
 
 class DataChartCompiler(BaseCompiler):
-    # 4-5年级 统计/条形/折线。DSL → HTML+Chart.js。
-    # 动画：bar stretch / line draw。
+    # Grades 4-5: statistics/bar/line charts. DSL → HTML+Chart.js.
+    # Animations: bar stretch / line draw.
 
     visual_type = "data_chart"
 
@@ -22,7 +22,7 @@ class DataChartCompiler(BaseCompiler):
         chart_type = "bar"
         meta = self._meta(dsl_dict)
         vt_hint = (meta.get("topic") or "").lower()
-        if "折线" in vt_hint or "line" in vt_hint:
+        if "\u6298\u7ebf" in vt_hint or "line" in vt_hint:
             chart_type = "line"
         for key, val in params.items():
             if not isinstance(val, dict):

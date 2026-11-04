@@ -11,8 +11,8 @@ _RENDERABLE_MERMAID_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _RENDERABLE_REACT_RE = re.compile(
-    # M-2: 要求更强正向信号——import from react / useState 等 hook / 大写 JSX 组件名
-    # JSX 组件首字母大写是 React 惯例，用显式 [A-Z] 不开 IGNORECASE，避免 <html> 误判
+    # M-2: require stronger positive signals — import from react / hooks like useState / capitalized JSX component names
+    # Capitalized-first JSX components are a React convention; use explicit [A-Z] without IGNORECASE to avoid <html> false positives
     r"(import\s+[^;]*\bfrom\s+['\"]react['\"]|"
     r"from\s+['\"]react['\"]|"
     r"\b(?:useState|useEffect|useMemo|useCallback|useRef|useContext)\s*\(|"

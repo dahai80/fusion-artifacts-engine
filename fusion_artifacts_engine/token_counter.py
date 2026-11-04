@@ -9,9 +9,9 @@ logger = logging.getLogger(__name__)
 
 _encoder = None
 
-# H6: token 计数缓存。版本内容不可变（create 后不修改），同 content 重复计数命中缓存
-# 省 tiktoken BPE 分词开销。LRU + 上限防内存无界增长。短文本（<256B）跳过缓存，
-# 缓存自身开销可能超过分词收益。
+# H6: token count cache. Version content is immutable (never modified after create), so repeated counts of the
+# same content hit the cache and skip the tiktoken BPE tokenization cost. LRU + cap prevents unbounded memory
+# growth. Short texts (<256B) skip the cache — cache overhead could exceed the tokenization savings.
 _TOKEN_CACHE: "OrderedDict[str, int]" = OrderedDict()
 _TOKEN_CACHE_LOCK = threading.Lock()
 _TOKEN_CACHE_MAX = 2048
@@ -32,7 +32,7 @@ def _cache_key(text: str) -> str:
 def count_tokens(text: str) -> int:
     if not text:
         return 0
-    # H6: 短文本不缓存（缓存开销 > 分词收益）
+    # H6: short texts are not cached (cache overhead > tokenization savings)
     cacheable = len(text) >= _TOKEN_CACHE_MIN_BYTES
     if cacheable:
         key = _cache_key(text)
@@ -44,14 +44,14 @@ def count_tokens(text: str) -> int:
     try:
         n = len(_get_encoder().encode(text))
     except Exception:  # noqa: BLE001
-        # L-18: CJK 回退。中文 token ≈ 字数 * 0.6~1.0，按 utf-8 字节 /3 更接近真实，
-        # 远好于英文启发式 chars/4（对中文低估 4-8 倍）
+        # L-18: CJK fallback. Chinese tokens ≈ char count * 0.6~1.0; utf-8 bytes /3 is closer to reality
+        # and far better than the English heuristic chars/4 (which underestimates Chinese by 4-8x)
         byte_len = len(text.encode("utf-8"))
         n = max(0, byte_len // 3)
         logger.warning(
             "tiktoken encode failed, falling back to utf8-bytes/3 estimate: %d", n
         )
-        # 编码失败不缓存（内容可能触发重复告警，但避免缓存错误估算）
+        # Do not cache on encode failure (content may trigger repeated warnings, but avoids caching a wrong estimate)
         return n
     if cacheable:
         with _TOKEN_CACHE_LOCK:
@@ -63,8 +63,8 @@ def count_tokens(text: str) -> int:
 
 
 def estimate_tokens(text: str) -> int:
-    # F3: 廉价估算，仅用于 compactor 跳过明显超预算的全量 tiktoken 编码。
-    # 不保证上下界——最终是否 ≤budget 由 count_tokens 精确校验。
+    # F3: cheap estimate, only for compactor to skip full tiktoken encoding of content that is clearly over budget.
+    # No upper/lower bound guaranteed — the final within-budget decision is validated precisely by count_tokens.
     if not text:
         return 0
     char_len = len(text)
@@ -75,6 +75,6 @@ def estimate_tokens(text: str) -> int:
 
 
 def clear_token_cache() -> None:
-    # H6: 测试/运维可清缓存
+    # H6: cache clear for tests/ops
     with _TOKEN_CACHE_LOCK:
         _TOKEN_CACHE.clear()

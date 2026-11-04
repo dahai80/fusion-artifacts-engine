@@ -6,8 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 class ArrayGridCompiler(BaseCompiler):
-    # 1-2年级 计数/阵列/乘法。DSL → HTML+SVG 点阵/阵列网格。
-    # 动画：combine / circle / pre-allocate。
+    # Grades 1-2: counting/arrays/multiplication. DSL → HTML+SVG dot/array grid.
+    # Animations: combine / circle / pre-allocate.
 
     visual_type = "array_grid"
 
@@ -23,11 +23,11 @@ class ArrayGridCompiler(BaseCompiler):
             v = val.get("value")
             if not isinstance(v, (int, float)):
                 continue
-            if "count" in label or "总数" in label or "total" in label:
+            if "count" in label or "\u603b\u6570" in label or "total" in label:
                 count = int(v)
-            elif "row" in label or "行" in label:
+            elif "row" in label or "\u884c" in label:
                 rows = max(1, int(v))
-            elif "col" in label or "列" in label:
+            elif "col" in label or "\u5217" in label:
                 cols = max(1, int(v))
         if count <= 0:
             count = rows * cols if rows * cols > 0 else 12

@@ -3,9 +3,9 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# 运维2: 自实现 Prometheus 文本格式，无外部依赖。
-# 指标：requests_total / error_total（counter），active_conns（gauge），
-# request_latency_seconds（histogram，固定桶）。
+# Ops-2: self-implemented Prometheus text format, no external dependencies.
+# Metrics: requests_total / error_total (counters), active_conns (gauge),
+# request_latency_seconds (histogram, fixed buckets).
 
 _DEFAULT_BUCKETS = (
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
@@ -22,7 +22,7 @@ class MetricsRegistry:
         self._hist_sum: dict[str, float] = {}
         self._hist_total: dict[str, int] = {}
         self._buckets = tuple(sorted(buckets))
-        # 内建指标预声明，便于 exposition 输出稳定顺序
+        # Pre-declare built-in metrics so exposition output order is stable
         self._register_counter("rpc_requests_total")
         self._register_counter("rpc_error_total")
         self._register_gauge("rpc_active_conns")
@@ -99,7 +99,7 @@ class MetricsRegistry:
                     if not key:
                         lines.append(f"{name} {val}")
                     else:
-                        # key 形如 method=xxx -> 还原成 {method="xxx"}
+                        # keys look like method=xxx -> restore to {method="xxx"}
                         parts = key.split(",")
                         label_str = "{" + ",".join(
                             f'{p.split("=", 1)[0]}="{p.split("=", 1)[1]}"' for p in parts
@@ -138,7 +138,7 @@ def get_metrics() -> MetricsRegistry:
 
 
 def reset_metrics() -> None:
-    # 测试用：清空全局单例
+    # Test helper: clear the global singleton
     global _metrics
     with _metrics_lock:
         _metrics = None

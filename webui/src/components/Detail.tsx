@@ -67,13 +67,13 @@ export default function Detail({
     const [sharePerm, setSharePerm] = useState<"view" | "remix">("view");
     const [shareBase, setShareBase] = useState("");
     const [parentName, setParentName] = useState("");
-    // S6: 禁原生 confirm——阻断确认走自实现 Modal（ConfirmDialog 组件就绪前过渡）
+    // S6: native confirm is banned — blocking confirmation goes through our own Modal (bridge until a ConfirmDialog component lands)
     const [confirm, setConfirm] = useState<{ msg: string; action: () => void } | null>(null);
-    // #96: 内容编辑器 + 乐观锁（expected_content_hash，冲突 -32002 显式报错）
+    // #96: content editor + optimistic locking (expected_content_hash; conflict -32002 surfaces an explicit error)
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState("");
     const [saving, setSaving] = useState(false);
-    // #97: AI 迭代面板（ai.generate → artifact.update source=ai_generation）
+    // #97: AI iteration panel (ai.generate → artifact.update source=ai_generation)
     const [aiPrompt, setAiPrompt] = useState("");
     const [aiBusy, setAiBusy] = useState(false);
     const [aiModels, setAiModels] = useState<string[]>([]);
@@ -123,9 +123,9 @@ export default function Detail({
             .catch(() => setParentName(artifact.parent_artifact_id || ""));
     }, [artifact?.parent_artifact_id]);
 
-    // #100-1: mermaid 在模块上下文渲染成 SVG 再注入 blob——blob iframe 继承页面
-    // CSP（script-src 'self'），CDN 外链脚本与内联脚本都会被拦，渲染壳方案不可行；
-    // 本地打包 mermaid、iframe 内零脚本，同时满足离线/本地优先。
+    // #100-1: mermaid is rendered to SVG in the module context then injected as a blob — the blob iframe inherits
+    // the page CSP (script-src 'self'), which blocks both CDN external scripts and inline scripts, so a render-shell
+    // approach is not viable; bundle mermaid locally with zero scripts inside the iframe, satisfying offline/local-first at once.
     const [mermaidSvg, setMermaidSvg] = useState("");
     useEffect(() => {
         let alive = true;

@@ -5,12 +5,12 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# v0.7.0: fusion-office 长上下文摄取。office 文件 (docx/xlsx/pptx) 解析为
-# 带 `#` 标题的 markdown —— section_index 直接可寻址（docx=标题层级、
-# xlsx=工作表、pptx=页），patch/预算/引用全走既有管道。写回方向把
-# patch 后的 markdown 重新生成为同格式二进制（pptx 写回不支持，显式
-# not_implemented），导出到 office IPC 目录的 .outbox/ 由 fusion-office 取走。
-# 引擎永不覆写用户的原始文件。
+# v0.7.0: fusion-office long-context ingest. Office files (docx/xlsx/pptx) are parsed into
+# markdown with `#` headers — directly addressable by section_index (docx=heading levels,
+# xlsx=worksheets, pptx=slides); patch/budget/references all go through the existing pipeline.
+# The write-back direction regenerates patched markdown into the same-format binary (pptx
+# write-back unsupported, explicit not_implemented) and exports to .outbox/ in the office IPC
+# dir for fusion-office to pick up. The engine never overwrites the user's original file.
 
 _MAX_SHEET_ROWS = 500
 _MAX_SHEET_COLS = 64
@@ -204,7 +204,7 @@ def markdown_to_docx(content: str) -> bytes:
 
 
 def _coerce_cell(text: str):
-    # markdown 表格单元是字符串；写回 xlsx 时还原数值，保持类型往返
+    # markdown table cells are strings; coerce back to numbers on xlsx write-back to keep types round-trippable
     stripped = text.strip()
     if not stripped:
         return ""
@@ -249,8 +249,8 @@ def markdown_to_pptx(content: str) -> bytes:
 
 
 def maybe_write_back(engine, artifact, version_num: int) -> str | None:
-    # patch/update 后按 metadata.office_format 重新生成 office 文件到
-    # .outbox/。失败只记日志，不影响 patch 结果本身。
+    # After patch/update, regenerate the office file per metadata.office_format into
+    # .outbox/. Failures only log and do not affect the patch result itself.
     meta = (artifact.metadata or {}) if artifact is not None else {}
     fmt = meta.get("office_format")
     if fmt not in ("docx", "xlsx"):

@@ -28,15 +28,16 @@ class RPCHandler:
     def __init__(self, engine: ArtifactEngine):
         self.engine = engine
         self._method_map = self._build_methods()
-        # v0.7.1 #90: artifact.toc 每版本缓存（key=(artifact_id, version_num)），
-        # 新版本=新 key 自动失效；LRU 上限防多产物撑爆内存。
+        # v0.7.1 #90: per-version cache for artifact.toc (key=(artifact_id, version_num));
+        # a new version = new key auto-invalidates; LRU cap keeps many artifacts from exhausting memory.
         self._toc_cache: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
-        # v0.7.1 #91: 后台长上下文任务强引用集（防 create_task 被 GC）
+        # v0.7.1 #91: strong-reference set for background long-context tasks (prevents create_task GC)
         self._bg_tasks: set[asyncio.Task] = set()
 
     def _spawn_long_context(self, pre, version_num: int) -> None:
-        # #91: 滚动摘要 + RAG 归档均为后台任务——mlx 60s/rag 30s 超时绝不能
-        # 阻塞 patch/update 响应。失败在任务内记日志，永不影响 RPC 结果。
+        # #91: rolling summary + RAG archival are both background tasks - the mlx 60s / rag 30s
+        # timeouts must never block the patch/update response. Failures are logged inside the
+        # task and never affect the RPC result.
         superseded = pre.current_version
         for coro in (
             long_context.maybe_archive_superseded(self.engine, pre, superseded),
@@ -47,10 +48,10 @@ class RPCHandler:
             task.add_done_callback(self._bg_tasks.discard)
 
     async def dispatch(self, method: str, params: dict) -> Any:
-        # P2-5/H12(trace): rpc.server.duration span 覆盖整个方法执行（含 storage I/O）。
-        # dispatch 是所有 RPC 的唯一路由入口（server _handle / REST / 直接调用皆经此），
-        # 故 span 放这里而非 server 层——任何调用路径都能采到因果链。
-        # tracing.span 未启用时为 no-op，零开销。
+        # P2-5/H12(trace): the rpc.server.duration span covers the whole method execution (storage I/O included).
+        # dispatch is the single routing entry for all RPCs (server _handle / REST / direct calls all go
+        # through it), so the span lives here rather than at the server layer - every call path captures
+        # the causal chain. tracing.span is a no-op when tracing is not enabled, zero overhead.
         from fusion_artifacts_engine import tracing
 
         with tracing.span("rpc.server.duration", rpc_method=method):
@@ -60,12 +61,12 @@ class RPCHandler:
             return await handler(params)
 
     async def _publish(self, event_type: str, aid: str | None, **extra) -> None:
-        # SSE ?kind= 过滤按 artifact kind (app/code/...) 而非事件名。
-        # 每个 artifact 事件都必须携带 kind，否则订阅者按 kind 过滤时静默丢弃。
-        # L-3: 调用方可经 extra 传 kind= 覆盖（删除事件用删除前 kind，避免硬删后读 None）
-        # A-2: 用 engine 实例的 EventBus，避免跨 engine 串流
-        # E10: kind 经覆盖 + 回查仍为 None 时记 warning，避免静默丢事件难排查
-        # P2-2/M1+F2: kind 回查读经 to_thread 卸载，不阻塞 event loop
+        # SSE ?kind= filtering is by artifact kind (app/code/...), not by event name.
+        # Every artifact event must carry kind, otherwise subscribers filtering by kind silently drop it.
+        # L-3: callers may pass kind= via extra to override (delete events use the pre-delete kind,
+        # A-2: use the engine instance's EventBus to avoid cross-engine stream leakage
+        # E10: log a warning when kind is still None after override + re-read, so silent event loss stays debuggable
+        # P2-2/M1+F2: the kind re-read is offloaded via to_thread so the event loop is not blocked
         kind = extra.get("kind")
         if kind is None and aid:
             artifact = await asyncio.to_thread(
@@ -81,8 +82,9 @@ class RPCHandler:
         payload = {"event_type": event_type, "kind": kind}
         payload.update(extra)
         self.engine.event_bus.publish(event_type, payload)
-        # #100-2: 事件同时落库——list_events/审计依赖持久事件。此前只进内存 SSE，
-        # create/update/rollback 后 artifact.list_events 返回空。落库失败不阻断主操作。
+        # #100-2: events are also persisted - list_events/audit depend on durable events. Previously they
+        # only went to in-memory SSE and artifact.list_events returned empty after create/update/rollback;
+        # persistence failure does not block the main operation.
         if aid:
             try:
                 await asyncio.to_thread(
@@ -96,10 +98,11 @@ class RPCHandler:
                 logger.error("Persist event failed (non-fatal): %s type=%s aid=%s", e, event_type, aid)
 
     def _enforce_owner(self, params: dict, artifact) -> None:
-        # P2-3/MEDIUM-4: IDOR 防护。写操作 + get 校验调用方身份归属。
-        # 单租户默认不传 caller_user_id（None）→ 跳过，保持向后兼容。
-        # 多租户部署按请求注入 caller_user_id，与产物 owner_user_id 不符即 PermissionError(-32006)。
-        # 任一为 None 时不校验（未设置所有权或未注入身份均放行，避免误伤单租户默认）。
+        # P2-3/MEDIUM-4: IDOR protection. Write ops + get verify caller identity ownership.
+        # Single-tenant default omits caller_user_id (None) -> skipped, keeping backward compatibility.
+        # Multi-tenant deployments inject caller_user_id per request; a mismatch with the artifact
+        # owner_user_id raises PermissionError(-32006). When either side is None, no check is made (missing
+        # ownership or missing identity both pass, avoiding false positives on single-tenant defaults).
         caller = params.get("caller_user_id")
         if not caller:
             return
@@ -172,7 +175,7 @@ class RPCHandler:
             "artifact.list_by_source": self._list_by_source,
             # AE-1: patch_artifact
             "artifact.patch": self._patch,
-            # v0.7.1 #90: 分块读路径（TOC + 行区间/section 视图）
+            # v0.7.1 #90: chunked read path (TOC + line-range/section views)
             "artifact.toc": self._toc,
             "artifact.view": self._view,
             # AE-2: load_artifact
@@ -191,7 +194,7 @@ class RPCHandler:
             "artifact.sync": self._sync,
             # #58/#59/#60: visual engine — DSL parse + 8 primitive compilers + 3-level fallback
             "render.visual": self._render_visual,
-            # v0.7.5 #97: webui AI 生成/迭代入口（走 fusion-mlx OpenAI 兼容接口）
+            # v0.7.5 #97: webui AI generate/iterate entry (via the fusion-mlx OpenAI-compatible API)
             "ai.generate": self._ai_generate,
             "ai.list_models": self._ai_list_models,
             "ping": self._ping,
@@ -215,7 +218,8 @@ class RPCHandler:
             kind=kind,
             project_id=params.get("project_id"),
             metadata=params.get("metadata"),
-            # P2-3/MEDIUM-4: 创建时可注入 owner_user_id（多租户归属），默认 None=单租户
+            # P2-3/MEDIUM-4: owner_user_id can be injected at creation (multi-tenant ownership);
+            # default None = single-tenant
             owner_user_id=params.get("owner_user_id"),
             ownership_type=params.get("ownership_type"),
         )
@@ -229,19 +233,21 @@ class RPCHandler:
         }
 
     async def _get(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读路径经 to_thread 卸载，不阻塞 event loop
+        # P2-2/M1+F2: read path offloaded via to_thread so the event loop is not blocked
         artifact = await asyncio.to_thread(
             self.engine.get_artifact,
             params["artifact_id"], project_id=params.get("project_id"),
         )
         if artifact is None:
             raise NotFoundError(f"Artifact not found: {params['artifact_id']}")
-        # P2-3/MEDIUM-4: IDOR——读取也校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - verify ownership before read (active when caller_user_id is
+        # injected for multi-tenant)
         self._enforce_owner(params, artifact)
         return {"artifact": artifact.model_dump()}
 
     async def _get_content(self, params: dict) -> dict:
-        # P2-3/MEDIUM-4: IDOR——取内容前先取 artifact 校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - fetch the artifact and verify ownership before reading content (active
+        # when caller_user_id is injected for multi-tenant)
         if params.get("caller_user_id"):
             art = await asyncio.to_thread(
                 self.engine.storage.get_artifact, params["artifact_id"]
@@ -255,7 +261,7 @@ class RPCHandler:
                 pass
         if version == "latest":
             version = None
-        # P2-2/M1+F2: 读内容经 to_thread 卸载
+        # P2-2/M1+F2: content read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.get_version_content, params["artifact_id"], version
         )
@@ -268,7 +274,7 @@ class RPCHandler:
         }
 
     async def _list(self, params: dict) -> dict:
-        # P2-2/M1+F2: 列表读经 to_thread 卸载
+        # P2-2/M1+F2: list read offloaded via to_thread
         artifacts = await asyncio.to_thread(
             self.engine.list_artifacts,
             params["session_id"],
@@ -280,20 +286,23 @@ class RPCHandler:
 
     async def _delete(self, params: dict) -> dict:
         aid = params["artifact_id"]
-        # L-3: 删除前缓存 kind，硬删后 get_artifact 返回 None 导致 kind-filter SSE 丢事件
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # L-3: cache kind before delete; after a hard delete get_artifact returns None, dropping
+        # P2-2/M1+F2: read offloaded via to_thread
         pre_artifact = await asyncio.to_thread(self.engine.storage.get_artifact, aid)
         pre_kind = pre_artifact.kind if pre_artifact is not None else None
-        # P2-3/MEDIUM-4: IDOR——删除前校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - verify ownership before delete (active when caller_user_id is
+        # injected for multi-tenant)
         self._enforce_owner(params, pre_artifact)
-        # P2-2/M1+F2: 写也经 to_thread 卸载（delete 持写锁，阻塞 event loop 同理）
+        # P2-2/M1+F2: writes are also offloaded via to_thread (delete holds the write lock; blocking the
+        # event loop is equally bad)
         ok = await asyncio.to_thread(
             self.engine.delete_artifact,
             aid,
             params.get("soft_delete", True),
             project_id=params.get("project_id"),
         )
-        # L-4: 仅删除成功才发 delete 事件，否则对未删 artifact 发虚假事件
+        # L-4: emit the delete event only when the delete succeeded, otherwise a phantom event fires
+        # for an artifact that was not deleted
         if ok:
             await self._publish(
                 "artifact.deleted", aid, artifact_id=aid, kind=pre_kind
@@ -307,11 +316,13 @@ class RPCHandler:
         source = params.get("source", "manual")
         if source not in valid_sources:
             raise ValueError(f"Invalid source, must be one of {valid_sources}")
-        # P-6: 经 to_thread 读 kind，不阻塞 event loop；变更前缓存供 _publish 复用
+        # P-6: read kind via to_thread so the event loop is not blocked; cache it before the
+        # change for _publish reuse
         pre = await asyncio.to_thread(
             self.engine.storage.get_artifact, params["artifact_id"]
         )
-        # P2-3/MEDIUM-4: IDOR——更新前校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - verify ownership before update (active when caller_user_id is
+        # injected for multi-tenant)
         self._enforce_owner(params, pre)
         version, ref_text = await self.engine.create_version(
             params["artifact_id"],
@@ -326,14 +337,15 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             kind=pre.kind if pre is not None else None,
         )
-        # v0.7.0: office 来源产物更新后写回 .outbox（失败仅记日志，不影响结果）
+        # v0.7.0: after an office-sourced artifact update, write back to .outbox (failure is
+        # logged only and does not affect the result)
         if pre is not None:
             await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
             self._spawn_long_context(pre, version.version_num)
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _version_list(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         versions = await asyncio.to_thread(
             self.engine.list_versions,
             params["artifact_id"],
@@ -344,7 +356,8 @@ class RPCHandler:
         return {"versions": [v.model_dump() for v in versions]}
 
     async def _version_rollback(self, params: dict) -> dict:
-        # P2-3/MEDIUM-4: IDOR——回滚前校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - verify ownership before rollback (active when caller_user_id is
+        # injected for multi-tenant)
         if params.get("caller_user_id"):
             art = await asyncio.to_thread(
                 self.engine.storage.get_artifact, params["artifact_id"]
@@ -362,7 +375,7 @@ class RPCHandler:
         return {"version": version.model_dump(), "ref_text": ref_text}
 
     async def _export(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         artifact = await asyncio.to_thread(
             self.engine.get_artifact, params["artifact_id"]
         )
@@ -389,15 +402,15 @@ class RPCHandler:
         try:
             output_dir.relative_to(storage_root)
         except ValueError:
-            # P1-10/M18: 错误消息不泄露 storage_root 文件系统路径给调用方；
-            # 内部 log 保留路径供运维定位，对外只回通用提示
+            # P1-10/M18: error messages must not leak the storage_root filesystem path to callers;
+            # the internal log keeps the path for ops localization, the external reply is a generic hint
             logger.warning(
                 "export_session rejected: output_dir %s outside storage_root %s",
                 output_dir, storage_root,
             )
             raise ValueError("output_dir must be under storage root (path traversal denied)")
         output_dir.mkdir(parents=True, exist_ok=True)
-        # P2-2/M1+F2: 列表读经 to_thread 卸载
+        # P2-2/M1+F2: list read offloaded via to_thread
         artifacts = await asyncio.to_thread(
             self.engine.list_artifacts, params["session_id"]
         )
@@ -421,7 +434,7 @@ class RPCHandler:
                         "Skipping artifact name that escapes export dir: %s", art.name
                     )
                     continue
-                # P2-2/M1+F2: 文件写经 to_thread 卸载（磁盘 I/O 阻塞 event loop 同理）
+                # P2-2/M1+F2: file write offloaded via to_thread (disk I/O blocking the event loop is equally bad)
                 await asyncio.to_thread(
                     path.write_text, content.content, "utf-8"
                 )
@@ -457,7 +470,7 @@ class RPCHandler:
 
     async def _export_code(self, params: dict) -> dict:
         language = params.get("language", "")
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.export_code, params["artifact_id"], language
         )
@@ -488,7 +501,7 @@ class RPCHandler:
         if action == "register":
             if not watcher_id:
                 raise ValueError("watcher_id required for register action")
-            # P2-2/M1+F2: 写经 to_thread 卸载
+            # P2-2/M1+F2: write offloaded via to_thread
             await asyncio.to_thread(
                 self.engine.register_watcher, artifact_id, watcher_id
             )
@@ -501,7 +514,7 @@ class RPCHandler:
             )
             return {"unregistered": True, "artifact_id": artifact_id}
         elif action == "poll":
-            # P2-2/M1+F2: 读经 to_thread 卸载
+            # P2-2/M1+F2: read offloaded via to_thread
             events = await asyncio.to_thread(
                 self.engine.get_watch_events, artifact_id, since_version
             )
@@ -515,7 +528,7 @@ class RPCHandler:
         return {"pong": True, "version": get_package_version()}
 
     async def _rename(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.rename_artifact, params["artifact_id"], params["new_name"]
         )
@@ -528,7 +541,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _star(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.star_artifact,
             params["artifact_id"], params.get("starred", True),
@@ -542,7 +555,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _pin(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.pin_artifact,
             params["artifact_id"],
@@ -558,7 +571,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _duplicate(self, params: dict) -> dict:
-        # P2-2/M1+F2: 复制（读+写）经 to_thread 卸载
+        # P2-2/M1+F2: duplicate (read + write) offloaded via to_thread
         dup = await asyncio.to_thread(
             self.engine.duplicate_artifact,
             params["artifact_id"], params.get("new_name"),
@@ -569,7 +582,7 @@ class RPCHandler:
         return {"artifact": dup.model_dump()}
 
     async def _remix(self, params: dict) -> dict:
-        # #77: remix 派生副本 —— parent_artifact_id 血统，落调用方库
+        # #77: remix derived copy - parent_artifact_id lineage, lands in the caller's library
         dup = await asyncio.to_thread(
             self.engine.remix_artifact,
             params["artifact_id"], params.get("new_name"),
@@ -586,7 +599,7 @@ class RPCHandler:
 
     async def _list_all(self, params: dict) -> dict:
         sort = params.get("sort", "updated_at")
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         artifacts, total = await asyncio.to_thread(
             self.engine.list_all_artifacts,
             filters=params.get("filters"),
@@ -595,9 +608,10 @@ class RPCHandler:
             page_size=params.get("page_size", 20),
             cursor=params.get("cursor"),
         )
-        # P2-7/F6: 游标分页——结果满页则据末行构造 next_cursor 供客户端续翻。
-        # 仅 updated_at/created_at 排序支持游标（storage 内回退 OFFSET）。
-        # 用 _clamp_pagination 取规范化 page_size 做满页判定，防 params 传非 int 字符串。
+        # P2-7/F6: cursor pagination - when the result fills a page, build next_cursor from the last
+        # row for the client to continue. Only updated_at/created_at sorting supports cursors (storage
+        # falls back to OFFSET internally). Use _clamp_pagination for the normalized page_size in the
+        # full-page check, guarding against non-int strings in params.
         from fusion_artifacts_engine.storage.sqlite_storage import (
             _clamp_pagination,
             _encode_cursor,
@@ -618,7 +632,7 @@ class RPCHandler:
     # ── P1: recycle bin ────────────────────────────────────────
 
     async def _list_recycle(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         artifacts, total = await asyncio.to_thread(
             self.engine.list_recycle,
             page=params.get("page", 1),
@@ -627,7 +641,7 @@ class RPCHandler:
         return {"artifacts": [a.model_dump() for a in artifacts], "total": total}
 
     async def _restore(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.restore_artifact, params["artifact_id"]
         )
@@ -639,7 +653,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _purge_expired(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         count = await asyncio.to_thread(self.engine.purge_expired)
         await self._publish("artifacts.purged", None, purged=count)
         return {"purged": count}
@@ -661,7 +675,7 @@ class RPCHandler:
         return {"version": snapshot.model_dump()}
 
     async def _list_snapshots(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         snapshots = await asyncio.to_thread(
             self.engine.list_snapshots,
             params["artifact_id"],
@@ -677,7 +691,7 @@ class RPCHandler:
         max_accesses = params.get("max_accesses")
         if max_accesses is not None:
             max_accesses = int(max_accesses)
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         share = await asyncio.to_thread(
             self.engine.create_share,
             params["artifact_id"],
@@ -692,12 +706,12 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             share_id=share.share_id,
         )
-        # #83: 返回可直接打开的公开页面 URL（不是 JSON 端点）
+        # #83: return a directly openable public page URL (not a JSON endpoint)
         share_url = f"{self.engine.config.share_base_url}/s/{share.share_id}"
         return {"share": share.model_dump(), "share_url": share_url}
 
     async def _get_shared(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.get_shared_artifact, params["share_id"]
         )
@@ -706,7 +720,7 @@ class RPCHandler:
         return result
 
     async def _revoke_share(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.revoke_share, params["share_id"]
         )
@@ -720,7 +734,7 @@ class RPCHandler:
     # ── P2: folders ────────────────────────────────────────────
 
     async def _create_folder(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         folder = await asyncio.to_thread(
             self.engine.create_folder,
             params["name"],
@@ -731,14 +745,14 @@ class RPCHandler:
         return {"folder": folder.model_dump()}
 
     async def _list_folders(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         folders = await asyncio.to_thread(
             self.engine.list_folders, params.get("project_id")
         )
         return {"folders": [f.model_dump() for f in folders]}
 
     async def _rename_folder(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.rename_folder, params["folder_id"], params["new_name"]
         )
@@ -746,7 +760,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _delete_folder(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.delete_folder, params["folder_id"]
         )
@@ -754,7 +768,7 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _move_to_folder(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.move_to_folder, params["artifact_id"], params.get("folder_id")
         )
@@ -769,7 +783,7 @@ class RPCHandler:
     # ── P4: tags ───────────────────────────────────────────────
 
     async def _add_tag(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         tag = await asyncio.to_thread(
             self.engine.add_tag,
             params["artifact_id"],
@@ -785,7 +799,7 @@ class RPCHandler:
         return {"tag": tag.model_dump()}
 
     async def _remove_tag(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.remove_tag, params["artifact_id"], params["tag_name"]
         )
@@ -798,14 +812,14 @@ class RPCHandler:
         return {"ok": ok}
 
     async def _list_tags(self, params: dict) -> dict:
-        # L-7: 按 scope 过滤；不传则返回全部
+        # L-7: filter by scope; omitted returns everything
         scope = params.get("scope")
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         tags = await asyncio.to_thread(self.engine.list_tags, scope)
         return {"tags": [t.model_dump() for t in tags]}
 
     async def _list_artifact_tags(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         tags = await asyncio.to_thread(
             self.engine.list_artifact_tags, params["artifact_id"]
         )
@@ -814,7 +828,7 @@ class RPCHandler:
     # ── P4: events ─────────────────────────────────────────────
 
     async def _emit_event(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         event = await asyncio.to_thread(
             self.engine.emit_event,
             params["event_type"],
@@ -833,7 +847,7 @@ class RPCHandler:
         return {"event": event.model_dump()}
 
     async def _list_events(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         events, total = await asyncio.to_thread(
             self.engine.list_events,
             artifact_id=params.get("artifact_id"),
@@ -847,7 +861,7 @@ class RPCHandler:
     # ── P3: project KB ─────────────────────────────────────────
 
     async def _move_to_project_kb(self, params: dict) -> dict:
-        # P2-2/M1+F2: 写经 to_thread 卸载
+        # P2-2/M1+F2: write offloaded via to_thread
         ok = await asyncio.to_thread(
             self.engine.move_to_project_kb,
             params["artifact_id"], params["project_id"],
@@ -896,7 +910,7 @@ class RPCHandler:
         }
 
     async def _list_by_source(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         artifacts = await asyncio.to_thread(
             self.engine.list_by_source,
             source_module=params["source_module"],
@@ -914,11 +928,13 @@ class RPCHandler:
         operation = params.get("operation", "")
         if operation not in valid_ops:
             raise ValueError(f"Invalid operation, must be one of {valid_ops}")
-        # P-6: 经 to_thread 读 kind，不阻塞 event loop；变更前缓存供 _publish 复用
+        # P-6: read kind via to_thread so the event loop is not blocked; cache it before the
+        # change for _publish reuse
         pre = await asyncio.to_thread(
             self.engine.storage.get_artifact, params["artifact_id"]
         )
-        # P2-3/MEDIUM-4: IDOR——补丁前校验归属（多租户注入 caller_user_id 时生效）
+        # P2-3/MEDIUM-4: IDOR - verify ownership before patch (active when caller_user_id is
+        # injected for multi-tenant)
         self._enforce_owner(params, pre)
         version, patch_info = await self.engine.patch_artifact(
             artifact_id=params["artifact_id"],
@@ -933,14 +949,16 @@ class RPCHandler:
             artifact_id=params["artifact_id"],
             kind=pre.kind if pre is not None else None,
         )
-        # v0.7.0: office 来源产物 patch 后写回 .outbox（失败仅记日志，不影响结果）
+        # v0.7.0: after an office-sourced artifact patch, write back to .outbox (failure is
+        # logged only and does not affect the result)
         if pre is not None:
             await asyncio.to_thread(maybe_write_back, self.engine, pre, version.version_num)
             self._spawn_long_context(pre, version.version_num)
         return {"version": version.model_dump(), "patch_info": patch_info}
 
     def _resolve_version_sync(self, artifact_id: str, version_num: int | None):
-        # v0.7.1 #90: version 缺省=当前版本；指定版本不存在 → NotFoundError
+        # v0.7.1 #90: version defaults to the current version; a nonexistent specified version ->
+        # NotFoundError
         if version_num is not None:
             version = self.engine.storage.get_version(artifact_id, version_num)
             if version is None:
@@ -957,7 +975,7 @@ class RPCHandler:
     async def _toc(self, params: dict) -> dict:
         artifact_id = params["artifact_id"]
         version_num = params.get("version")
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         version = await asyncio.to_thread(
             self._resolve_version_sync, artifact_id, version_num
         )
@@ -993,7 +1011,7 @@ class RPCHandler:
             self._resolve_version_sync, artifact_id, version_num
         )
         if section is not None:
-            # #90: section 视图——O(section) 而非 O(artifact)，只 join 命中行
+            # #90: section view - O(section) instead of O(artifact); only matching lines are joined
             content = version.content
             artifact = await asyncio.to_thread(
                 self.engine.storage.get_artifact, artifact_id
@@ -1019,7 +1037,7 @@ class RPCHandler:
                 "total_bytes": len(content.encode("utf-8")),
                 "tokens": version.token_count,
             }
-        # #90: 行区间视图。limit 空=读到结尾（调用方按 total_lines 翻页）
+        # #90: line-range view. Empty limit = read to the end (caller pages via total_lines)
         chunk = await asyncio.to_thread(
             read_line_range, version.content, int(offset or 0), int(limit) if limit else None
         )
@@ -1029,7 +1047,7 @@ class RPCHandler:
         return chunk
 
     async def _load(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.load_artifact,
             artifact_id=params["artifact_id"],
@@ -1042,7 +1060,7 @@ class RPCHandler:
         context_window = params.get("context_window")
         if context_window is not None:
             context_window = int(context_window)
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.context_budget,
             session_id=params.get("session_id"),
@@ -1063,7 +1081,7 @@ class RPCHandler:
         return result
 
     async def _version_diff(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读（双版本内容）经 to_thread 卸载
+        # P2-2/M1+F2: read (both version contents) offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.version_diff,
             artifact_id=params["artifact_id"],
@@ -1099,7 +1117,7 @@ class RPCHandler:
         return result
 
     async def _check_safety(self, params: dict) -> dict:
-        # P2-2/M1+F2: 读经 to_thread 卸载
+        # P2-2/M1+F2: read offloaded via to_thread
         result = await asyncio.to_thread(
             self.engine.check_safety,
             messages=params.get("messages", []),
@@ -1108,16 +1126,17 @@ class RPCHandler:
         return result
 
     async def _inject(self, params: dict) -> dict:
-        # 运维6: inject 占位已下线。保留方法注册（向后兼容旧客户端不报 method not found），
-        # 执行即拒，返回 -32005 NotImplementedError。调用方应改用 context.budget + check_safety。
+        # Ops-6: the inject placeholder is retired. The method registration is kept (backward compatible,
+        # old clients do not hit method not found); execution always rejects with -32005 NotImplementedError.
+        # Callers should switch to context.budget + check_safety.
         raise NotImplementedError(
             "artifact.inject is not implemented; use context.budget and "
             "check_safety for token budget management"
         )
 
     async def _interact(self, params: dict) -> dict:
-        # 运维6: interact 占位已下线。保留方法注册（向后兼容），执行即拒，
-        # 返回 -32005 NotImplementedError。不再记录 interaction event（无副作用）。
+        # Ops-6: the interact placeholder is retired. Registration kept (backward compatible); execution
+        # always rejects with -32005 NotImplementedError. No interaction event is recorded anymore (no side effects).
         raise NotImplementedError(
             "artifact.interact is not implemented; action dispatch is not supported"
         )
@@ -1138,8 +1157,8 @@ class RPCHandler:
         return result
 
     async def _render_visual(self, params: dict) -> dict:
-        # #58/#59/#60: 可视化渲染 RPC。接受 raw_text（模型原始输出）或 dsl（已解析 dict）。
-        # 返回自包含 HTML + visual_type + valid/errors 元数据。
+        # #58/#59/#60: visual rendering RPC. Accepts raw_text (raw model output) or dsl (already-parsed dict).
+        # Returns self-contained HTML plus visual_type and valid/errors metadata.
         raw_text = params.get("raw_text")
         dsl = params.get("dsl")
         progress = params.get("progress", 1.0)
@@ -1168,8 +1187,8 @@ class RPCHandler:
         return model
 
     async def _ai_generate(self, params: dict) -> dict:
-        # #97: webui AI 生成/迭代。GUI 组 prompt（生成/迭代两模式），引擎薄代理到
-        # fusion-mlx OpenAI 兼容接口。model 空=自动取 /v1/models 第一个。
+        # #97: webui AI generate/iterate. The GUI composes the prompt (generate/iterate modes); the engine
+        # is a thin proxy to the fusion-mlx OpenAI-compatible API. Empty model = auto-pick the first from /v1/models.
         prompt = str(params.get("prompt") or "").strip()
         if not prompt:
             raise ValueError("prompt is required")
