@@ -62,7 +62,7 @@ def _post_ping(port, headers):
 
 
 def test_bearer_auth_accepted(tmp_path):
-    # #75: gateway /shell/ 代理只注入 Authorization: Bearer——引擎须接受
+    # #75: the gateway /shell/ proxy injects only Authorization: Bearer — the engine must accept it
     port = _ephemeral_port()
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
@@ -105,7 +105,7 @@ def test_bearer_auth_wrong_key_rejected(tmp_path):
 
 
 def test_gateway_issued_service_key_accepted(tmp_path):
-    # #82: gateway 签发的 fm- key 是代理注入凭据，引擎鉴权层必须接受
+    # #82: the gateway-issued fm- key is the proxy-injected credential; the engine auth layer must accept it
     port = _ephemeral_port()
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
@@ -132,7 +132,7 @@ def test_gateway_issued_service_key_accepted(tmp_path):
 
 
 def test_x_api_key_still_works(tmp_path):
-    # 向后兼容：传统 X-API-Key 通道不受 #75 改动影响
+    # Back-compat: the legacy X-API-Key channel is unaffected by #75
     port = _ephemeral_port()
     config = ArtifactEngineConfig(
         storage_root=tmp_path / "artifacts",
@@ -172,7 +172,7 @@ def _write_service_key(client, raw_key=SERVICE_KEY):
 
 
 def test_gateway_register_admin_bootstrap_issues_key(tmp_path):
-    # #82: 注册体不带 api_key → gateway 签发 fm- key（raw_key 一次返回）
+    # #82: body without api_key — gateway issues an fm- key (raw_key returned once)
     client = _make_client(tmp_path)
     fake = _FakeHttpClient(
         [(200, json.dumps({"code": "ok", "key_id": "abc", "raw_key": SERVICE_KEY}))]
@@ -204,7 +204,7 @@ def test_gateway_register_prefers_stored_service_key(tmp_path):
 
 
 def test_gateway_register_falls_back_to_admin_key(tmp_path):
-    # 存有 fm- key 但 gateway 侧已失效（重启）→ admin key 引导
+    # fm- key present but dead on the gateway side (restart) — fall back to admin key bootstrap
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient(
@@ -235,8 +235,9 @@ def test_gateway_register_no_credentials_fails(tmp_path):
 
 
 def test_gateway_register_no_raw_key_retains_persisted_key(tmp_path):
-    # v0.7.3: gateway upsert 再注册不签发 raw_key（保留已存记录）——
-    # 引擎内存 key 为空时应回读 key 文件自检复用，不得误报 "no stored key"
+    # v0.7.3: a gateway upsert re-register issues no raw_key (record retained) —
+    # with an empty in-memory key the engine must re-read the key file and reuse
+    # it, not misreport "no stored key"
     client = _make_client(tmp_path)
     client._key_path.parent.mkdir(parents=True, exist_ok=True)
     client._key_path.write_text(SERVICE_KEY, encoding="utf-8")
@@ -249,7 +250,8 @@ def test_gateway_register_no_raw_key_retains_persisted_key(tmp_path):
 
 
 def test_gateway_heartbeat_empty_key_cooldown(tmp_path):
-    # v0.7.3: 无 key 心跳走注册路径也受冷却窗口约束——防 15s 注册+告警循环
+    # v0.7.3: a keyless heartbeat's registration path is cooldown-gated too —
+    # prevents a 15s register+warn loop
     client = _make_client(tmp_path)
     client._service_key = ""
     client._last_reregister = time.time()
@@ -280,7 +282,7 @@ def test_gateway_heartbeat_without_key_registers(tmp_path):
 
 
 def test_gateway_heartbeat_404_reregisters(tmp_path):
-    # #369 self-heal：心跳 404 manifest_unknown → 再注册
+    # #369 self-heal: heartbeat 404 manifest_unknown — re-register
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient([(404, "manifest_unknown"), (200, json.dumps({"code": "ok"}))])
@@ -291,8 +293,9 @@ def test_gateway_heartbeat_404_reregisters(tmp_path):
 
 
 def test_gateway_heartbeat_403_reregisters(tmp_path):
-    # #75 实测回归：gateway 重启清空 manifest store 后心跳 403 heartbeat_forbidden
-    # （无该 module 的 service key 记录）→ 也要触发再注册，否则菜单消失直到引擎重启
+    # #75 regression seen live: after a gateway restart wipes the manifest store,
+    # heartbeat 403 heartbeat_forbidden (no service-key record for the module)
+    # must also trigger re-registration, or the menu disappears until restart
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient(
@@ -305,7 +308,8 @@ def test_gateway_heartbeat_403_reregisters(tmp_path):
 
 
 def test_gateway_heartbeat_403_cooldown_no_loop(tmp_path):
-    # #82 验收：连续 403 只触发一次再注册，之后冷却期内心跳失败不再打注册接口
+    # #82 acceptance: consecutive 403s trigger exactly one re-register; during
+    # cooldown heartbeat failures must not hit the registration endpoint
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient(
@@ -323,8 +327,9 @@ def test_gateway_heartbeat_403_cooldown_no_loop(tmp_path):
 
 
 def test_gateway_probe_detects_keyid_divergence_and_heals(tmp_path):
-    # #104: 引擎持陈旧 key（心跳面 grace 窗口内照常 200 掩盖漂移）——
-    # 探测 upsert 响应 key_id 与本地基线不一致 → admin 再注册轮换自愈
+    # #104: engine holds a stale key (heartbeat plane keeps returning 200 inside
+    # the grace window, masking the drift) — probe compares the upsert response
+    # key_id with the local baseline; on mismatch heal via admin re-register
     client = _make_client(tmp_path)
     _write_service_key(client)
     save_key_id(client._key_path, "kid-old")
@@ -347,7 +352,7 @@ def test_gateway_probe_detects_keyid_divergence_and_heals(tmp_path):
 
 
 def test_gateway_probe_no_action_when_keyid_matches(tmp_path):
-    # key 未漂移：探测只做一次幂等再注册，不轮换不告警
+    # No drift: the probe does one idempotent re-register, no rotation, no warn
     client = _make_client(tmp_path)
     _write_service_key(client)
     save_key_id(client._key_path, "kid-1")
@@ -359,7 +364,7 @@ def test_gateway_probe_no_action_when_keyid_matches(tmp_path):
 
 
 def test_gateway_probe_seeds_keyid_baseline(tmp_path):
-    # 升级后首次探测：无本地 key_id 基线 → 落盘建立基线，不做任何轮换
+    # First probe after upgrade: no local key_id baseline — seed it, rotate nothing
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient([(200, json.dumps({"code": "ok", "key_id": "kid-new"}))])
@@ -371,7 +376,7 @@ def test_gateway_probe_seeds_keyid_baseline(tmp_path):
 
 
 def test_gateway_probe_cooldown_skips(tmp_path):
-    # 探测受独立冷却窗口约束，不随心跳节奏打 upsert
+    # The probe has its own cooldown window and does not upsert on heartbeat cadence
     client = _make_client(tmp_path)
     _write_service_key(client)
     client._last_probe = time.time()
@@ -382,7 +387,7 @@ def test_gateway_probe_cooldown_skips(tmp_path):
 
 
 def test_gateway_probe_skips_when_no_service_key(tmp_path):
-    # 无 key 时探测不介入——heartbeat_once 的引导注册负责签发
+    # Probe stays out when no key exists — heartbeat_once's bootstrap registration handles issuance
     client = _make_client(tmp_path)
     client._service_key = ""
     fake = _FakeHttpClient([])
@@ -392,7 +397,7 @@ def test_gateway_probe_skips_when_no_service_key(tmp_path):
 
 
 def test_gateway_register_issuance_persists_key_id(tmp_path):
-    # #104: raw_key 签发时同步持久化 key_id 基线
+    # #104: a raw_key issuance persists the key_id baseline alongside
     client = _make_client(tmp_path)
     fake = _FakeHttpClient(
         [(200, json.dumps({"code": "ok", "key_id": "kid-abc", "raw_key": SERVICE_KEY}))]
@@ -403,8 +408,9 @@ def test_gateway_register_issuance_persists_key_id(tmp_path):
 
 
 def test_gateway_heartbeat_stale_signal_heals(tmp_path):
-    # #110: gateway #485 心跳 200 + X-Fusion-Key-State: stale = 命中 grace
-    # 窗口内的被轮换旧 key——立即 admin 再注册轮换拿新明文，无需等 grace 过期
+    # #110: gateway #485 heartbeat 200 + X-Fusion-Key-State: stale = matched the
+    # rotated-out key inside the grace window — re-register via admin key
+    # immediately for the new plaintext, no waiting for grace to expire
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient(
@@ -429,7 +435,7 @@ def test_gateway_heartbeat_stale_signal_heals(tmp_path):
 
 
 def test_gateway_heartbeat_stale_signal_cooldown(tmp_path):
-    # #110: stale 信号受再注册冷却窗口约束——轮换抖动不会风暴
+    # #110: the stale signal is cooldown-gated by the re-register window — rotation flapping cannot storm
     client = _make_client(tmp_path)
     _write_service_key(client)
     client._last_reregister = time.time()
@@ -441,7 +447,7 @@ def test_gateway_heartbeat_stale_signal_cooldown(tmp_path):
 
 
 def test_gateway_heartbeat_current_state_no_reregister(tmp_path):
-    # #110 回归：无信号头（旧网关）或 current 状态不做任何再注册
+    # #110 regression: no signal header (older gateway) or current state — no re-registration
     client = _make_client(tmp_path)
     _write_service_key(client)
     fake = _FakeHttpClient(
@@ -468,7 +474,7 @@ def test_gateway_start_stop(tmp_path):
 
 
 def test_gateway_config_env_override(monkeypatch, tmp_path):
-    # #75: gateway 配置节 env 覆盖
+    # #75: gateway config section env overrides
     from fusion_artifacts_engine.config import load_config
 
     monkeypatch.setenv("FUSION_ARTIFACTS_GATEWAY_ENABLED", "true")
