@@ -12,11 +12,14 @@ from fusion_artifacts_engine.utils import get_package_version
 
 logger = logging.getLogger(__name__)
 
-# #75: web-shell 集成（Config Phase 3.3 之后的服务注册面）。
-# 引擎启动时向 fusion-gateway 自注册 shell manifest（幂等 upsert），之后周期心跳。
-# #82: 注册体不带 api_key —— gateway 签发 fm-<module>-<hex> service key（raw_key
-# 仅返回一次），引擎持久化后用该 key 心跳与再注册。代理经 manifest.api_key 注入
-# 同一 fm- key，引擎鉴权层须接受它（rpc/server.py _is_authed）。
+# #75: web-shell integration (service registration plane added after Config
+# Phase 3.3). On startup the engine self-registers its shell manifest with
+# fusion-gateway (idempotent upsert), then heartbeats periodically.
+# #82: the registration body omits api_key — the gateway issues an
+# fm-<module>-<hex> service key (raw_key returned exactly once), which the
+# engine persists and uses for heartbeats and re-registration. The proxy
+# injects the same fm- key via manifest.api_key, so the engine auth layer
+# must accept it (rpc/server.py _is_authed).
 
 _MODULE_TITLE = "Artifacts"
 _MODULE_PATH = "/artifacts"
@@ -24,20 +27,25 @@ _MODULE_ICON = "Package"
 _MODULE_CATEGORY = "platform"
 _MODULE_DEVICES = ["desktop"]
 
-# #82: 心跳命中 403/404 后再注册的最小间隔。gateway 重启会清空 manifest store，
-# 再注册后签发新 key 即可恢复；但 key 被管理员 revoke 等不可自愈场景下避免每
-# 15s 一次 admin-key 调用的日志/调用风暴。
+# #82: minimum interval between re-registrations after a 403/404 heartbeat.
+# A gateway restart wipes the manifest store — one re-registration re-issues a
+# key and recovers; but for non-self-healable states (admin-revoked key) the
+# cooldown prevents a 15s log/call storm of admin-key attempts.
 _REREGISTER_COOLDOWN_SECONDS = 300
 
-# #104: key 漂移探测间隔。gateway 心跳面与再注册面都会在 KeyRotationGrace
-# （默认 24h）内接受"上一把 key"——引擎持陈旧 key 时心跳仍 200，数据面
-# （代理注入当前 key）却已被引擎拒之门外，症状是 shell 代理 -32600 且最长
-# 持续一个 grace 窗口。探测走 upsert 自愈面：响应体 key_id 始终是 gateway
-# 当前 key 的 id（保留分支也一样），与本地持久化的 key_id 比对即可在 grace
-# 窗口内发现漂移，再用 admin 再注册触发 #460 轮换拿到新明文。
+# #104: key-drift probe interval. Both the gateway heartbeat plane and the
+# re-registration plane accept the "previous key" inside KeyRotationGrace
+# (default 24h) — an engine holding a stale key keeps getting 200 heartbeats
+# while the data plane (proxy injects the current key) is already rejected;
+# symptom is shell-proxy -32600 for up to a full grace window. The probe goes
+# through the upsert self-heal plane: the response key_id is always the
+# gateway's current key id (same on the retained branch), so comparing it
+# with the locally persisted key_id detects drift inside the grace window;
+# the follow-up admin re-register triggers a #460 rotation for new plaintext.
 _KEY_PROBE_INTERVAL_SECONDS = 600
 
-# _is_authed 每次请求都要比对 service key；按 (path, mtime) 缓存避免重复读盘。
+# _is_authed compares the service key on every request; cache by (path, mtime)
+# to avoid repeated disk reads.
 _key_file_cache: dict[str, tuple[float, str]] = {}
 _key_file_cache_lock = threading.Lock()
 
@@ -74,8 +82,9 @@ def save_service_key(path: Path, raw_key: str) -> None:
 
 
 def key_id_path(key_path: Path) -> Path:
-    # #104: key_id sidecar（<key文件名>.keyid）。key 文件本体是纯文本 key
-    # （rpc/server.py _is_authed 直接读），key_id 存旁路文件互不干扰。
+    # #104: key_id sidecar (<key_file>.keyid). The key file itself stays plain
+    # text (rpc/server.py _is_authed reads it directly); the key_id lives in a
+    # sidecar so the two never interfere.
     return key_path.with_name(key_path.name + ".keyid")
 
 
@@ -115,8 +124,9 @@ class GatewayClient:
         self._client = httpx.Client(timeout=5.0)
 
     def _manifest_payload(self) -> dict:
-        # #82: 不带 api_key —— gateway 据此签发/保留 fm- service key（#261 K1）。
-        # 带 api_key 会走 module-supplied 凭据路径并丢弃已签发 key，心跳永久 403。
+        # #82: omit api_key — the gateway issues/retains the fm- service key
+        # based on this (#261 K1). Sending api_key takes the module-supplied
+        # credential path and drops the issued key; heartbeats then 403 forever.
         return {
             "id": self._module_id,
             "title": _MODULE_TITLE,
@@ -125,17 +135,18 @@ class GatewayClient:
             "path": _MODULE_PATH,
             "icon": _MODULE_ICON,
             "entry": f"/shell/{self._module_id}/",
-            # health 直连本进程（与 carvideo/surl 模式一致）：无鉴权 liveness，
-            # gateway 探针不依赖 shell session。
+            # health hits this process directly (same pattern as carvideo/surl):
+            # unauthenticated liveness, gateway probes do not need a shell session.
             "health": f"http://{self._host}:{self._port}/healthz",
             "devices": list(_MODULE_DEVICES),
             "category": _MODULE_CATEGORY,
-            # #232 动态代理：upstream 使 /shell/<id>/ 无需改 gateway config
+            # #232 dynamic proxy: upstream makes /shell/<id>/ work with no gateway config change
             "upstream": f"http://{self._host}:{self._port}",
         }
 
     def _register_candidates(self) -> list[tuple[str, str]]:
-        # fm- key 优先（#369 self-heal / 幂等再注册），admin key 仅首次引导。
+        # fm- key first (#369 self-heal / idempotent re-register); admin key is
+        # for first bootstrap only.
         candidates: list[tuple[str, str]] = []
         if self._service_key:
             candidates.append(("service-key", self._service_key))
@@ -147,8 +158,9 @@ class GatewayClient:
     def register(self, force_admin: bool = False) -> bool:
         with self._register_lock:
             if force_admin:
-                # #104: 漂移自愈专用——跳过 service-key 候选，直接用 admin key
-                # 再注册（#460：admin 面再注册会轮换 key 并返回新明文）。
+                # #104: drift self-heal only — skip the service-key candidate and
+                # re-register with the admin key directly (#460: an admin-plane
+                # re-register rotates the key and returns the new plaintext).
                 admin_key = self._config.gateway_admin_key or ""
                 candidates = [("admin-key", admin_key)] if admin_key else []
             else:
@@ -202,10 +214,12 @@ class GatewayClient:
                 except OSError as e:
                     logger.error("gateway key_id persist failed: %s", e)
         elif label == "service-key" and key_id:
-            # #104: upsert 保留分支的 key_id 是 gateway 当前 key 的 id。与本地
-            # 持久化值比对：不一致 = 引擎持陈旧 key（grace 窗口内的"上一把"，
-            # 心跳面照常 200 掩盖了漂移）。置位后由 probe_key_state 走 admin
-            # 再注册轮换自愈；本地无记录则首次落盘建立基线。
+            # #104: on the retained branch the key_id is the gateway's CURRENT
+            # key id. Compare with the locally persisted value: a mismatch means
+            # the engine holds a stale key (the grace-window "previous key",
+            # whose drift the heartbeat plane masks with 200s). probe_key_state
+            # then heals via an admin re-register rotation; with no local record
+            # the first probe just seeds the baseline.
             stored = load_key_id(self._key_path)
             if not stored:
                 try:
@@ -223,8 +237,9 @@ class GatewayClient:
                     key_id,
                 )
         elif not self._service_key:
-            # 网关 upsert 再注册可能不签发新 key（保留已存记录）——先回读 key 文件
-            # 自检（先前实例可能已持久化有效 key），有效则直接复用，不告警
+            # A gateway upsert re-register may not issue a new key (record
+            # retained) — re-read the key file first (an earlier instance may
+            # have persisted a valid key) and reuse it silently when present.
             stored = load_service_key(self._key_path)
             if stored:
                 self._service_key = stored
@@ -244,9 +259,10 @@ class GatewayClient:
 
     def heartbeat_once(self) -> bool:
         if not self._service_key:
-            # 首次引导或 key 文件丢失：注册即保活（Upsert 刷新 lastHeartbeat）。
-            # 无 key 注册若拿不到 raw_key 会原地空转——套用同一冷却窗口，
-            # 防止每 interval 刷一轮注册+告警（v0.7.3 线上实测 15s 循环）。
+            # First bootstrap or lost key file: registering doubles as keepalive
+            # (upsert refreshes lastHeartbeat). A keyless registration that gets
+            # no raw_key would spin in place — apply the same cooldown window to
+            # avoid a register+warn loop every interval (seen live in v0.7.3).
             now = time.time()
             if now - self._last_reregister < _REREGISTER_COOLDOWN_SECONDS:
                 return False
@@ -258,12 +274,15 @@ class GatewayClient:
                 url, json={}, headers={"Authorization": f"Bearer {self._service_key}"}
             )
             if resp.status_code == 200:
-                # #110: gateway #485 在心跳 200 响应里暴露 key 漂移信号——
-                # X-Fusion-Key-State: stale = 命中的是 grace 窗口内被轮换的
-                # 旧 key，数据面（代理注入当前 key）已被拒。旧网关无此头，
-                # 行为不变（403 后走既有恢复路径）。收到信号立即 admin 再
-                # 注册轮换（#460 返回新明文），冷却窗口防轮换抖动引发风暴；
-                # 心跳本身成功，返回 True 不进失败计数。
+                # #110: gateway #485 exposes key drift on the 200 heartbeat
+                # itself — X-Fusion-Key-State: stale means the heartbeat matched
+                # the rotated-out key inside the grace window while the data
+                # plane (proxy injects the current key) is already rejected.
+                # Older gateways send no header and keep today's behavior (the
+                # 403 path recovers after grace). On the signal, re-register via
+                # the admin key immediately (#460 returns fresh plaintext),
+                # cooldown-gated against rotation flapping. The heartbeat itself
+                # succeeded, so return True and keep the failure counter clean.
                 if resp.headers.get("X-Fusion-Key-State") == "stale":
                     now = time.time()
                     if now - self._last_reregister >= _REREGISTER_COOLDOWN_SECONDS:
@@ -275,9 +294,10 @@ class GatewayClient:
                         )
                         self.register(force_admin=True)
                 return True
-            # 404 manifest_unknown：gateway 重启清空 store；403 heartbeat_forbidden：
-            # 该 module 无匹配 service key 记录（store 重建/key 丢失）。两者都再注册
-            # 一次（gateway 会为新条目签发新 fm- key）。cooldown 防 15s 循环。
+            # 404 manifest_unknown: gateway restart wiped the store;
+            # 403 heartbeat_forbidden: no matching service-key record for this
+            # module (store rebuilt / key lost). Either way re-register once —
+            # the gateway issues a fresh fm- key. Cooldown prevents a 15s loop.
             if resp.status_code in (403, 404):
                 now = time.time()
                 if now - self._last_reregister < _REREGISTER_COOLDOWN_SECONDS:
@@ -304,15 +324,18 @@ class GatewayClient:
         return False
 
     def probe_key_state(self) -> bool:
-        # #104: 周期 key 漂移探测。心跳 200 不代表 key 未漂移（grace 窗口内
-        # 上一把 key 照常通过心跳面），故按独立间隔走一次 service-key 再注册，
-        # 比对响应 key_id；发现漂移则 admin 再注册轮换（#460 返回新明文）。
+        # #104: periodic key-drift probe. A 200 heartbeat does not prove the
+        # key is current (the grace window lets the previous key pass the
+        # heartbeat plane), so on its own interval run one service-key
+        # re-register and compare the response key_id; on drift, heal via an
+        # admin re-register rotation (#460 returns new plaintext).
         now = time.time()
         if now - self._last_probe < _KEY_PROBE_INTERVAL_SECONDS:
             return True
         self._last_probe = now
         if not self._service_key:
-            # 无 key 时 heartbeat_once 的引导注册路径负责签发，无需探测。
+            # No key yet — the heartbeat_once bootstrap registration path
+            # handles issuance; nothing to probe.
             return True
         self._divergent_keyid = False
         if not self.register():
@@ -326,7 +349,8 @@ class GatewayClient:
         return True
 
     def _loop(self) -> None:
-        # 周期心跳。失败不退出（gateway 重启等瞬时故障自愈），只节流告警。
+        # Periodic heartbeat. Failures do not exit the loop (transient gateway
+        # restarts self-heal); warnings are throttled instead.
         fail_streak = 0
         while not self._stop.wait(self._interval):
             self.probe_key_state()
@@ -344,8 +368,9 @@ class GatewayClient:
 
     def start(self) -> bool:
         if not self.register():
-            # 注册失败仍启动心跳线程——若注册是瞬时故障（gateway 未起），心跳会
-            # 走 register() 引导路径重试，无需人工干预。
+            # Start the heartbeat thread even on registration failure — if the
+            # failure was transient (gateway down), the heartbeat loop retries
+            # via the register() bootstrap path with no manual intervention.
             logger.info("gateway registration incomplete, heartbeat loop will retry")
         self._thread = threading.Thread(
             target=self._loop, name="fae-gateway-heartbeat", daemon=True
