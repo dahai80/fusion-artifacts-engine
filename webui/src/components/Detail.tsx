@@ -2,8 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { marked } from "marked";
 import {
     ArrowLeft,
+    Camera,
     Check,
     Copy,
+    Download,
+    FolderInput,
     GitCompare,
     History,
     Link2,
@@ -12,25 +15,44 @@ import {
     Pencil,
     RotateCcw,
     Save,
+    ShieldCheck,
     Sparkles,
+    Tags,
+    Wrench,
     X,
     GitFork,
 } from "lucide-react";
 import {
+    addTag,
     aiGenerate,
     aiListModels,
+    autoCompact,
+    checkSafety,
     createShare,
+    createSnapshot,
+    duplicateArtifact,
+    exportCode,
     getArtifact,
     getContent,
     getShareBase,
+    listArtifactTags,
     listEvents,
+    listFolders,
+    listSnapshots,
     listVersions,
+    moveToFolder,
+    moveToProjectKb,
+    removeTag,
     remixArtifact,
+    renameArtifact,
     revokeShare,
     rollback,
     updateArtifact,
     versionDiff,
     type Artifact,
+    type ArtifactFolder,
+    type ArtifactSnapshot,
+    type ArtifactTag,
     type ArtifactVersion,
 } from "../api";
 import { t, type Lang } from "../i18n";
@@ -78,6 +100,23 @@ export default function Detail({
     const [aiBusy, setAiBusy] = useState(false);
     const [aiModels, setAiModels] = useState<string[]>([]);
     const [aiModel, setAiModel] = useState("");
+    // #116: snapshots timeline
+    const [snapshots, setSnapshots] = useState<ArtifactSnapshot[]>([]);
+    const [snapshotLabel, setSnapshotLabel] = useState("");
+    const [snapshotBusy, setSnapshotBusy] = useState(false);
+    // #116: organization (rename / duplicate / folder / tags / project KB)
+    const [folders, setFolders] = useState<ArtifactFolder[]>([]);
+    const [artifactTags, setArtifactTags] = useState<ArtifactTag[]>([]);
+    const [tagInput, setTagInput] = useState("");
+    const [renameOpen, setRenameOpen] = useState(false);
+    const [renameValue, setRenameValue] = useState("");
+    const [kbProjectId, setKbProjectId] = useState("");
+    // #116: maintenance (auto compact / safety check / export code)
+    const [compactBudget, setCompactBudget] = useState("");
+    const [compactNote, setCompactNote] = useState("");
+    const [safetyNote, setSafetyNote] = useState("");
+    const [codeExported, setCodeExported] = useState("");
+    const [maintBusy, setMaintBusy] = useState(false);
 
     useEffect(() => {
         getShareBase()
@@ -111,6 +150,149 @@ export default function Detail({
     useEffect(() => {
         load();
     }, [id]);
+
+    // #116: snapshots + folders + tags load alongside the artifact
+    useEffect(() => {
+        listSnapshots(id)
+            .then((s) => setSnapshots([...s].sort((x, y) => y.version_num - x.version_num)))
+            .catch(() => setSnapshots([]));
+        listFolders()
+            .then(setFolders)
+            .catch(() => setFolders([]));
+        listArtifactTags(id)
+            .then(setArtifactTags)
+            .catch(() => setArtifactTags([]));
+    }, [id]);
+
+    const doSnapshot = async () => {
+        setSnapshotBusy(true);
+        try {
+            await createSnapshot(id, snapshotLabel.trim());
+            setSnapshotLabel("");
+            const s = await listSnapshots(id);
+            setSnapshots([...s].sort((x, y) => y.version_num - x.version_num));
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setSnapshotBusy(false);
+        }
+    };
+
+    const doRename = async () => {
+        const name = renameValue.trim();
+        if (!name) return;
+        try {
+            await renameArtifact(id, name);
+            setRenameOpen(false);
+            await load();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doDuplicate = () => {
+        setConfirm({
+            msg: d.confirmDuplicate,
+            action: async () => {
+                try {
+                    const dup = await duplicateArtifact(id);
+                    window.location.hash = `#/a/${dup.id}`;
+                } catch (e) {
+                    setError(`${d.loadError}: ${(e as Error).message}`);
+                }
+            },
+        });
+    };
+
+    const doMoveFolder = async (folderId: string) => {
+        try {
+            await moveToFolder(id, folderId || null);
+            await load();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doAddTag = async () => {
+        const name = tagInput.trim();
+        if (!name) return;
+        try {
+            await addTag(id, name);
+            setTagInput("");
+            setArtifactTags(await listArtifactTags(id));
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doRemoveTag = async (name: string) => {
+        try {
+            await removeTag(id, name);
+            setArtifactTags(await listArtifactTags(id));
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doMoveKb = async () => {
+        const pid = kbProjectId.trim();
+        if (!pid) return;
+        try {
+            await moveToProjectKb(id, pid);
+            setError("");
+            setSafetyNote("");
+            setCompactNote(`${d.moveKb}: ${pid}`);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doCompact = async () => {
+        const budget = parseInt(compactBudget, 10);
+        if (!budget || budget <= 0) return;
+        setMaintBusy(true);
+        try {
+            const r = await autoCompact(id, budget);
+            setCompactNote(
+                r.compacted
+                    ? `${r.original_tokens} → ${r.compacted_tokens} tokens (-${Math.round(r.savings_pct)}%)`
+                    : d.compactNoNeed
+            );
+            await load();
+        } catch (e) {
+            setCompactNote(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setMaintBusy(false);
+        }
+    };
+
+    const doSafety = async () => {
+        setMaintBusy(true);
+        try {
+            const r = await checkSafety([{ role: "user", content }]);
+            setSafetyNote(
+                r.safe
+                    ? `${d.safetyOk} (${r.current_tokens}/${r.effective_budget})`
+                    : `${r.current_tokens}/${r.effective_budget}`
+            );
+        } catch (e) {
+            setSafetyNote(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setMaintBusy(false);
+        }
+    };
+
+    const doExportCode = async () => {
+        try {
+            const r = await exportCode(id);
+            setCodeExported(r.code);
+            await navigator.clipboard.writeText(r.code);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
 
     useEffect(() => {
         // #77: remix lineage — fetch parent name for the header badge
@@ -372,6 +554,42 @@ export default function Detail({
                     {!editing && (
                         <button
                             disabled={busy}
+                            onClick={() => {
+                                setRenameValue(artifact.name);
+                                setRenameOpen(!renameOpen);
+                            }}
+                            className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            title={d.rename}
+                        >
+                            <Pencil size={16} />
+                            {d.rename}
+                        </button>
+                    )}
+                    {!editing && (
+                        <button
+                            disabled={busy}
+                            onClick={doDuplicate}
+                            className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            title={d.duplicate}
+                        >
+                            <Copy size={16} />
+                            {d.duplicate}
+                        </button>
+                    )}
+                    {!editing && (
+                        <button
+                            disabled={busy}
+                            onClick={doExportCode}
+                            className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            title={d.exportCode}
+                        >
+                            {copied ? <Check size={16} /> : <Download size={16} />}
+                            {d.exportCode}
+                        </button>
+                    )}
+                    {!editing && (
+                        <button
+                            disabled={busy}
                             onClick={startEdit}
                             className="flex items-center gap-1 rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                             title={d.edit}
@@ -429,6 +647,36 @@ export default function Detail({
                 <p className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/50 dark:text-red-300">
                     {error}
                 </p>
+            )}
+
+            {renameOpen && (
+                <div className="mb-4 flex items-center gap-2 rounded-lg border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
+                    <input
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter") doRename();
+                            if (e.key === "Escape") setRenameOpen(false);
+                        }}
+                        autoFocus
+                        placeholder={d.newNamePh}
+                        className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                    />
+                    <button
+                        onClick={doRename}
+                        disabled={!renameValue.trim()}
+                        className="flex items-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                    >
+                        <Save size={16} />
+                        {d.save}
+                    </button>
+                    <button
+                        onClick={() => setRenameOpen(false)}
+                        className="rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    >
+                        {d.close}
+                    </button>
+                </div>
             )}
 
             <div className="flex flex-col gap-4 lg:flex-row">
@@ -530,6 +778,192 @@ export default function Detail({
                 </div>
 
                 <aside className="w-full shrink-0 space-y-4 lg:w-72">
+                    {/* #116: organization — folder / tags / project KB */}
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <FolderInput size={16} className="text-zinc-400" />
+                            {d.moveFolder}
+                        </h2>
+                        <select
+                            value={artifact.folder_id || ""}
+                            onChange={(e) => doMoveFolder(e.target.value)}
+                            className="w-full rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                        >
+                            <option value="">{d.noFolder}</option>
+                            {folders.map((f) => (
+                                <option key={f.folder_id} value={f.folder_id}>
+                                    {f.name}
+                                </option>
+                            ))}
+                        </select>
+                        <h2 className="mb-2 mt-4 flex items-center gap-2 text-sm font-semibold">
+                            <Tags size={16} className="text-zinc-400" />
+                            {d.tags}
+                        </h2>
+                        {artifactTags.length > 0 && (
+                            <div className="mb-2 flex flex-wrap gap-1">
+                                {artifactTags.map((tg) => (
+                                    <span
+                                        key={tg.tag_id}
+                                        className="flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-600 dark:text-violet-400"
+                                    >
+                                        {tg.name}
+                                        <button
+                                            onClick={() => doRemoveTag(tg.name)}
+                                            className="text-violet-400 transition hover:text-violet-600"
+                                        >
+                                            <X size={12} />
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        )}
+                        <div className="flex items-center gap-1">
+                            <input
+                                value={tagInput}
+                                onChange={(e) => setTagInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") doAddTag();
+                                }}
+                                placeholder={d.tagPh}
+                                className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                            />
+                            <button
+                                onClick={doAddTag}
+                                disabled={!tagInput.trim()}
+                                className="shrink-0 rounded-md bg-indigo-500/10 px-2 py-1.5 text-xs font-medium text-indigo-600 transition hover:bg-indigo-500/20 disabled:opacity-40 dark:text-indigo-400"
+                            >
+                                {d.addTag}
+                            </button>
+                        </div>
+                        <h2 className="mb-2 mt-4 flex items-center gap-2 text-sm font-semibold">
+                            <GitFork size={16} className="text-zinc-400" />
+                            {d.moveToKb}
+                        </h2>
+                        <div className="flex items-center gap-1">
+                            <input
+                                value={kbProjectId}
+                                onChange={(e) => setKbProjectId(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") doMoveKb();
+                                }}
+                                placeholder={d.projectIdPh}
+                                className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                            />
+                            <button
+                                onClick={doMoveKb}
+                                disabled={!kbProjectId.trim()}
+                                className="shrink-0 rounded-md bg-indigo-500/10 px-2 py-1.5 text-xs font-medium text-indigo-600 transition hover:bg-indigo-500/20 disabled:opacity-40 dark:text-indigo-400"
+                            >
+                                {d.moveKb}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* #116: snapshots timeline */}
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <Camera size={16} className="text-zinc-400" />
+                            {d.snapshots} ({snapshots.length})
+                        </h2>
+                        <div className="flex items-center gap-1">
+                            <input
+                                value={snapshotLabel}
+                                onChange={(e) => setSnapshotLabel(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter") doSnapshot();
+                                }}
+                                placeholder={d.snapshotLabelPh}
+                                className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                            />
+                            <button
+                                onClick={doSnapshot}
+                                disabled={snapshotBusy}
+                                className="shrink-0 rounded-md bg-indigo-500 px-2 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                            >
+                                {d.snapshotCreate}
+                            </button>
+                        </div>
+                        {snapshots.length === 0 ? (
+                            <p className="mt-3 text-xs text-zinc-400">{d.noSnapshots}</p>
+                        ) : (
+                            <div className="mt-3 max-h-48 space-y-1 overflow-y-auto">
+                                {snapshots.map((s) => (
+                                    <div
+                                        key={s.version_num}
+                                        className="flex items-center justify-between rounded-md px-2 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                                    >
+                                        <div className="min-w-0">
+                                            <span className="font-mono font-medium">v{s.version_num}</span>
+                                            {s.snapshot_label && (
+                                                <span className="ml-1.5 line-clamp-1 text-zinc-500 dark:text-zinc-400">
+                                                    {s.snapshot_label}
+                                                </span>
+                                            )}
+                                            <p className="text-zinc-400">{relTime(s.created_at, lang)}</p>
+                                        </div>
+                                        <button
+                                            disabled={busy}
+                                            onClick={() => doRestore(s.version_num)}
+                                            className="shrink-0 rounded-lg p-1 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-zinc-800"
+                                            title={d.restore}
+                                        >
+                                            <RotateCcw size={16} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* #116: maintenance — auto compact / safety check */}
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <Wrench size={16} className="text-zinc-400" />
+                            {d.maintenance}
+                        </h2>
+                        <div className="flex items-center gap-1">
+                            <input
+                                value={compactBudget}
+                                onChange={(e) => setCompactBudget(e.target.value)}
+                                placeholder={d.compactBudgetPh}
+                                inputMode="numeric"
+                                className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                            />
+                            <button
+                                onClick={doCompact}
+                                disabled={maintBusy || !parseInt(compactBudget, 10)}
+                                className="shrink-0 rounded-md bg-indigo-500/10 px-2 py-1.5 text-xs font-medium text-indigo-600 transition hover:bg-indigo-500/20 disabled:opacity-40 dark:text-indigo-400"
+                            >
+                                {d.compactRun}
+                            </button>
+                        </div>
+                        {compactNote && (
+                            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{compactNote}</p>
+                        )}
+                        <div className="mt-3 flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                                <ShieldCheck size={16} />
+                                {d.safetyCheck}
+                            </span>
+                            <button
+                                onClick={doSafety}
+                                disabled={maintBusy}
+                                className="rounded-md bg-indigo-500/10 px-2 py-1.5 text-xs font-medium text-indigo-600 transition hover:bg-indigo-500/20 disabled:opacity-40 dark:text-indigo-400"
+                            >
+                                {d.safetyRun}
+                            </button>
+                        </div>
+                        {safetyNote && (
+                            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{safetyNote}</p>
+                        )}
+                        {codeExported && (
+                            <p className="mt-2 truncate text-xs text-zinc-400">
+                                {d.exportCode}: {codeExported.length} chars
+                            </p>
+                        )}
+                    </div>
+
                     <div
                         className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900"
                         onFocus={openAiPanel}

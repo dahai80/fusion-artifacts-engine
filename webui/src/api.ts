@@ -44,6 +44,7 @@ export interface Artifact {
     source_module: string | null;
     workflow_run_id: string | null;
     parent_artifact_id: string | null;
+    folder_id: string | null;
 }
 
 export interface ArtifactVersion {
@@ -58,6 +59,138 @@ export interface ArtifactVersion {
 
 export async function listArtifacts(filters: Record<string, any> = {}): Promise<{ artifacts: Artifact[]; total: number }> {
     return rpc("artifact.list_all", { filters, page: 1, page_size: 100, sort: "updated_at" });
+}
+
+// #116: folder organization
+export interface ArtifactFolder {
+    folder_id: string;
+    name: string;
+    parent_id: string | null;
+    project_id: string | null;
+    created_at: number | null;
+}
+
+export async function listFolders(): Promise<ArtifactFolder[]> {
+    const r = await rpc("artifact.list_folders", {});
+    return r.folders;
+}
+
+export async function createFolder(name: string, parentId?: string): Promise<ArtifactFolder> {
+    const r = await rpc("artifact.create_folder", { name, parent_id: parentId || undefined });
+    return r.folder;
+}
+
+export async function renameFolder(folderId: string, newName: string): Promise<void> {
+    await rpc("artifact.rename_folder", { folder_id: folderId, new_name: newName });
+}
+
+export async function deleteFolder(folderId: string): Promise<void> {
+    await rpc("artifact.delete_folder", { folder_id: folderId });
+}
+
+export async function moveToFolder(artifactId: string, folderId: string | null): Promise<void> {
+    await rpc("artifact.move_to_folder", { artifact_id: artifactId, folder_id: folderId });
+}
+
+// #116: tags & pinning
+export interface ArtifactTag {
+    tag_id: string;
+    name: string;
+    color: string | null;
+    scope: string | null;
+}
+
+export async function listTags(): Promise<ArtifactTag[]> {
+    const r = await rpc("artifact.list_tags", {});
+    return r.tags;
+}
+
+export async function listArtifactTags(artifactId: string): Promise<ArtifactTag[]> {
+    const r = await rpc("artifact.list_artifact_tags", { artifact_id: artifactId });
+    return r.tags;
+}
+
+export async function addTag(artifactId: string, tagName: string): Promise<ArtifactTag> {
+    const r = await rpc("artifact.add_tag", { artifact_id: artifactId, tag_name: tagName });
+    return r.tag;
+}
+
+export async function removeTag(artifactId: string, tagName: string): Promise<void> {
+    await rpc("artifact.remove_tag", { artifact_id: artifactId, tag_name: tagName });
+}
+
+export async function pinArtifact(artifactId: string, pinned: boolean): Promise<void> {
+    await rpc("artifact.pin", { artifact_id: artifactId, pinned });
+}
+
+export async function starArtifact(artifactId: string, starred: boolean): Promise<void> {
+    await rpc("artifact.star", { artifact_id: artifactId, starred });
+}
+
+// #116: lifecycle ops
+export async function renameArtifact(artifactId: string, newName: string): Promise<void> {
+    await rpc("artifact.rename", { artifact_id: artifactId, new_name: newName });
+}
+
+export async function duplicateArtifact(artifactId: string): Promise<Artifact> {
+    const r = await rpc("artifact.duplicate", { artifact_id: artifactId });
+    return r.artifact;
+}
+
+// #116: snapshots
+export interface ArtifactSnapshot {
+    version_num: number;
+    snapshot_label: string | null;
+    author: string | null;
+    created_at: number;
+}
+
+export async function createSnapshot(artifactId: string, label: string): Promise<ArtifactSnapshot> {
+    const r = await rpc("artifact.create_snapshot", { artifact_id: artifactId, label });
+    return r.version;
+}
+
+export async function listSnapshots(artifactId: string): Promise<ArtifactSnapshot[]> {
+    const r = await rpc("artifact.list_snapshots", { artifact_id: artifactId, include_content: false });
+    return r.snapshots;
+}
+
+// #116: code exchange
+export async function exportCode(artifactId: string, language = ""): Promise<{ code: string; language: string; ext: string }> {
+    return rpc("artifact.export_code", { artifact_id: artifactId, language });
+}
+
+export async function importCode(code: string, language = "", name = ""): Promise<Artifact> {
+    const r = await rpc("artifact.import_code", { session_id: "webui-import", code, language, name });
+    return r.artifact;
+}
+
+// #116: maintenance / AI hygiene
+export async function autoCompact(artifactId: string, tokenBudget: number): Promise<Record<string, any>> {
+    return rpc("artifact.auto_compact", { artifact_id: artifactId, token_budget: tokenBudget });
+}
+
+export async function purgeExpired(): Promise<number> {
+    const r = await rpc("artifact.purge_expired", {});
+    return r.purged;
+}
+
+export async function checkSafety(
+    messages: { role: string; content: string }[],
+    outputBudget?: number
+): Promise<Record<string, any>> {
+    const params: Record<string, any> = { messages };
+    if (outputBudget) params.output_budget = outputBudget;
+    return rpc("artifact.check_safety", params);
+}
+
+export async function moveToProjectKb(artifactId: string, projectId: string): Promise<void> {
+    await rpc("artifact.move_to_project_kb", { artifact_id: artifactId, project_id: projectId });
+}
+
+export async function listBySource(sourceModule: string): Promise<Artifact[]> {
+    const r = await rpc("artifact.list_by_source", { source_module: sourceModule });
+    return r.artifacts;
 }
 
 export async function listRecycle(): Promise<{ artifacts: Artifact[]; total: number }> {

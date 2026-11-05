@@ -5,14 +5,19 @@ import {
     Clock3,
     Code2,
     FileText,
+    Folder,
+    FolderPlus,
     GitFork,
     Globe,
     Image as ImageIcon,
+    Import,
     Layers,
     Link2,
     Network,
     PackageOpen,
     Palette,
+    Pin,
+    PinOff,
     Presentation,
     RotateCcw,
     Search,
@@ -22,11 +27,22 @@ import {
 import {
     aiGenerate,
     createArtifact,
+    createFolder,
+    deleteFolder,
     getContent,
+    importCode,
     listArtifacts,
+    listFolders,
     listRecycle,
+    listTags,
+    pinArtifact,
+    purgeExpired,
+    renameFolder,
     restoreArtifact,
+    starArtifact,
     type Artifact,
+    type ArtifactFolder as FolderT,
+    type ArtifactTag,
 } from "../api";
 import { t, type Lang } from "../i18n";
 
@@ -215,13 +231,31 @@ function Thumb({ a }: { a: Artifact }) {
 }
 
 // §3.3: flat cards use borders, not shadows; rounded-lg cards + rounded-md inset elements
-function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: string) => void }) {
+// #116: root is a div now — pin/star are real buttons inside (nested buttons are invalid HTML)
+function Card({
+    a,
+    lang,
+    onOpen,
+    onTogglePin,
+    onToggleStar,
+}: {
+    a: Artifact;
+    lang: Lang;
+    onOpen: (id: string) => void;
+    onTogglePin: (a: Artifact) => void;
+    onToggleStar: (a: Artifact) => void;
+}) {
     const d = t(lang);
     const tile = TYPE_TILE[a.type] || "bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
     return (
-        <button
+        <div
+            role="button"
+            tabIndex={0}
             onClick={() => onOpen(a.id)}
-            className="group flex w-full flex-col gap-3 rounded-lg border border-zinc-200/80 bg-white p-4 text-left transition duration-150 hover:border-indigo-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-500/50"
+            onKeyDown={(e) => {
+                if (e.key === "Enter") onOpen(a.id);
+            }}
+            className="group flex w-full cursor-pointer flex-col gap-3 rounded-lg border border-zinc-200/80 bg-white p-4 text-left transition duration-150 hover:border-indigo-300 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-indigo-500/50"
         >
             <Thumb a={a} />
             <div className="flex items-start justify-between gap-2">
@@ -233,7 +267,32 @@ function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: strin
                     </span>
                     <span className="line-clamp-1">{a.name}</span>
                 </div>
-                {a.is_starred && <Star size={16} className="shrink-0 fill-amber-400 text-amber-400" />}
+                <span className="flex shrink-0 items-center gap-1">
+                    {a.is_pinned && <Pin size={14} className="fill-indigo-400 text-indigo-400" />}
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleStar(a);
+                        }}
+                        className="rounded-md p-1 text-zinc-300 transition hover:bg-zinc-100 hover:text-amber-400 dark:text-zinc-600 dark:hover:bg-zinc-800"
+                        title={a.is_starred ? d.unstar : d.star}
+                    >
+                        <Star
+                            size={16}
+                            className={a.is_starred ? "fill-amber-400 text-amber-400" : ""}
+                        />
+                    </button>
+                    <button
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onTogglePin(a);
+                        }}
+                        className="rounded-md p-1 text-zinc-300 transition hover:bg-zinc-100 hover:text-indigo-500 dark:text-zinc-600 dark:hover:bg-zinc-800"
+                        title={a.is_pinned ? d.unpin : d.pin}
+                    >
+                        {a.is_pinned ? <PinOff size={16} /> : <Pin size={16} />}
+                    </button>
+                </span>
             </div>
             {a.summary && !/^\s*[[{]/.test(a.summary) && (
                 <p className="line-clamp-2 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
@@ -269,7 +328,7 @@ function Card({ a, lang, onOpen }: { a: Artifact; lang: Lang; onOpen: (id: strin
                 <span className="line-clamp-1">{sourceLabel(a, lang)}</span>
                 <span className="shrink-0">{relTime(a.updated_at, lang)}</span>
             </div>
-        </button>
+        </div>
     );
 }
 
@@ -380,6 +439,28 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
     const [aiPrompt, setAiPrompt] = useState("");
     const [aiType, setAiType] = useState("markdown");
     const [aiBusy, setAiBusy] = useState(false);
+    // #116: folders / tags / pin filters + folder management
+    const [folders, setFolders] = useState<FolderT[]>([]);
+    const [tags, setTags] = useState<ArtifactTag[]>([]);
+    const [folderFilter, setFolderFilter] = useState("");
+    const [tagFilter, setTagFilter] = useState("");
+    const [pinnedOnly, setPinnedOnly] = useState(false);
+    const [folderMgrOpen, setFolderMgrOpen] = useState(false);
+    const [newFolderName, setNewFolderName] = useState("");
+    const [renamingFolder, setRenamingFolder] = useState<FolderT | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    // #116: import code panel
+    const [importOpen, setImportOpen] = useState(false);
+    const [importText, setImportText] = useState("");
+    const [importLang, setImportLang] = useState("");
+    const [importBusy, setImportBusy] = useState(false);
+    // #116: browse by source
+    const [bySourceOpen, setBySourceOpen] = useState(false);
+    const [bySourceModule, setBySourceModule] = useState("");
+    const [bySourceList, setBySourceList] = useState<Artifact[] | null>(null);
+    // S6: folder delete goes through a Modal, not native confirm
+    const [confirmFolder, setConfirmFolder] = useState<FolderT | null>(null);
+    const [purgeResult, setPurgeResult] = useState<number | null>(null);
 
     const doCreate = async (key: string, name: string, type: string, content: string) => {
         if (creating) return;
@@ -416,7 +497,13 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
 
     const reload = async () => {
         try {
-            const [r, rc] = await Promise.all([listArtifacts(), listRecycle()]);
+            // #116: server-side filters — folder/tag/pin push into list_all instead of client-side slicing
+            const filters: Record<string, any> = {};
+            if (folderFilter === "none") filters.folder_id = "";
+            else if (folderFilter) filters.folder_id = folderFilter;
+            if (tagFilter) filters.tag_id = tagFilter;
+            if (pinnedOnly) filters.is_pinned = true;
+            const [r, rc] = await Promise.all([listArtifacts(filters), listRecycle()]);
             setArtifacts(r.artifacts);
             setRecycled(rc.artifacts);
             setError("");
@@ -426,9 +513,100 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
         }
     };
 
+    const reloadMeta = async () => {
+        try {
+            const [fs, ts] = await Promise.all([listFolders(), listTags()]);
+            setFolders(fs);
+            setTags(ts);
+        } catch {
+            // filters degrade silently — the library still loads without folders/tags
+        }
+    };
+
     useEffect(() => {
         reload();
+    }, [folderFilter, tagFilter, pinnedOnly]);
+
+    useEffect(() => {
+        reloadMeta();
     }, []);
+
+    const doTogglePin = async (a: Artifact) => {
+        try {
+            await pinArtifact(a.id, !a.is_pinned);
+            await reload();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doToggleStar = async (a: Artifact) => {
+        try {
+            await starArtifact(a.id, !a.is_starred);
+            await reload();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doCreateFolder = async () => {
+        const name = newFolderName.trim();
+        if (!name) return;
+        try {
+            await createFolder(name);
+            setNewFolderName("");
+            await reloadMeta();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doRenameFolder = async () => {
+        if (!renamingFolder) return;
+        const name = renameValue.trim();
+        if (!name || name === renamingFolder.name) {
+            setRenamingFolder(null);
+            return;
+        }
+        try {
+            await renameFolder(renamingFolder.folder_id, name);
+            setRenamingFolder(null);
+            await reloadMeta();
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    const doDeleteFolder = (f: FolderT) => {
+        setConfirmFolder(f);
+    };
+
+    const doImportCode = async () => {
+        if (!importText.trim() || importBusy) return;
+        setImportBusy(true);
+        try {
+            const art = await importCode(importText, importLang);
+            setImportText("");
+            setImportOpen(false);
+            await reload();
+            onOpen(art.id);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setImportBusy(false);
+        }
+    };
+
+    const doBySource = async () => {
+        const m = bySourceModule.trim();
+        if (!m) return;
+        try {
+            const list = await listBySource(m);
+            setBySourceList(list);
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
 
     const counts = useMemo(() => {
         const c: Record<TabKey, number> = { all: 0, htmlApp: 0, document: 0, chart: 0, code: 0 };
@@ -531,6 +709,56 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                     ))}
                 </div>
                 <div className="ml-auto flex items-center gap-2">
+                    {/* #116: folder filter + management */}
+                    <select
+                        value={folderFilter}
+                        onChange={(e) => setFolderFilter(e.target.value)}
+                        className="rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                    >
+                        <option value="">{d.folderAll}</option>
+                        <option value="none">{d.noFolder}</option>
+                        {folders.map((f) => (
+                            <option key={f.folder_id} value={f.folder_id}>
+                                {f.name}
+                            </option>
+                        ))}
+                    </select>
+                    {tags.length > 0 && (
+                        <select
+                            value={tagFilter}
+                            onChange={(e) => setTagFilter(e.target.value)}
+                            className="rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                        >
+                            <option value="">{d.tagAll}</option>
+                            {tags.map((tg) => (
+                                <option key={tg.tag_id} value={tg.tag_id}>
+                                    {tg.name}
+                                </option>
+                            ))}
+                        </select>
+                    )}
+                    <button
+                        onClick={() => setPinnedOnly(!pinnedOnly)}
+                        className={`flex items-center gap-1 rounded-md border px-3 py-2 text-xs font-medium transition ${
+                            pinnedOnly
+                                ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
+                                : "border-zinc-200/80 bg-white text-zinc-500 hover:text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
+                        }`}
+                        title={d.pinnedOnly}
+                    >
+                        <Pin size={16} />
+                    </button>
+                    <button
+                        onClick={() => setFolderMgrOpen(!folderMgrOpen)}
+                        className={`flex items-center gap-1 rounded-md border px-3 py-2 text-xs font-medium transition ${
+                            folderMgrOpen
+                                ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
+                                : "border-zinc-200/80 bg-white text-zinc-500 hover:text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
+                        }`}
+                        title={d.folders}
+                    >
+                        <Folder size={16} />
+                    </button>
                     <div className="relative w-40 xl:w-48">
                         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
                         <input
@@ -549,6 +777,17 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                         <option value="created_at">{d.sortCreated}</option>
                         <option value="name">{d.sortName}</option>
                     </select>
+                    <button
+                        onClick={() => setBySourceOpen(!bySourceOpen)}
+                        className={`flex items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition ${
+                            bySourceOpen
+                                ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
+                                : "border-zinc-200/80 bg-white text-zinc-500 hover:text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200"
+                        }`}
+                        title={d.bySource}
+                    >
+                        <PackageOpen size={16} />
+                    </button>
                     <button
                         onClick={() => setRecycleOpen(!recycleOpen)}
                         className={`flex items-center gap-2 rounded-md border px-3 py-2 text-xs font-medium transition ${
@@ -608,7 +847,197 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                     </span>
                     {aiBusy ? d.aiRunning : d.aiGenerateTile}
                 </button>
+                <button
+                    onClick={() => setImportOpen(!importOpen)}
+                    className={`flex items-center gap-3 rounded-lg border px-4 py-3 text-sm font-medium transition ${
+                        importOpen
+                            ? "border-indigo-300 bg-indigo-500/10 text-indigo-600 dark:border-indigo-500/50 dark:text-indigo-400"
+                            : "border-dashed border-zinc-300 bg-white text-zinc-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:border-indigo-500/60 dark:hover:text-indigo-400"
+                    }`}
+                >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                        <Import size={20} />
+                    </span>
+                    {d.importCode}
+                </button>
             </div>
+
+            {importOpen && (
+                <div className="mt-4 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <textarea
+                        value={importText}
+                        onChange={(e) => setImportText(e.target.value)}
+                        placeholder={d.importCodePh}
+                        rows={5}
+                        spellCheck={false}
+                        className="w-full resize-none rounded-md border border-zinc-200/80 bg-white px-3 py-2 font-mono text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                    />
+                    <div className="mt-2 flex items-center justify-end gap-2">
+                        <select
+                            value={importLang}
+                            onChange={(e) => setImportLang(e.target.value)}
+                            className="rounded-md border border-zinc-200/80 bg-white px-2 py-1.5 text-xs text-zinc-600 outline-none dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300"
+                        >
+                            <option value="">{d.importLangAuto}</option>
+                            <option value="python">Python</option>
+                            <option value="typescript">TypeScript</option>
+                            <option value="javascript">JavaScript</option>
+                            <option value="rust">Rust</option>
+                            <option value="go">Go</option>
+                            <option value="sql">SQL</option>
+                            <option value="bash">Bash</option>
+                        </select>
+                        <button
+                            disabled={importBusy || !importText.trim()}
+                            onClick={doImportCode}
+                            className="flex items-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            <Import size={16} />
+                            {d.importCode}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {folderMgrOpen && (
+                <div className="mt-4 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold">
+                        <Folder size={16} className="text-zinc-400" />
+                        {d.folders}
+                    </h3>
+                    <div className="mt-3 flex items-center gap-2">
+                        <input
+                            value={newFolderName}
+                            onChange={(e) => setNewFolderName(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") doCreateFolder();
+                            }}
+                            placeholder={d.folderNamePh}
+                            className="w-48 rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                        />
+                        <button
+                            onClick={doCreateFolder}
+                            disabled={!newFolderName.trim()}
+                            className="flex items-center gap-1 rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            <FolderPlus size={16} />
+                            {d.newFolder}
+                        </button>
+                    </div>
+                    {folders.length > 0 && (
+                        <div className="mt-3 flex flex-col gap-1">
+                            {folders.map((f) => (
+                                <div
+                                    key={f.folder_id}
+                                    className="flex items-center justify-between rounded-md border border-zinc-100 bg-zinc-50/60 px-3 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950/60"
+                                >
+                                    {renamingFolder?.folder_id === f.folder_id ? (
+                                        <>
+                                            <input
+                                                value={renameValue}
+                                                onChange={(e) => setRenameValue(e.target.value)}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === "Enter") doRenameFolder();
+                                                    if (e.key === "Escape") setRenamingFolder(null);
+                                                }}
+                                                autoFocus
+                                                className="min-w-0 flex-1 rounded-md border border-zinc-200/80 bg-white px-2 py-1 text-xs outline-none dark:border-zinc-800 dark:bg-zinc-900"
+                                            />
+                                            <div className="ml-2 flex shrink-0 gap-1">
+                                                <button
+                                                    onClick={doRenameFolder}
+                                                    className="rounded-md bg-indigo-500/10 px-2 py-1 font-medium text-indigo-600 dark:text-indigo-400"
+                                                >
+                                                    OK
+                                                </button>
+                                                <button
+                                                    onClick={() => setRenamingFolder(null)}
+                                                    className="rounded-md px-2 py-1 text-zinc-400"
+                                                >
+                                                    {d.close}
+                                                </button>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="min-w-0 truncate text-zinc-600 dark:text-zinc-300">
+                                                {f.name}
+                                            </span>
+                                            <div className="flex shrink-0 gap-2">
+                                                <button
+                                                    onClick={() => {
+                                                        setRenamingFolder(f);
+                                                        setRenameValue(f.name);
+                                                    }}
+                                                    className="text-zinc-400 transition hover:text-indigo-500"
+                                                >
+                                                    {d.renameFolder}
+                                                </button>
+                                                <button
+                                                    onClick={() => doDeleteFolder(f)}
+                                                    className="text-zinc-400 transition hover:text-red-500"
+                                                >
+                                                    {d.deleteFolder}
+                                                </button>
+                                            </div>
+                                        </>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {bySourceOpen && (
+                <div className="mt-4 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold">
+                        <PackageOpen size={16} className="text-zinc-400" />
+                        {d.bySource}
+                    </h3>
+                    <div className="mt-3 flex items-center gap-2">
+                        <input
+                            value={bySourceModule}
+                            onChange={(e) => setBySourceModule(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === "Enter") doBySource();
+                            }}
+                            placeholder={d.sourceModulePh}
+                            className="w-56 rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                        />
+                        <button
+                            onClick={doBySource}
+                            disabled={!bySourceModule.trim()}
+                            className="rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            {d.bySourceRun}
+                        </button>
+                    </div>
+                    {bySourceList !== null && (
+                        <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
+                            {bySourceList.length} {d.totalArtifacts}
+                        </p>
+                    )}
+                    {bySourceList !== null && bySourceList.length > 0 && (
+                        <div className="mt-2 flex flex-col gap-1">
+                            {bySourceList.map((a) => (
+                                <button
+                                    key={a.id}
+                                    onClick={() => onOpen(a.id)}
+                                    className="flex items-center justify-between rounded-md border border-zinc-100 bg-zinc-50/60 px-3 py-2 text-left text-xs transition hover:border-indigo-300 dark:border-zinc-800 dark:bg-zinc-950/60"
+                                >
+                                    <span className="line-clamp-1 text-zinc-600 dark:text-zinc-300">
+                                        {a.name}
+                                    </span>
+                                    <span className="shrink-0 text-zinc-400">
+                                        {relTime(a.updated_at, lang)}
+                                    </span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
 
             {aiOpen && (
                 <div className="mt-4 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
@@ -678,7 +1107,14 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                             )}
                             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                 {items.map((a) => (
-                                    <Card key={a.id} a={a} lang={lang} onOpen={onOpen} />
+                                    <Card
+                                        key={a.id}
+                                        a={a}
+                                        lang={lang}
+                                        onOpen={onOpen}
+                                        onTogglePin={doTogglePin}
+                                        onToggleStar={doToggleStar}
+                                    />
                                 ))}
                             </div>
                         </section>
@@ -688,10 +1124,34 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
 
             {recycleOpen && (
                 <section className="mt-8 rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-                    <h3 className="flex items-center gap-2 text-sm font-semibold">
-                        <RotateCcw size={16} className="text-zinc-400" />
-                        {d.recycle}
+                    <h3 className="flex items-center justify-between gap-2 text-sm font-semibold">
+                        <span className="flex items-center gap-2">
+                            <RotateCcw size={16} className="text-zinc-400" />
+                            {d.recycle}
+                        </span>
+                        {recycled.length > 0 && (
+                            <button
+                                onClick={async () => {
+                                    try {
+                                        const n = await purgeExpired();
+                                        setError("");
+                                        await reload();
+                                        setPurgeResult(n);
+                                    } catch (e) {
+                                        setError(`${d.loadError}: ${(e as Error).message}`);
+                                    }
+                                }}
+                                className="rounded-md border border-red-200 px-3 py-1 text-xs font-medium text-red-600 transition hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/50"
+                            >
+                                {d.purgeExpired}
+                            </button>
+                        )}
                     </h3>
+                    {purgeResult !== null && (
+                        <p className="mt-2 text-xs text-emerald-600 dark:text-emerald-400">
+                            {d.purgeResult} {purgeResult}
+                        </p>
+                    )}
                     {recycled.length === 0 ? (
                         <p className="mt-3 text-sm text-zinc-400">{d.recycleEmpty}</p>
                     ) : (
@@ -718,6 +1178,41 @@ export default function Library({ lang, onOpen }: { lang: Lang; onOpen: (id: str
                         </div>
                     )}
                 </section>
+            )}
+
+            {confirmFolder && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/40 p-4">
+                    <div className="w-full max-w-sm rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <p className="text-sm leading-relaxed text-zinc-700 dark:text-zinc-200">
+                            {d.confirmDeleteFolder}
+                        </p>
+                        <div className="mt-4 flex justify-end gap-2">
+                            <button
+                                onClick={() => setConfirmFolder(null)}
+                                className="rounded-md border border-zinc-200/80 px-3 py-2 text-xs font-medium text-zinc-600 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                            >
+                                {d.close}
+                            </button>
+                            <button
+                                onClick={async () => {
+                                    const f = confirmFolder;
+                                    setConfirmFolder(null);
+                                    try {
+                                        await deleteFolder(f.folder_id);
+                                        if (folderFilter === f.folder_id) setFolderFilter("");
+                                        await reloadMeta();
+                                        await reload();
+                                    } catch (e) {
+                                        setError(`${d.loadError}: ${(e as Error).message}`);
+                                    }
+                                }}
+                                className="rounded-md bg-red-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-red-700"
+                            >
+                                {d.confirm}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );
