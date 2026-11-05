@@ -58,12 +58,21 @@ function useLang() {
     return { lang, setLang };
 }
 
-function parseRoute(): { view: "library" | "detail" | "share"; id?: string } {
+function parseRoute(): { view: "library" | "detail" | "share"; id?: string; version?: number } {
     const h = window.location.hash;
     const s = h.match(/^#\/s\/([^?]+)/);
     if (s) return { view: "share", id: decodeURIComponent(s[1]) };
-    const m = h.match(/^#\/a\/([^?]+)/);
-    if (m) return { view: "detail", id: decodeURIComponent(m[1]) };
+    // #119: deep links pin a version — /#/a/<id>?v=N loads that version's content
+    const m = h.match(/^#\/a\/([^?]+)(?:\?(.*))?$/);
+    if (m) {
+        const q = new URLSearchParams(m[2] || "");
+        const v = parseInt(q.get("v") || "", 10);
+        return {
+            view: "detail",
+            id: decodeURIComponent(m[1]),
+            version: Number.isFinite(v) && v > 0 ? v : undefined,
+        };
+    }
     return { view: "library" };
 }
 
@@ -122,7 +131,13 @@ export default function App() {
                 {route.view === "share" && route.id ? (
                     <Share key={route.id} id={route.id} lang={lang} onBack={backToLibrary} />
                 ) : route.view === "detail" && route.id ? (
-                    <Detail key={route.id} id={route.id} lang={lang} onBack={backToLibrary} />
+                    <Detail
+                        key={route.id}
+                        id={route.id}
+                        lang={lang}
+                        onBack={backToLibrary}
+                        initialVersion={route.version}
+                    />
                 ) : (
                     <Library lang={lang} onOpen={openArtifact} />
                 )}

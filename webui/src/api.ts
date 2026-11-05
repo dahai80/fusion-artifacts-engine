@@ -193,6 +193,34 @@ export async function listBySource(sourceModule: string): Promise<Artifact[]> {
     return r.artifacts;
 }
 
+// #119: review-comment surface per artifact version
+export interface ReviewComment {
+    event_id: string;
+    version: number | null;
+    comment: string;
+    author: string;
+    created_at: number | null;
+}
+
+export async function addComment(
+    artifactId: string,
+    version: number,
+    comment: string,
+    author = "webui"
+): Promise<void> {
+    await rpc("artifact.comment", { artifact_id: artifactId, version, comment, author });
+}
+
+export async function listComments(
+    artifactId: string,
+    version?: number
+): Promise<ReviewComment[]> {
+    const params: Record<string, any> = { artifact_id: artifactId };
+    if (version) params.version = version;
+    const r = await rpc("artifact.list_comments", params);
+    return r.comments;
+}
+
 export async function listRecycle(): Promise<{ artifacts: Artifact[]; total: number }> {
     return rpc("artifact.list_recycle", { page: 1, page_size: 50 });
 }

@@ -322,6 +322,28 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | Create artifact from external module (e.g. fusion-mlx) |
 | `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | List artifacts by source module |
 
+### Workflow Facade (v0.7.13, issue #119)
+
+Server-to-server contract for pipeline nodes (cowork `product_lifecycle` template, `architecture/product-delivery-pipeline-1105.md` §6/§10): create pipeline docs and mock packs as artifacts, version them per revision round, and hand back stable deep links for decision cards and evidence tables. Auth is the existing module-key model (gateway-injected `fm-` key or `X-API-Key`).
+
+| Method | Params | Returns |
+|---|---|---|
+| `artifact.workflow.create` | workspace_id, name, content, type?=markdown, source_module?=cowork, project_slug?, stage?, workflow_run_id?, project_id?, summary?, metadata? | `{artifact_id, version, url, ref_text, artifact}` — stamps `project:<slug>` and `stage:<stage>` tags |
+| `artifact.workflow.revision` | artifact_id, content, reason?, expected_content_hash? | `{artifact_id, version, url, ref_text}` — gate A/B rejection loop lands the revised content as the next version (optimistic-lock aware) |
+| `artifact.comment` | artifact_id, version, comment, author? | `{ok, version}` — review comment persisted as a `review_comment` event (SSE + durable) |
+| `artifact.list_comments` | artifact_id, version? | `{comments: [{event_id, version, comment, author, created_at}]}` sorted by version |
+
+`url` is the stable deep link `{gateway.url}/shell/{gateway.module_id}/#/a/<artifact_id>?v=<version>` (relative path when `gateway.url` is empty). The webui Detail route accepts `?v=N` and pins the content to that version (amber banner + back-to-current), and the sidebar carries a review-comment card attached to the viewed version.
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "artifact.workflow.create",
+ "params": {"workspace_id": "run-17", "name": "PRD v1", "content": "# PRD …",
+            "type": "markdown", "project_slug": "demo-app", "stage": "prd",
+            "workflow_run_id": "wf-42"}}
+→ {"artifact_id": "art_x9", "version": 1,
+   "url": "http://127.0.0.1:11432/shell/fusion-artifacts/#/a/art_x9?v=1", …}
+```
+
 ### Artifact Kinds
 
 Semantic classification matching how users think about artifacts:

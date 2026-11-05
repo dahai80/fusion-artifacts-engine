@@ -18,11 +18,13 @@ import {
     ShieldCheck,
     Sparkles,
     Tags,
+    MessageCircle,
     Wrench,
     X,
     GitFork,
 } from "lucide-react";
 import {
+    addComment,
     addTag,
     aiGenerate,
     aiListModels,
@@ -30,6 +32,8 @@ import {
     checkSafety,
     createShare,
     createSnapshot,
+    listComments,
+    type ReviewComment,
     duplicateArtifact,
     exportCode,
     getArtifact,
@@ -70,10 +74,12 @@ export default function Detail({
     id,
     lang,
     onBack,
+    initialVersion,
 }: {
     id: string;
     lang: Lang;
     onBack: () => void;
+    initialVersion?: number;
 }) {
     const d = t(lang);
     const [artifact, setArtifact] = useState<Artifact | null>(null);
@@ -117,6 +123,11 @@ export default function Detail({
     const [safetyNote, setSafetyNote] = useState("");
     const [codeExported, setCodeExported] = useState("");
     const [maintBusy, setMaintBusy] = useState(false);
+    // #119: version-pinned deep link + review comments
+    const [viewVersion, setViewVersion] = useState<number | null>(initialVersion || null);
+    const [comments, setComments] = useState<ReviewComment[]>([]);
+    const [commentInput, setCommentInput] = useState("");
+    const [commentBusy, setCommentBusy] = useState(false);
 
     useEffect(() => {
         getShareBase()
@@ -129,8 +140,11 @@ export default function Detail({
             const [a, vs] = await Promise.all([getArtifact(id), listVersions(id)]);
             setArtifact(a);
             setVersions(vs);
-            const c = await getContent(id);
+            // #119: deep link ?v=N pins the content to that version (current version shows live content)
+            const pinned = viewVersion && viewVersion !== a.current_version ? viewVersion : null;
+            const c = pinned ? await getContent(id, pinned) : await getContent(id);
             setContent(c);
+            if (!pinned && viewVersion && viewVersion === a.current_version) setViewVersion(null);
             setError("");
             try {
                 const ev = await listEvents(id);
@@ -291,6 +305,30 @@ export default function Detail({
             setTimeout(() => setCopied(false), 1500);
         } catch (e) {
             setError(`${d.loadError}: ${(e as Error).message}`);
+        }
+    };
+
+    // #119: review comments — list on load, add attaches to the pinned (or current) version
+    useEffect(() => {
+        listComments(id)
+            .then(setComments)
+            .catch(() => setComments([]));
+    }, [id]);
+
+    const doAddComment = async () => {
+        const text = commentInput.trim();
+        if (!text || commentBusy) return;
+        const ver = viewVersion || artifact?.current_version;
+        if (!ver) return;
+        setCommentBusy(true);
+        try {
+            await addComment(id, ver, text, "webui");
+            setCommentInput("");
+            setComments(await listComments(id));
+        } catch (e) {
+            setError(`${d.loadError}: ${(e as Error).message}`);
+        } finally {
+            setCommentBusy(false);
         }
     };
 
@@ -649,6 +687,24 @@ export default function Detail({
                 </p>
             )}
 
+            {/* #119: version-pinned deep-link banner */}
+            {viewVersion && artifact && viewVersion !== artifact.current_version && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300">
+                    <span>
+                        {d.viewingVersion} v{viewVersion} ({d.current} v{artifact.current_version})
+                    </span>
+                    <button
+                        onClick={() => {
+                            setViewVersion(null);
+                            getContent(id).then(setContent);
+                        }}
+                        className="rounded-md border border-amber-400/60 px-3 py-1 text-xs font-medium transition hover:bg-amber-100 dark:hover:bg-amber-500/20"
+                    >
+                        {d.backToCurrent}
+                    </button>
+                </div>
+            )}
+
             {renameOpen && (
                 <div className="mb-4 flex items-center gap-2 rounded-lg border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-900">
                     <input
@@ -961,6 +1017,50 @@ export default function Detail({
                             <p className="mt-2 truncate text-xs text-zinc-400">
                                 {d.exportCode}: {codeExported.length} chars
                             </p>
+                        )}
+                    </div>
+
+                    {/* #119: review comments attached to the viewed version */}
+                    <div className="rounded-lg border border-zinc-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
+                        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+                            <MessageCircle size={16} className="text-zinc-400" />
+                            {d.comments} ({comments.length})
+                        </h2>
+                        <textarea
+                            value={commentInput}
+                            onChange={(e) => setCommentInput(e.target.value)}
+                            placeholder={d.commentPh}
+                            rows={2}
+                            className="w-full resize-none rounded-md border border-zinc-200/80 bg-white px-3 py-2 text-xs outline-none transition placeholder:text-zinc-400 focus:border-indigo-400 dark:border-zinc-800 dark:bg-zinc-900"
+                        />
+                        <button
+                            onClick={doAddComment}
+                            disabled={commentBusy || !commentInput.trim()}
+                            className="mt-2 w-full rounded-md bg-indigo-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-indigo-600 disabled:opacity-40"
+                        >
+                            {d.addComment}
+                        </button>
+                        {comments.length === 0 ? (
+                            <p className="mt-3 text-xs text-zinc-400">{d.noComments}</p>
+                        ) : (
+                            <div className="mt-3 max-h-48 space-y-2 overflow-y-auto">
+                                {comments.map((cm) => (
+                                    <div
+                                        key={cm.event_id}
+                                        className="rounded-md border border-zinc-100 bg-zinc-50/60 px-3 py-2 text-xs dark:border-zinc-800 dark:bg-zinc-950/60"
+                                    >
+                                        <p className="flex items-center justify-between text-zinc-400">
+                                            <span className="font-mono">v{cm.version}</span>
+                                            <span>
+                                                {cm.author} · {cm.created_at ? relTime(cm.created_at, lang) : ""}
+                                            </span>
+                                        </p>
+                                        <p className="mt-1 whitespace-pre-wrap text-zinc-600 dark:text-zinc-300">
+                                            {cm.comment}
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
                         )}
                     </div>
 

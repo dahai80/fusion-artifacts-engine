@@ -19,7 +19,7 @@ from fusion_artifacts_engine.section_index import (
     find_section_bounds,
     read_line_range,
 )
-from fusion_artifacts_engine.utils import get_package_version
+from fusion_artifacts_engine.utils import deep_link_url, get_package_version
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +167,11 @@ class RPCHandler:
             "artifact.list_artifact_tags": self._list_artifact_tags,
             # P4: events
             "artifact.emit_event": self._emit_event,
+            # #119: workflow-facing facade (cowork product_lifecycle)
+            "artifact.workflow.create": self._workflow_create,
+            "artifact.workflow.revision": self._workflow_revision,
+            "artifact.comment": self._comment,
+            "artifact.list_comments": self._list_comments,
             "artifact.list_events": self._list_events,
             # P3: project KB
             "artifact.move_to_project_kb": self._move_to_project_kb,
@@ -920,6 +925,110 @@ class RPCHandler:
             page_size=int(params.get("page_size", 200)),
         )
         return {"artifacts": [a.model_dump() for a in artifacts]}
+
+    # ── #119: workflow-facing facade (cowork product_lifecycle template) ──
+
+    async def _workflow_create(self, params: dict) -> dict:
+        # One-call contract for pipeline nodes: create the artifact from a node
+        # output, stamp project/stage tags, return artifact_id + version + url.
+        artifact_type = params.get("type", "markdown")
+        if artifact_type not in ("code", "markdown", "html", "react", "data"):
+            raise ValueError("Invalid type, must be one of (code, markdown, html, react, data)")
+        artifact, version, ref_text = await self.engine.create_external_artifact(
+            source_module=params.get("source_module", "cowork"),
+            workspace_id=params["workspace_id"],
+            name=params["name"],
+            artifact_type=artifact_type,
+            content=params["content"],
+            workflow_run_id=params.get("workflow_run_id"),
+            summary=params.get("summary", ""),
+            project_id=params.get("project_id"),
+            metadata=params.get("metadata"),
+        )
+        aid = artifact.id
+        project_slug = params.get("project_slug")
+        if project_slug:
+            await asyncio.to_thread(self.engine.add_tag, aid, f"project:{project_slug}")
+        stage = params.get("stage")
+        if stage:
+            await asyncio.to_thread(self.engine.add_tag, aid, f"stage:{stage}")
+        await self._publish("artifact.created", aid, artifact_id=aid, kind=artifact.kind)
+        if project_slug or stage:
+            logger.info(
+                "workflow create %s project_slug=%s stage=%s", aid, project_slug, stage
+            )
+        return {
+            "artifact_id": aid,
+            "version": version.version_num,
+            "url": deep_link_url(self.engine.config, aid, version.version_num),
+            "ref_text": ref_text,
+            "artifact": artifact.model_dump(),
+        }
+
+    async def _workflow_revision(self, params: dict) -> dict:
+        # Revision round (gate A/B rejection loops, reviewer findings): land the
+        # new content as the next version with the reason as change_log.
+        version, ref_text = await self.engine.create_version(
+            params["artifact_id"],
+            params["content"],
+            params.get("reason", "workflow revision"),
+            source="manual",
+            expected_content_hash=params.get("expected_content_hash"),
+        )
+        aid = params["artifact_id"]
+        await self._publish(
+            "artifact.updated", aid, artifact_id=aid, version_num=version.version_num
+        )
+        return {
+            "artifact_id": aid,
+            "version": version.version_num,
+            "url": deep_link_url(self.engine.config, aid, version.version_num),
+            "ref_text": ref_text,
+        }
+
+    async def _comment(self, params: dict) -> dict:
+        # Review-comment surface per artifact version — stored as a persisted
+        # event (kind review_comment), so gate A/B discussions attach to the doc
+        # without new storage. _publish both fans out to SSE and persists the
+        # event (#100-2) — emitting through the engine here would double-save.
+        version = int(params["version"])
+        comment = params["comment"]
+        author = params.get("author", "")
+        await self._publish(
+            "review_comment",
+            params["artifact_id"],
+            version=version,
+            comment=comment,
+            author=author,
+        )
+        return {"ok": True, "version": version}
+
+    async def _list_comments(self, params: dict) -> dict:
+        events, _total = await asyncio.to_thread(
+            self.engine.list_events,
+            artifact_id=params["artifact_id"],
+            page=int(params.get("page", 1)),
+            page_size=int(params.get("page_size", 200)),
+        )
+        version = params.get("version")
+        comments = []
+        for e in events:
+            if e.event_type != "review_comment":
+                continue
+            p = e.payload or {}
+            if version is not None and int(p.get("version", 0)) != int(version):
+                continue
+            comments.append(
+                {
+                    "event_id": e.event_id,
+                    "version": p.get("version"),
+                    "comment": p.get("comment"),
+                    "author": p.get("author", ""),
+                    "created_at": e.created_at,
+                }
+            )
+        comments.sort(key=lambda c: (c["version"] or 0, c["created_at"] or 0))
+        return {"comments": comments}
 
     # ── AE-1: patch_artifact ────────────────────────────────────
 
