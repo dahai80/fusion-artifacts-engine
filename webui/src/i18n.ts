@@ -151,6 +151,12 @@ const dict = {
         bySource: "按来源查看",
         sourceModulePh: "来源模块，如 fusion-design",
         bySourceRun: "查询",
+        viewingVersion: "正在查看历史版本",
+        backToCurrent: "回到当前版本",
+        comments: "评审评论",
+        commentPh: "写评论，附加到当前查看的版本…",
+        addComment: "评论",
+        noComments: "暂无评论",
     },
     en: {
         all: "All",
@@ -302,6 +308,12 @@ const dict = {
         bySource: "Browse by source",
         sourceModulePh: "Source module, e.g. fusion-design",
         bySourceRun: "Query",
+        viewingVersion: "Viewing a historical version",
+        backToCurrent: "Back to current version",
+        comments: "Review comments",
+        commentPh: "Write a comment, attached to the version being viewed…",
+        addComment: "Comment",
+        noComments: "No comments yet",
     },
 } as const;
 

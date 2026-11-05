@@ -191,6 +191,19 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | 从外部模块创建产物（如 fusion-mlx） |
 | `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | 按来源模块列出产物 |
 
+### 工作流门面（v0.7.13，issue #119）
+
+面向流水线节点的服务端契约（cowork `product_lifecycle` 模板，`architecture/product-delivery-pipeline-1105.md` §6/§10）：把管线产物（PRD/架构文档/计划/模拟包）落成 artifact，按评审轮次版本化，并返回稳定深链供决策卡片与证据表引用。鉴权走现有模块 key 模型（网关注入 `fm-` key 或 `X-API-Key`）。
+
+| 方法 | 参数 | 返回 |
+|---|---|---|
+| `artifact.workflow.create` | workspace_id, name, content, type?=markdown, source_module?=cowork, project_slug?, stage?, workflow_run_id?, project_id?, summary?, metadata? | `{artifact_id, version, url, ref_text, artifact}` — 自动打 `project:<slug>` 与 `stage:<stage>` 标签 |
+| `artifact.workflow.revision` | artifact_id, content, reason?, expected_content_hash? | `{artifact_id, version, url, ref_text}` — gate A/B 驳回循环把修改后内容落为下一版本（支持乐观锁） |
+| `artifact.comment` | artifact_id, version, comment, author? | `{ok, version}` — 评审评论持久化为 `review_comment` 事件（SSE + 落库） |
+| `artifact.list_comments` | artifact_id, version? | `{comments: [...]}` 按版本排序 |
+
+`url` 为稳定深链 `{gateway.url}/shell/{gateway.module_id}/#/a/<artifact_id>?v=<version>`（`gateway.url` 为空时返回相对路径）。webui 详情路由支持 `?v=N` 钉住该版本内容（琥珀色横幅 + 回到当前版本），侧栏带评审评论卡片（附着到当前查看的版本）。
+
 ### 产物分类（Kind）
 
 语义分类，匹配用户对产物的认知方式：

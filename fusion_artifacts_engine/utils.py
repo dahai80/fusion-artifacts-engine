@@ -6,6 +6,10 @@ import secrets
 import string
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fusion_artifacts_engine.config import ArtifactEngineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -148,3 +152,19 @@ def get_package_version() -> str:
         return pkg_version("fusion-artifacts-engine")
     except Exception:  # noqa: BLE001
         return "0.1.0"
+
+
+# #119: stable deep-link for workflow consumers (cowork decision cards / evidence tables).
+# Absolute when the gateway URL is configured (web-shell module route), relative otherwise;
+# the webui route accepts ?v=N to pin a specific version.
+def deep_link_url(
+    config: "ArtifactEngineConfig", artifact_id: str, version: int | None = None
+) -> str:
+    base = (config.gateway_url or "").rstrip("/")
+    module_id = config.gateway_module_id or "fusion-artifacts"
+    path = f"/shell/{module_id}/#/a/{artifact_id}"
+    if version is not None:
+        path = f"{path}?v={int(version)}"
+    if base:
+        return f"{base}{path}"
+    return path
