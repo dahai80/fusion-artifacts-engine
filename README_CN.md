@@ -681,6 +681,14 @@ gateway:
 - **AI 生成与迭代**（v0.7.5, issue #97）— 新增 `ai.generate` / `ai.list_models` RPC：服务端薄代理到 fusion-mlx 的 OpenAI 兼容 `/v1/chat/completions`（免 CORS，走引擎鉴权）。配置段 `ai`（`base_url` 默认 `http://127.0.0.1:11434`、`model` 空=取 `/v1/models` 第一个、`timeout`、`api_key`）。GUI 两个入口：详情页"AI 修改"卡片（提示词 → 模型重写全文 → 新版本 `source=ai_generation`，模型下拉来自 `ai.list_models`）和库页"AI 生成"框（提示词 + 类型选择 → 生成 markdown/html/code/data → 建产物并打开）。模型输出客户端去代码围栏；建议部署时用 `ai.model` 钉死对话模型（自动选取可能拿到图像模型）。
 
 - **Shell 集成**（v0.7.3，`fusion-web-ui-spec-1015` S7/S8/S9）— 经 `/shell/` 代理访问（或 `?embedded=1`）时隐藏模块自有顶部导航并跟随宿主 Shell：主题取 `fusion.shell.theme` + `fusion:theme` 事件，语言取 `fusion.shell.lang` + `fusion:lang` 事件（`@fusion/web-sdk` 就绪前以同源 storage 桥接过渡）。独立运行保留本地切换按钮。视觉语言对齐规范：`rounded-lg` 卡片 / `rounded-md` 控件、平面用边框不用阴影、Lucide 图标 16/20/24 三档、间距 4 的倍数、暗色默认。
+- **RPC 全量接入**（v0.7.12，issue #116）— GUI 消费的 JSON-RPC 方法从 16 个扩展到约 35 个，补齐 2026-11-04 跨项目审计发现的 Web 面缺口：
+  - **文件夹** — 工具栏过滤（全部/未归档/按文件夹，服务端 `filters.folder_id`）、管理面板（新建/内联重命名/删除，删除走应用内 Modal、产物保留）、详情视图移动产物（`artifact.move_to_folder`）。
+  - **标签与置顶** — 标签过滤（`filters.tag_id`）、只看置顶（`filters.is_pinned`）、卡片收藏/置顶切换（`artifact.star` / `artifact.pin`）、详情标签编辑（`artifact.add_tag` / `remove_tag` / `list_artifact_tags`）。
+  - **快照** — 详情视图快照时间线（`artifact.create_snapshot` / `list_snapshots`），带备注、一键恢复到快照（回滚走确认 Modal）。
+  - **生命周期** — 内联重命名（`artifact.rename`）、创建副本（`artifact.duplicate`）、归档到项目知识库（`artifact.move_to_project_kb`）。
+  - **代码交换** — 库页"导入代码"卡片（`artifact.import_code`，语言自动识别或手动指定）、导出（`artifact.export_code`，复制到剪贴板）。
+  - **维护** — 回收站彻底清空（`artifact.purge_expired`）、按 token 预算自动压缩（`artifact.auto_compact`，显示压缩前后 token）、安全检查（`artifact.check_safety`）、按来源浏览（`artifact.list_by_source`）。
+  - 刻意不接入：`artifact.inject` / `artifact.interact`（已退役占位，恒返回 `-32005`）、`artifact.export_session`（服务端 `output_dir` 必须位于存储根下，非浏览器场景）、引擎内部读写 API（`artifact.toc` / `view` / `watch` / `sync` / `patch` / `load` / `context.budget` / `render.visual`）。
 - 静态服务加固：入口页 `no-store` + 严格 CSP（`frame-ancestors` 允许网关源以便 iframe 嵌入）、hash 文件名资源 `immutable`、路径穿越拒绝、dist 缺失时降级 404 不影响 RPC。
 
 ```bash

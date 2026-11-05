@@ -859,7 +859,7 @@ gateway:
 - **Heartbeat stale-signal fast path (v0.7.8, #110)**: gateway PR #485 exposes the same drift on the heartbeat plane itself — a 200 response carrying `X-Fusion-Key-State: stale` means the heartbeat authenticated with the pre-rotation key inside the grace window. The engine reads that header and immediately re-registers via the admin key (cooldown-gated against rotation flapping), cutting detection latency from up to the grace window (or the 10-min probe) to the first heartbeat after rotation. Heartbeats without the header (older gateways) behave exactly as before.
 - Registration/heartbeat failures are **non-fatal**: the daemon keeps serving even if the gateway is down.
 
-## Web GUI (v0.6.0, issue #76; v0.7.3 shell-spec alignment; v0.7.4 create tiles; v0.7.5 editor + AI; v0.7.6 svg/mermaid)
+## Web GUI (v0.6.0, issue #76; v0.7.3 shell-spec alignment; v0.7.4 create tiles; v0.7.5 editor + AI; v0.7.6 svg/mermaid; v0.7.12 full RPC surface)
 
 A built-in web GUI (`webui/`, Vite + React 18 + Tailwind v4) served by the daemon itself from `fusion_artifacts_engine/webui_dist/` — same-origin at `http://127.0.0.1:11451/` and through the shell proxy at `/shell/fusion-artifacts/`. Kernel zero change: the GUI consumes only existing JSON-RPC methods.
 
@@ -873,6 +873,14 @@ A built-in web GUI (`webui/`, Vite + React 18 + Tailwind v4) served by the daemo
   {"jsonrpc": "2.0", "id": 2, "method": "ai.list_models", "params": {}}
   ```
 - **Shell integration (v0.7.3, `fusion-web-ui-spec-1015` S7/S8/S9)** — when served under `/shell/` (or `?embedded=1`) the module hides its own top nav and follows the host shell: theme from `fusion.shell.theme` + `fusion:theme` events, language from `fusion.shell.lang` + `fusion:lang` events (same-origin storage bridge until `@fusion/web-sdk` ships). Standalone mode keeps local toggles. Visual language follows the spec: `rounded-lg` cards / `rounded-md` controls, borders over shadows on flat surfaces, Lucide icons at 16/20/24, 4-multiple spacing, dark theme default.
+- **Full RPC surface (v0.7.12, issue #116)** — the GUI grows from 16 to ~35 JSON-RPC methods, closing the web-surface gap found by the 2026-11-04 cross-project audit:
+  - **Folders** — toolbar filter (all / unfiled / per-folder, server-side `filters.folder_id`), manage panel (create / inline rename / delete with an in-app modal; artifacts are kept), per-artifact move via the detail view (`artifact.move_to_folder`).
+  - **Tags & pinning** — tag filter (`filters.tag_id`), pinned-only toggle (`filters.is_pinned`), per-card star/pin toggles (`artifact.star` / `artifact.pin`), detail-view tag editor (`artifact.add_tag` / `remove_tag` / `list_artifact_tags`).
+  - **Snapshots** — detail-view snapshot timeline (`artifact.create_snapshot` / `list_snapshots`) with labeled snapshots and one-click restore-to-snapshot (rollback through the normal confirm modal).
+  - **Lifecycle** — inline rename (`artifact.rename`), duplicate (`artifact.duplicate`), archive-to-project-KB (`artifact.move_to_project_kb`).
+  - **Code exchange** — import code as an artifact via a library tile (`artifact.import_code`, language auto-detect or manual), export via `artifact.export_code` (copies to clipboard).
+  - **Maintenance** — recycle-bin purge (`artifact.purge_expired`), per-artifact auto compact with a token budget (`artifact.auto_compact`, shows original→compacted tokens), safety check (`artifact.check_safety` on the current content), browse-by-source (`artifact.list_by_source`).
+  - Deliberately not surfaced: `artifact.inject` / `artifact.interact` (retired placeholders, always `-32005`), `artifact.export_session` (server-side `output_dir` under storage root — not a browser concern), and engine-facing chunk/streaming APIs (`artifact.toc` / `view` / `watch` / `sync` / `patch` / `load` / `context.budget` / `render.visual`).
 - Static serving hardening: entry served `no-store` with a strict CSP (`frame-ancestors` allows the gateway origin so iframe embedding works), hashed assets served `immutable`, path traversal rejected, missing dist degrades to 404 without touching RPC.
 
 ```bash
