@@ -34,7 +34,7 @@ Fusion 架构的结构化产物 CRUD 中间件。把模型生成的长内容(代
 - **JSON-RPC 服务**(主入口):标准 HTTP 端口 11451,stdlib 实现(无 FastAPI/uvicorn 依赖),方法族 `artifact.*` / `folder.*` / `ai.*` / `context.budget` / `render.visual`。约束:`artifact.inject` / `artifact.interact` 已退役,方法名保留仅为旧客户端兼容,调用返回 not-implemented。
 - **安全默认 fail-closed**:`X-API-Key` 认证,`security.allow_no_auth: false` 为默认;公开分享走独立限流桶(`rate_limit.public_rps`)。
 - **生命周期**:回收站(`list_recycle` / `restore` / `purge_expired`)、过期清理、star/pin。
-- **可观测性**:`/metrics`(可选 `X-API-Token` 保护)、OTel 追踪为可选 extra(`.[otel]`,local-first 单租户默认不需要)。
+- **可观测性**:`/metrics`(可选 `X-Metrics-Token` 保护)、OTel 追踪为可选 extra(`.[otel]`,local-first 单租户默认不需要)。
 - **容器化**:自带 Dockerfile,数据持久化到 `/data` 卷,镜像与本地同一 stdlib 服务器。
 - 约束(通用):单机中间件,不做跨节点同步;webui/ 为辅助界面,服务契约以 JSON-RPC 为准。
 

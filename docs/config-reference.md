@@ -48,7 +48,7 @@ source_of_truth:
 
 | 键 | 说明 |
 |---|---|
-| `metrics.token` | 可选;设置后 `/metrics` 要求匹配的 `X-API-Token` 头 |
+| `metrics.token` | 可选;设置后 `/metrics` 要求匹配的 `X-Metrics-Token` 头 |
 | tracing | OTel 为可选 extra(`pip install -e ".[otel]"`),local-first 单租户默认关闭 |
 
 ## sse / gateway
