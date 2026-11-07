@@ -1,3 +1,19 @@
+---
+doc_id: fusion-artifacts-engine/guide
+product: fusion-artifacts-engine
+class: app
+entry: service
+doc_type: guide
+title: { zh: "使用指南", en: "Usage guide" }
+audience: engineer
+status: draft
+version: 0.7.13
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - docs/USAGE_GUIDE.md
+---
+
 # fusion-artifacts-engine 使用指南 / Usage Guide
 
 > 版本 / Version: v0.4.1
