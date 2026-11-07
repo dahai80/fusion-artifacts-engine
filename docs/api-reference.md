@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 0.7.13
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - fusion_artifacts_engine/rpc/methods.py
   - fusion_artifacts_engine/rpc/errors.py
