@@ -69,6 +69,6 @@ source_of_truth:
 
 ## 事件与指标
 
-产物生命周期事件(create/update/shared/moved/purged 等)经 `rpc/event_bus.py` 广播,SSE 推送配置见 `sse` 配置段;`GET /metrics` 输出 Prometheus 指标(可选 `X-API-Token`),`rpc.server.duration` 为 RPC 耗时直方图。
+产物生命周期事件(create/update/shared/moved/purged 等)经 `rpc/event_bus.py` 广播,SSE 推送配置见 `sse` 配置段;`GET /metrics` 输出 Prometheus 指标(可选 `X-Metrics-Token`),`rpc.server.duration` 为 RPC 耗时直方图。
 
 限制:参数 schema 以 `methods.py` 为准,本文件只列方法与语义;新增方法须同步本表。

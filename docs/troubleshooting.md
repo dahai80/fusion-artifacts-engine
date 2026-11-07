@@ -61,7 +61,7 @@ source_of_truth:
 
 ## 可观测性
 
-- `GET /metrics`:Prometheus 指标;若配置了 `metrics.token`,请求需带 `X-API-Token` 头。
+- `GET /metrics`:Prometheus 指标;若配置了 `metrics.token`,请求需带 `X-Metrics-Token` 头。
 - OTel 追踪默认关闭,安装 `.[otel]` extra 后按 `tracing` 配置段启用。
 - 测试基线:`pytest tests/`。
 

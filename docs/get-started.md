@@ -39,7 +39,7 @@ fusion-artifacts-engine status    # exit 0 = healthy, 1 = not running
 
 ```bash
 curl -s http://127.0.0.1:11451/ -H "X-API-Key: $FAE_KEY" -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"artifact.create","params":{"session_id":"s1","title":"demo","type":"code","content":"print(1)"}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"artifact.create","params":{"session_id":"s1","name":"demo","type":"code","content":"print(1)"}}'
 ```
 
 然后按这个顺序体验核心能力(同一 JSON-RPC 信封,认证头同上):
@@ -50,7 +50,7 @@ curl -s http://127.0.0.1:11451/ -H "X-API-Key: $FAE_KEY" -H "Content-Type: appli
 4. `artifact.create_share` → 打开分享链接 → `artifact.revoke_share`。
 5. `artifact.delete` → `artifact.list_recycle` → `artifact.restore`。
 
-健康检查:`fusion-artifacts-engine status`;指标:`GET /metrics`(可配 `X-API-Token` 保护)。
+健康检查:`fusion-artifacts-engine status`;指标:`GET /metrics`(可配 `X-Metrics-Token` 保护)。
 
 ## 4. 场景化深入
 
