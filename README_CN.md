@@ -1,3 +1,19 @@
+---
+doc_id: fusion-artifacts-engine/readme
+product: fusion-artifacts-engine
+class: app
+entry: service
+doc_type: readme
+title: { zh: "fusion-artifacts-engine 产物管理引擎（中文）", en: "fusion-artifacts-engine artifact management engine (Chinese)" }
+audience: engineer
+status: draft
+version: 0.7.13
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # Fusion Artifacts Engine
 
 **[English](./README.md)** | 中文
