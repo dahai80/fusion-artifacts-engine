@@ -135,6 +135,29 @@ def parse_dsl_json(dsl_str: str) -> tuple[dict | None, list[str]]:
     return parsed, []
 
 
+def validate_dsl_object(dsl_dict: dict) -> list[str]:
+    # Issue #124: schema-validate a caller-supplied DSL dict (the render.visual
+    # dsl-object path). Mirrors parse_dsl_json: fusion_core first, in-repo
+    # fallback validator when the sibling package is absent. Returns error
+    # strings; empty list = valid.
+    if not isinstance(dsl_dict, dict):
+        return ["invalid dsl dict"]
+    try:
+        from fusion_core.dsl_schema import validate_dsl_str
+
+        ok, err = validate_dsl_str(json.dumps(dsl_dict))
+        if not ok:
+            return [f"schema violation: {err}"]
+        return []
+    except ImportError:
+        # #63 CI: fusion_core is a monorepo sibling, not on PyPI — validate
+        # with the in-repo fallback instead of silently accepting anything.
+        return _fallback_validate_dsl(dsl_dict)
+    except Exception as exc:
+        logger.warning("dsl schema validation error: %s", exc)
+        return [f"schema validation error: {exc}"]
+
+
 def extract_visual_type(dsl_dict: dict | None) -> str:
     if not isinstance(dsl_dict, dict):
         return _FALLBACK_VISUAL_TYPE

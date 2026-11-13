@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.14
-updated: 2026-11-07
+version: 0.7.15
+updated: 2026-11-13
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -17,6 +17,13 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.15 - 2026-11-13
+
+### Fixed
+
+- Issue #124: `render.visual` dsl-object path now schema-validates (`validate_dsl_object` in `dsl_parser.py`, fusion_core first, in-repo fallback when absent) — an incomplete DSL dict reports `valid: false` with a non-empty `errors` list instead of silently rendering with `valid: true`. Render always still returns HTML via the 3-level fallback chain.
+- start.sh health probe: bare system `python3` without PyYAML could not read `security.api_key` from config and pinged unauthenticated (401), misreporting a healthy daemon as `not running`. Regex fallback added for the key read.
 
 ## 0.7.14 - 2026-11-07
 
