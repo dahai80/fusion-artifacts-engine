@@ -74,6 +74,17 @@ if not api_key:
         with open(cfg_path) as fh:
             cfg = yaml.safe_load(fh) or {}
         api_key = (cfg.get("security") or {}).get("api_key", "") or ""
+    except ImportError:
+        # #124 round: bare system python3 may lack PyYAML — fall back to a
+        # targeted regex so the health probe still finds the key instead of
+        # pinging unauthenticated and misreporting the daemon as down.
+        import re
+        try:
+            with open(cfg_path, encoding="utf-8") as fh:
+                m = re.search(r'^\s*api_key:\s*"?([^"\n]+)"?\s*$', fh.read(), re.MULTILINE)
+            api_key = m.group(1).strip() if m else ""
+        except Exception:
+            api_key = ""
     except Exception:
         api_key = ""
 headers = {"Content-Type": "application/json"}

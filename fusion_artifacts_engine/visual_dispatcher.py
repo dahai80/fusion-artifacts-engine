@@ -1,6 +1,6 @@
 import logging
 
-from fusion_artifacts_engine.dsl_parser import ParsedDSL, extract_visual_type
+from fusion_artifacts_engine.dsl_parser import ParsedDSL, extract_visual_type, validate_dsl_object
 from fusion_artifacts_engine.visual_error_boundary import VisualErrorBoundary
 from fusion_artifacts_engine.visual_primitives import (
     FlowCardCompiler,
@@ -95,8 +95,10 @@ class VisualEngineDispatcher:
                 if isinstance(dsl, dict)
                 else "flow_card"
             )
-            valid = isinstance(dsl, dict)
-            errors: list[str] = [] if valid else ["invalid dsl dict"]
+            # Issue #124: the dsl-object path must run the same schema checks as the
+            # raw_text parse path — an incomplete dict must not report valid=true.
+            errors = validate_dsl_object(dsl)
+            valid = not errors
             thinking = None
         elif raw_text:
             parsed = parse_model_output(raw_text)

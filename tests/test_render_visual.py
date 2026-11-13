@@ -87,6 +87,29 @@ def test_engine_render_visual_invalid_dsl(engine):
     assert result["valid"] is False
 
 
+def test_engine_render_visual_incomplete_dsl_object_rejected(engine):
+    # Issue #124: the dsl-object path must schema-validate — an incomplete dict
+    # must report valid=false with a non-empty errors list, never valid=true.
+    result = engine.render_visual(dsl={"meta": {"id": "eval-dsl-25"}}, progress=1.0)
+    assert _valid_html(result["html"])
+    assert result["valid"] is False
+    assert result["errors"]
+
+
+def test_engine_render_visual_non_dict_dsl_rejected(engine):
+    result = engine.render_visual(dsl="not-a-dict", progress=1.0)
+    assert _valid_html(result["html"])
+    assert result["valid"] is False
+    assert result["errors"] == ["invalid dsl dict"]
+
+
+def test_engine_render_visual_complete_dsl_object_still_valid(engine):
+    result = engine.render_visual(dsl=json.loads(_DSL_STR), progress=1.0)
+    assert _valid_html(result["html"])
+    assert result["valid"] is True
+    assert result["errors"] == []
+
+
 async def test_rpc_render_visual_method(rpc_handler):
     result = await rpc_handler.dispatch("render.visual", {"raw_text": _RAW_OUTPUT, "progress": 0.5})
     assert _valid_html(result["html"])
