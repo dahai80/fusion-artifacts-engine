@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.15
-updated: 2026-11-13
+version: 0.7.16
+updated: 2026-11-16
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -17,6 +17,12 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.16 - 2026-11-16
+
+### Changed
+
+- CI retrofit per fusion#2 checklist (issue #126): `concurrency` groups with `cancel-in-progress` on ci.yml/docs.yml, serialized (non-cancel) release.yml; pip cache on `setup-python` keyed on `pyproject.toml`. Sharding/tiered gate assessed as not warranted (single matrix job, ~3 min suite).
 
 ## 0.7.15 - 2026-11-13
 
