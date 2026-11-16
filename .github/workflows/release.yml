@@ -13,6 +13,12 @@ on:
 permissions:
   contents: write
 
+# Issue #126: serialize tag builds but never cancel a running release —
+# a cancelled release job would leave a pushed tag without a Release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
