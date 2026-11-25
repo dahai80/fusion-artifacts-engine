@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.17
+version: 0.7.18
 updated: 2026-11-25
 owner: "@dahai"
 source_of_truth:
@@ -17,6 +17,17 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.18 - 2026-11-25
+
+### Added
+
+- PyPI + Homebrew distribution. `.github/workflows/pypi.yml` publishes sdist+wheel to PyPI via Trusted Publishing (OIDC) on `v*` tags (one-time trusted-publisher registration on pypi.org required); `readme` metadata added to pyproject so the PyPI page renders README.md. `Formula/fusion-artifacts-engine.rb` (repo doubles as a tap: `brew install dahai80/fusion-artifacts-engine/fusion-artifacts-engine`) builds from a release tag into an isolated Homebrew venv; `HOMEBREW_PIP_INDEX_URL` passthrough for mirror networks. Verified end-to-end locally: fresh-venv wheel install + CLI smoke, `brew install` + `brew list/info`.
+
+### Fixed
+
+- Issue #131: pptx write-back lost slide titles — `_parse_pptx` flattened the title into body lines, so `markdown_to_pptx` regenerated decks with an empty title placeholder. Titled slides now emit the title as the section heading (`## <title>`; untitled slides keep the stable `## Slide N` anchor) and the title shape is skipped in body extraction (shape_id compare — `shapes.title` returns a fresh wrapper per access, identity comparison never matches). Regression test: real pptx → parse_office → markdown_to_pptx → title placeholder equals source title. docx/xlsx roundtrip fidelity unchanged.
+- `fusion-artifacts-engine status` misreported a healthy daemon as "Not running" when `FUSION_ARTIFACTS_API_KEY` was unset: the probe pinged unauthenticated instead of falling back to `config.api_key` (same C-4 precedence as rpc/server.py, same bug class as the start.sh probe fixed in 0.7.15). `test_status_not_running` now isolates from any real daemon/config on the machine.
 
 ## 0.7.17 - 2026-11-25
 

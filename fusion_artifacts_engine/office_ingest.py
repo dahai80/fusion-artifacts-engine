@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 # write-back added in v0.7.17, issue #128 — in-process python-pptx, same pattern as
 # docx/openpyxl; fusion-office office-api has no /v1/pptx/write endpoint yet, upstream
 # issue filed) and exports to .outbox/ in the office IPC dir for fusion-office to pick up.
+# Issue #131 (v0.7.18): _parse_pptx now emits the slide title as the section heading so
+# write-back restores it into the title placeholder instead of dropping it.
 # The engine never overwrites the user's original file.
 
 _MAX_SHEET_ROWS = 500
@@ -123,10 +125,21 @@ def _parse_pptx(path: Path) -> str:
     presentation = Presentation(str(path))
     lines: list[str] = []
     for idx, slide in enumerate(presentation.slides, start=1):
-        lines.append(f"## Slide {idx}")
+        # Issue #131: emit the slide title as the heading (markdown_to_pptx maps
+        # headings back into the title placeholder) instead of flattening it into
+        # the body lines — flattening lost the title on write-back. Untitled
+        # slides keep the stable "## Slide N" anchor.
+        title_text = ""
+        title_shape_id = None
+        if slide.shapes.title is not None:
+            title_text = slide.shapes.title.text.strip()
+            title_shape_id = slide.shapes.title.shape_id
+        lines.append(f"## {title_text or f'Slide {idx}'}")
         lines.append("")
         for shape in slide.shapes:
-            if not getattr(shape, "has_text_frame", False):
+            # skip the title shape itself (shape_id compare — shapes.title returns a
+            # fresh wrapper object per access, so identity comparison never matches)
+            if not getattr(shape, "has_text_frame", False) or shape.shape_id == title_shape_id:
                 continue
             for para in shape.text_frame.paragraphs:
                 text = "".join(run.text for run in para.runs).strip()

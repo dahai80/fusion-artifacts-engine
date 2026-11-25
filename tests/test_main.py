@@ -30,8 +30,15 @@ def test_version_command(capsys):
     assert "fusion-artifacts-engine" in captured.out
 
 
-def test_status_not_running(capsys):
-    # L-20: unhealthy status must exit 1; catch SystemExit to verify the exit code
+def test_status_not_running(capsys, monkeypatch, tmp_path):
+    # L-20: unhealthy status must exit 1; catch SystemExit to verify the exit code.
+    # Isolate from any real daemon/config on this machine: point the port at a
+    # closed socket and a clean config dir (env fallback would otherwise pick up
+    # the production config api_key and hit a live daemon).
+    monkeypatch.setenv("FUSION_ARTIFACTS_PORT", "19996")
+    monkeypatch.setenv("FUSION_ARTIFACTS_API_KEY", "")
+    monkeypatch.setenv("FUSION_ARTIFACTS_CONFIG", str(tmp_path / "no-config.yaml"))
+    monkeypatch.delenv("FUSION_ARTIFACTS_STORAGE_ROOT", raising=False)
     with patch.object(sys, "argv", ["fusion-artifacts-engine", "status"]):
         with pytest.raises(SystemExit) as exc:
             main()

@@ -87,8 +87,9 @@ def test_parse_pptx_slides(tmp_path):
     _make_pptx(p)
     content, fmt, _stats = parse_office(p)
     assert fmt == "pptx"
-    assert "## Slide 1" in content
-    assert "Title A" in content
+    # Issue #131: titled slides use the title as heading; untitled keep "## Slide N"
+    assert "## Title A" in content
+    assert "bullet one" in content
     assert "## Slide 2" in content
 
 
@@ -334,8 +335,8 @@ async def test_pptx_write_back_full_loop(tmp_path):
         version, _info = await engine.patch_artifact(
             artifact_id=artifact.id,
             operation="replace_section",
-            anchor="Slide 1",
-            content="## Slide 1\n\npatched bullet",
+            anchor="Title A",
+            content="## Title A\n\npatched bullet",
         )
         out = maybe_write_back(
             engine, engine.storage.get_artifact(artifact.id), version.version_num
@@ -344,6 +345,7 @@ async def test_pptx_write_back_full_loop(tmp_path):
         path = engine.config.ipc_office_outbox_path / f"{artifact.id}_v{version.version_num}.pptx"
         assert path.is_file()
         deck = Presentation(str(path))
+        assert deck.slides[0].shapes.title.text == "Title A"
         texts = [
             run.text
             for slide in deck.slides
@@ -356,6 +358,31 @@ async def test_pptx_write_back_full_loop(tmp_path):
         assert src.read_bytes() == original_bytes
     finally:
         engine.close()
+
+
+def test_pptx_roundtrip_preserves_title_placeholder(tmp_path):
+    # Issue #131 regression: real pptx -> parse_office -> markdown_to_pptx ->
+    # the title text must land in the title placeholder, not a body paragraph.
+    src = tmp_path / "real.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[1])
+    slide.shapes.title.text = "B5 Ingest"
+    slide.placeholders[1].text = "write-back acceptance"
+    prs.save(str(src))
+    content, _fmt, _stats = parse_office(src)
+    out = tmp_path / "regen.pptx"
+    out.write_bytes(markdown_to_pptx(content))
+    deck = Presentation(str(out))
+    assert deck.slides[0].shapes.title.text == "B5 Ingest"
+    body = [
+        para.text
+        for shape in deck.slides[0].shapes
+        if getattr(shape, "has_text_frame", False)
+        and shape.shape_id != deck.slides[0].shapes.title.shape_id
+        for para in shape.text_frame.paragraphs
+    ]
+    assert any("write-back acceptance" in t for t in body)
+    assert not any("B5 Ingest" in t for t in body)
 
 
 def test_office_config_env(monkeypatch, tmp_path):
