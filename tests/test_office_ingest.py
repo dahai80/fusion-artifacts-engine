@@ -15,6 +15,7 @@ from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.ipc_consumer import OfficeIPCConsumer
 from fusion_artifacts_engine.office_ingest import (
     markdown_to_docx,
+    markdown_to_pptx,
     markdown_to_xlsx,
     maybe_write_back,
     parse_office,
@@ -269,12 +270,92 @@ async def test_write_back_skips_non_office(tmp_path):
         engine.close()
 
 
-def test_pptx_write_back_not_implemented():
-    with pytest.raises(NotImplementedError):
-        markdown_to_pptx("# s")
+def test_markdown_to_pptx_roundtrip(tmp_path):
+    # Issue #128: heading -> slide title, paragraphs -> body, table -> pptx table
+    md = "\n".join(
+        [
+            "## Deck Title",
+            "",
+            "intro bullet",
+            "second bullet",
+            "",
+            "## Data",
+            "",
+            "| metric | value |",
+            "| mrr | 42 |",
+        ]
+    )
+    out = tmp_path / "out.pptx"
+    out.write_bytes(markdown_to_pptx(md))
+    _content, fmt, stats = parse_office(out)
+    assert fmt == "pptx"
+    # re-parse always emits "## Slide N" headings; verify text and table via the deck object
+    deck = Presentation(str(out))
+    assert len(deck.slides) == 2
+    assert deck.slides[0].shapes.title.text == "Deck Title"
+    texts = [
+        para.text
+        for shape in deck.slides[0].shapes
+        if getattr(shape, "has_text_frame", False)
+        for para in shape.text_frame.paragraphs
+    ]
+    # _blocks joins consecutive non-empty lines into one paragraph block (same as docx)
+    assert any("intro bullet" in t and "second bullet" in t for t in texts)
+    tables = [shape.table for shape in deck.slides[1].shapes if getattr(shape, "has_table", False)]
+    assert len(tables) == 1
+    assert tables[0].cell(1, 0).text == "mrr"
+    assert tables[0].cell(1, 1).text == "42"
+    assert stats["headings"] == 2
 
 
-from fusion_artifacts_engine.office_ingest import markdown_to_pptx  # noqa: E402
+async def test_pptx_write_back_full_loop(tmp_path):
+    # Issue #128 acceptance: ingest -> patch slide section -> write-back -> parses clean;
+    # the user's original file must stay byte-identical.
+    src = tmp_path / "deck.pptx"
+    _make_pptx(src)
+    original_bytes = src.read_bytes()
+    content, _fmt, _stats = parse_office(src)
+    engine = ArtifactEngine(
+        ArtifactEngineConfig(
+            storage_root=tmp_path / "artifacts",
+            ipc_enabled=False,
+            ipc_office_dir=str(tmp_path / "office-ipc-out"),
+        )
+    )
+    try:
+        artifact, _v, _ref = await engine.create_external_artifact(
+            "fusion-office",
+            "wb-2",
+            "Deck",
+            "markdown",
+            content,
+            metadata={"office_format": "pptx", "office_session": "wb-2", "office_version": 1},
+        )
+        version, _info = await engine.patch_artifact(
+            artifact_id=artifact.id,
+            operation="replace_section",
+            anchor="Slide 1",
+            content="## Slide 1\n\npatched bullet",
+        )
+        out = maybe_write_back(
+            engine, engine.storage.get_artifact(artifact.id), version.version_num
+        )
+        assert out is not None
+        path = engine.config.ipc_office_outbox_path / f"{artifact.id}_v{version.version_num}.pptx"
+        assert path.is_file()
+        deck = Presentation(str(path))
+        texts = [
+            run.text
+            for slide in deck.slides
+            for shape in slide.shapes
+            if getattr(shape, "has_text_frame", False)
+            for para in shape.text_frame.paragraphs
+            for run in para.runs
+        ]
+        assert any("patched bullet" in t for t in texts)
+        assert src.read_bytes() == original_bytes
+    finally:
+        engine.close()
 
 
 def test_office_config_env(monkeypatch, tmp_path):

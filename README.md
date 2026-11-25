@@ -338,6 +338,15 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | Create artifact from external module (e.g. fusion-mlx) |
 | `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | List artifacts by source module |
 
+### Library Search & Archive Retry (v0.7.17, issue #129)
+
+First-class semantic search over the artifact library, backed by fusion-rag (the archived-superseded-versions KB from #91), replacing the async-archive-only path:
+
+| Method | Params | Returns |
+|---|---|---|
+| `artifact.search_library` | query, top_k?=10, threshold?=0.0, hybrid?=false, filters? | `{results: [{artifact_id, name, type, kind, version, source: rag\|metadata, score?, snippet?, updated_at}], rag_status: ok\|unavailable\|disabled}` — rag hits merged over local metadata rows, ranked by score; rag outage degrades to metadata-only (never fails the search) |
+| `artifact.retry_archive` | artifact_id | `{retried: [vnum], failed: [vnum], status, last_error?}` — re-push versions whose archive failed; failure state is visible in `metadata.rag_archive` (`{failed, last_error, status, updated_at}`) |
+
 ### Workflow Facade (v0.7.13, issue #119)
 
 Server-to-server contract for pipeline nodes (cowork `product_lifecycle` template, `architecture/product-delivery-pipeline-1105.md` §6/§10): create pipeline docs and mock packs as artifacts, version them per revision round, and hand back stable deep links for decision cards and evidence tables. Auth is the existing module-key model (gateway-injected `fm-` key or `X-API-Key`).
@@ -970,7 +979,7 @@ The engine consumes office documents from fusion-office through the same file-IP
 - **Parsing**: `docx` (paragraphs, `Heading N` styles → markdown `#`*(N+1), tables → pipe rows), `xlsx` (each sheet → `## <sheet title>` + a markdown table, first row as header, capped at 500 rows/64 cols per sheet with a truncation note, empty sheets render `(empty sheet)`), `pptx` (`## Slide N` + text runs). Unsupported suffixes fail the message to `.failed/`.
 - **Section addressing for free**: because content is markdown with `#` headings, the existing `section_index` pipeline addresses sections directly (docx headings, xlsx sheets, pptx slides) — patch/budget/reference flows are untouched.
 - **Idempotency**: one artifact per office `session` (`session_id=ext_fusion-office_<session>`, type `markdown`, `source_module=fusion-office`, metadata `office_format`/`office_session`/`office_version`/`office_source_path`/`office_stats`). Higher version appends; same/lower skips. Library card shows source **Office**.
-- **Write-back**: after `artifact.update` or `artifact.patch` on an office-sourced artifact, the engine regenerates the office binary from the patched markdown (`markdown_to_docx` / `markdown_to_xlsx`, cells coerced back to numeric types) and exports it to `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` for fusion-office to pick up. **The engine never overwrites the user's original file.** `pptx` write-back is explicitly unsupported (`NotImplementedError`) — read-only for pptx. Write-back failures are logged only; they never fail the RPC result.
+- **Write-back**: after `artifact.update` or `artifact.patch` on an office-sourced artifact, the engine regenerates the office binary from the patched markdown (`markdown_to_docx` / `markdown_to_xlsx` / `markdown_to_pptx` (v0.7.17, issue #128 — headings → slide titles, paragraphs → body placeholder, tables → pptx tables; in-process python-pptx because fusion-office office-api has no `/v1/pptx/write` endpoint yet), cells coerced back to numeric types) and exports it to `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` for fusion-office to pick up. **The engine never overwrites the user's original file.** Write-back failures are logged only; they never fail the RPC result.
 - **Config** (`ipc` section): `office_enabled: true`, `office_dir: ""` (empty = derived default). Env overrides: `FUSION_ARTIFACTS_IPC_OFFICE_ENABLED`, `FUSION_ARTIFACTS_IPC_OFFICE_DIR`.
 
 ```json

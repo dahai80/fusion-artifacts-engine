@@ -207,6 +207,15 @@ curl -X POST http://127.0.0.1:11451 \
 | `artifact.create_external` | source_module, workspace_id, name, type, content, workflow_run_id?, summary?, kind?, project_id?, metadata? | 从外部模块创建产物（如 fusion-mlx） |
 | `artifact.list_by_source` | source_module, workspace_id?, workflow_run_id? | 按来源模块列出产物 |
 
+### 库搜索与归档重试（v0.7.17，issue #129）
+
+基于 fusion-rag（#91 归档的旧版本知识库）的一等语义搜索，取代此前的仅异步归档路径：
+
+| 方法 | 参数 | 返回 |
+|---|---|---|
+| `artifact.search_library` | query, top_k?=10, threshold?=0.0, hybrid?=false, filters? | `{results: [{artifact_id, name, type, kind, version, source: rag\|metadata, score?, snippet?, updated_at}], rag_status: ok\|unavailable\|disabled}`——rag 命中与本地 metadata 行合并、按分数排序；rag 不可用时降级为仅本地结果（搜索绝不失败） |
+| `artifact.retry_archive` | artifact_id | `{retried: [vnum], failed: [vnum], status, last_error?}`——重推归档失败的版本；失败状态可见于 `metadata.rag_archive`（`{failed, last_error, status, updated_at}`） |
+
 ### 工作流门面（v0.7.13，issue #119）
 
 面向流水线节点的服务端契约（cowork `product_lifecycle` 模板，`architecture/product-delivery-pipeline-1105.md` §6/§10）：把管线产物（PRD/架构文档/计划/模拟包）落成 artifact，按评审轮次版本化，并返回稳定深链供决策卡片与证据表引用。鉴权走现有模块 key 模型（网关注入 `fm-` key 或 `X-API-Key`）。
@@ -769,7 +778,7 @@ cd webui && bun install && bun run build   # 产物 → fusion_artifacts_engine/
 - **解析**：`docx`（段落、`Heading N` 样式 → markdown `#`*(N+1)、表格 → 管道行），`xlsx`（每个工作表 → `## <表名>` + markdown 表格，首行作表头，单表上限 500 行/64 列并附截断说明，空表渲染 `(empty sheet)`），`pptx`（`## Slide N` + 文本 run）。不支持的后缀将消息打入 `.failed/`。
 - **段落寻址免费获得**：内容是带 `#` 标题的 markdown，既有 `section_index` 管道直接可寻址（docx=标题、xlsx=工作表、pptx=页）——patch/预算/引用流程零改动。
 - **幂等**：每个 office `session` 归并为一个产物（`session_id=ext_fusion-office_<session>`、类型 `markdown`、`source_module=fusion-office`、metadata `office_format`/`office_session`/`office_version`/`office_source_path`/`office_stats`）。更高版本追加；相同或更低跳过。库卡片来源显示 **Office**。
-- **写回**：对 office 来源产物执行 `artifact.update` 或 `artifact.patch` 后，引擎把 patch 后的 markdown 重新生成为 office 二进制（`markdown_to_docx` / `markdown_to_xlsx`，单元格还原数值类型），导出到 `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` 由 fusion-office 取走。**引擎永不覆写用户原始文件。** `pptx` 写回显式不支持（`NotImplementedError`）——pptx 只读。写回失败仅记日志，绝不影响 RPC 结果。
+- **写回**：对 office 来源产物执行 `artifact.update` 或 `artifact.patch` 后，引擎把 patch 后的 markdown 重新生成为 office 二进制（`markdown_to_docx` / `markdown_to_xlsx` / `markdown_to_pptx`（v0.7.17，issue #128——标题→页标题、段落→正文占位符、表格→pptx 表格；fusion-office office-api 尚无 `/v1/pptx/write` 端点，故进程内 python-pptx 生成），单元格还原数值类型），导出到 `<office_dir>/.outbox/<artifact_id>_v<N>.<fmt>` 由 fusion-office 取走。**引擎永不覆写用户原始文件。** 写回失败仅记日志，绝不影响 RPC 结果。
 - **配置**（`ipc` 段）：`office_enabled: true`、`office_dir: ""`（空 = 派生默认）。环境变量覆盖：`FUSION_ARTIFACTS_IPC_OFFICE_ENABLED`、`FUSION_ARTIFACTS_IPC_OFFICE_DIR`。
 
 ```json
