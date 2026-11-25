@@ -178,6 +178,9 @@ class RPCHandler:
             # external module
             "artifact.create_external": self._create_external,
             "artifact.list_by_source": self._list_by_source,
+            # v0.7.17 #129: first-class library search + archive retry
+            "artifact.search_library": self._search_library,
+            "artifact.retry_archive": self._retry_archive,
             # AE-1: patch_artifact
             "artifact.patch": self._patch,
             # v0.7.1 #90: chunked read path (TOC + line-range/section views)
@@ -925,6 +928,25 @@ class RPCHandler:
             page_size=int(params.get("page_size", 200)),
         )
         return {"artifacts": [a.model_dump() for a in artifacts]}
+
+    # ── #129: first-class library search + archive retry ──
+
+    async def _search_library(self, params: dict) -> dict:
+        from fusion_artifacts_engine.long_context import search_library
+
+        return await search_library(
+            self.engine,
+            query=params.get("query", ""),
+            top_k=int(params.get("top_k", 10)),
+            threshold=float(params.get("threshold", 0.0)),
+            hybrid=bool(params.get("hybrid", False)),
+            filters=params.get("filters"),
+        )
+
+    async def _retry_archive(self, params: dict) -> dict:
+        from fusion_artifacts_engine.long_context import retry_failed_archives
+
+        return await retry_failed_archives(self.engine, params["artifact_id"])
 
     # ── #119: workflow-facing facade (cowork product_lifecycle template) ──
 

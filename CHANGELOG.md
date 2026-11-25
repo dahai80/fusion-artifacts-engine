@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.16
-updated: 2026-11-16
+version: 0.7.17
+updated: 2026-11-25
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -17,6 +17,13 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.17 - 2026-11-25
+
+### Added
+
+- Issue #128: pptx write-back. `markdown_to_pptx` (in-process python-pptx, same pattern as docx/openpyxl) regenerates a deck from patched markdown — headings become slide titles, paragraphs fill the body placeholder, markdown tables render as pptx tables. `maybe_write_back` now dispatches pptx to `.outbox/{artifact_id}_v{num}.pptx`; the user's original file is never touched. Note: fusion-office office-api has no `/v1/pptx/write` endpoint (upstream issue filed), so generation is in-process.
+- Issue #129: first-class library search + archive retry. New RPC `artifact.search_library` (query, top_k, threshold, hybrid, filters) queries fusion-rag synchronously over archived versions and merges hits with local metadata rows (`source: rag|metadata`, ranked by score); rag outage degrades to metadata-only with `rag_status: unavailable|disabled|ok`. Archive failures are no longer log-only: recorded in `metadata.rag_archive` (`{failed, last_error, status, updated_at}`) and retryable via new RPC `artifact.retry_archive` (returns `retried`/`failed`/`status`).
 
 ## 0.7.16 - 2026-11-16
 

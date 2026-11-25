@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 import httpx
 
@@ -12,8 +13,13 @@ logger = logging.getLogger(__name__)
 #    (POST /bases/{kb}/documents/ingest, doc_name=art_x_vN, metadata carrying
 #    artifact_id/version/type); metadata.archived_versions is the idempotent dedup guard.
 # Both paths only log on failure and never block version creation/patch results.
+# v0.7.17 #129: archive failures are no longer silent — they are recorded in
+# metadata.rag_archive ({failed: [vnum...], last_error, status, updated_at}) and
+# retryable via artifact.retry_archive; first-class library search (artifact.search_library)
+# queries fusion-rag synchronously and merges with local metadata-filter results.
 
 _ARCHIVE_TAG = "archived_versions"
+_ARCHIVE_STATUS_TAG = "rag_archive"
 
 
 def _mlx_config(engine) -> tuple[str, str, str]:
@@ -119,25 +125,35 @@ async def maybe_archive_superseded(engine, artifact, superseded_version_num: int
         return None
     if superseded_version_num < 1:
         return None
+    ok, err = await _archive_version(engine, artifact, superseded_version_num)
+    _record_archive_result(engine, artifact.id, superseded_version_num, err if not ok else None)
+    if ok:
+        return f"{artifact.id}_v{superseded_version_num}"
+    return None
+
+
+async def _archive_version(engine, artifact, version_num: int) -> tuple[bool, str | None]:
+    # Core archive push for one version. Returns (ok, error). Never raises.
+    cfg = engine.config
     try:
-        version = engine.storage.get_version(artifact.id, superseded_version_num)
+        version = engine.storage.get_version(artifact.id, version_num)
         if version is None:
             logger.warning(
                 "long-context: archive skip, version %s v%d not found",
                 artifact.id,
-                superseded_version_num,
+                version_num,
             )
-            return None
+            return False, f"version {version_num} not found"
         base_url = cfg.long_context_rag_url.rstrip("/")
         api_key = cfg.long_context_rag_api_key or os.environ.get("FUSION_RAG_API_KEY", "")
         headers = {"X-API-Key": api_key} if api_key else {}
         body = {
             "content": version.content,
             "content_type": "text",
-            "doc_name": f"{artifact.id}_v{superseded_version_num}.txt",
+            "doc_name": f"{artifact.id}_v{version_num}.txt",
             "metadata": {
                 "artifact_id": artifact.id,
-                "artifact_version": superseded_version_num,
+                "artifact_version": version_num,
                 "artifact_type": artifact.type,
                 "name": artifact.name,
                 "archived_at": version.created_at,
@@ -150,15 +166,17 @@ async def maybe_archive_superseded(engine, artifact, superseded_version_num: int
                 headers=headers,
             )
             if resp.status_code >= 400:
+                detail = resp.text[:200]
                 logger.warning(
                     "long-context: rag archive rejected %s v%d: HTTP %d %s",
                     artifact.id,
-                    superseded_version_num,
+                    version_num,
                     resp.status_code,
-                    resp.text[:200],
+                    detail,
                 )
-                return None
-        new_archived = sorted({*archived, superseded_version_num})
+                return False, f"HTTP {resp.status_code}: {detail}"
+        prev_archived = (artifact.metadata or {}).get(_ARCHIVE_TAG) or []
+        new_archived = sorted({*prev_archived, version_num})
         engine.storage.update_artifact_summary(
             artifact.id,
             artifact.summary or "",
@@ -167,18 +185,200 @@ async def maybe_archive_superseded(engine, artifact, superseded_version_num: int
         logger.info(
             "long-context: archived %s v%d into rag kb=%s",
             artifact.id,
-            superseded_version_num,
+            version_num,
             cfg.long_context_rag_kb_id,
         )
-        return f"{artifact.id}_v{superseded_version_num}"
+        return True, None
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "long-context: rag archive failed %s v%d (degrade, non-fatal): %s",
             artifact.id,
-            superseded_version_num,
+            version_num,
             e,
         )
-        return None
+        return False, str(e)
+
+
+def _record_archive_result(engine, artifact_id: str, version_num: int, error: str | None) -> None:
+    # Issue #129: surface archive state in metadata.rag_archive — failures are
+    # visible and retryable via artifact.retry_archive instead of log-only.
+    try:
+        fresh = engine.storage.get_artifact(artifact_id)
+        if fresh is None:
+            return
+        meta = fresh.metadata or {}
+        status = dict(meta.get(_ARCHIVE_STATUS_TAG) or {})
+        failed = set(status.get("failed") or [])
+        if error is None:
+            failed.discard(version_num)
+            if failed:
+                status["status"] = "failed"
+            else:
+                status["status"] = "ok"
+                status.pop("last_error", None)
+        else:
+            failed.add(version_num)
+            status["status"] = "failed"
+            status["last_error"] = str(error)[:300]
+        status["failed"] = sorted(failed)
+        status["updated_at"] = time.time()
+        engine.storage.update_artifact_summary(
+            artifact_id,
+            fresh.summary or "",
+            metadata_patch={_ARCHIVE_STATUS_TAG: status},
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("long-context: failed to record archive state for %s", artifact_id)
+
+
+async def retry_failed_archives(engine, artifact_id: str) -> dict:
+    # Issue #129 acceptance: archive failure visible + retryable from the API.
+    cfg = engine.config
+    if not cfg.long_context_rag_enabled:
+        return {"retried": [], "failed": [], "status": "disabled"}
+    fresh = engine.storage.get_artifact(artifact_id)
+    if fresh is None:
+        raise ValueError(f"artifact {artifact_id} not found")
+    meta = fresh.metadata or {}
+    status = meta.get(_ARCHIVE_STATUS_TAG) or {}
+    failed = status.get("failed") or []
+    archived = meta.get(_ARCHIVE_TAG) or []
+    todo = [v for v in failed if v not in archived]
+    retried: list[int] = []
+    still_failed: list[int] = []
+    for vnum in todo:
+        ok, err = await _archive_version(engine, fresh, vnum)
+        _record_archive_result(engine, artifact_id, vnum, None if ok else err)
+        (retried if ok else still_failed).append(vnum)
+    final = engine.storage.get_artifact(artifact_id)
+    final_status = ((final.metadata or {}).get(_ARCHIVE_STATUS_TAG) or {}) if final else {}
+    logger.info(
+        "long-context: retry archive %s -> retried=%s failed=%s",
+        artifact_id,
+        retried,
+        still_failed,
+    )
+    return {
+        "retried": retried,
+        "failed": still_failed,
+        "status": final_status.get("status", "ok"),
+        "last_error": final_status.get("last_error"),
+    }
+
+
+def _search_row(
+    artifact, version_num: int | None, source: str, score: float | None, snippet: str | None
+) -> dict:
+    row = {
+        "artifact_id": artifact.id,
+        "name": artifact.name,
+        "type": artifact.type,
+        "kind": artifact.kind,
+        "version": version_num if version_num is not None else artifact.current_version,
+        "source": source,
+        "updated_at": artifact.updated_at,
+    }
+    if score is not None:
+        row["score"] = round(float(score), 6)
+    if snippet:
+        row["snippet"] = snippet[:200]
+    return row
+
+
+async def search_library(
+    engine,
+    query: str,
+    top_k: int = 10,
+    threshold: float = 0.0,
+    hybrid: bool = False,
+    filters: dict | None = None,
+) -> dict:
+    # Issue #129: first-class library search. Queries fusion-rag synchronously over
+    # archived artifact content (kb=long_context_rag_kb_id) and merges with local
+    # metadata-filter results. RAG unavailability degrades to metadata-only results
+    # with rag_status="unavailable" — never fails the whole search.
+    if not query or not str(query).strip():
+        raise ValueError("query is required")
+    cfg = engine.config
+    top_k = max(int(top_k), 1)
+    local_artifacts, _total = engine.list_all_artifacts(
+        filters=filters, sort="updated_at", page=1, page_size=top_k
+    )
+    results: dict[str, dict] = {}
+    for a in local_artifacts:
+        results[a.id] = _search_row(a, None, "metadata", None, None)
+    if not cfg.long_context_rag_enabled:
+        return {"results": list(results.values()), "rag_status": "disabled"}
+    base_url = cfg.long_context_rag_url.rstrip("/")
+    api_key = cfg.long_context_rag_api_key or os.environ.get("FUSION_RAG_API_KEY", "")
+    headers = {"X-API-Key": api_key} if api_key else {}
+    body = {
+        "query": str(query),
+        "top_k": top_k,
+        "threshold": float(threshold),
+        "hybrid": bool(hybrid),
+    }
+    rag_status = "ok"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{base_url}/bases/{cfg.long_context_rag_kb_id}/search",
+                json=body,
+                headers=headers,
+            )
+            if resp.status_code >= 400:
+                logger.warning(
+                    "long-context: library search rejected: HTTP %d %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                rag_status = "unavailable"
+            else:
+                hits = resp.json() or []
+        if rag_status == "ok":
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    continue
+                meta = hit.get("metadata") or {}
+                if isinstance(meta, str):
+                    import json as _json
+
+                    try:
+                        meta = _json.loads(meta)
+                    except Exception:  # noqa: BLE001
+                        meta = {}
+                aid = meta.get("artifact_id")
+                if not aid:
+                    continue
+                vnum = meta.get("artifact_version")
+                snippet = hit.get("content") or hit.get("text") or ""
+                row = _search_row_of(hit, aid, vnum, snippet)
+                existing = results.get(aid)
+                if existing is None or "score" not in existing:
+                    results[aid] = row
+    except Exception as e:  # noqa: BLE001
+        logger.warning("long-context: library search rag unavailable (degrade): %s", e)
+        rag_status = "unavailable"
+    ranked = sorted(
+        results.values(),
+        key=lambda r: (-r.get("score", 0.0), -(r.get("updated_at") or 0)),
+    )
+    return {"results": ranked, "rag_status": rag_status}
+
+
+def _search_row_of(hit: dict, artifact_id: str, version_num, snippet: str) -> dict:
+    meta = hit.get("metadata") or {}
+    return {
+        "artifact_id": artifact_id,
+        "name": meta.get("name") or artifact_id,
+        "type": meta.get("artifact_type"),
+        "kind": None,
+        "version": version_num,
+        "source": "rag",
+        "score": round(float(hit.get("score") or 0.0), 6),
+        "snippet": snippet[:200],
+        "updated_at": meta.get("archived_at"),
+    }
 
 
 def history_query_hint(engine, artifact) -> dict:

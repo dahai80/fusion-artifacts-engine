@@ -9,8 +9,10 @@ logger = logging.getLogger(__name__)
 # markdown with `#` headers — directly addressable by section_index (docx=heading levels,
 # xlsx=worksheets, pptx=slides); patch/budget/references all go through the existing pipeline.
 # The write-back direction regenerates patched markdown into the same-format binary (pptx
-# write-back unsupported, explicit not_implemented) and exports to .outbox/ in the office IPC
-# dir for fusion-office to pick up. The engine never overwrites the user's original file.
+# write-back added in v0.7.17, issue #128 — in-process python-pptx, same pattern as
+# docx/openpyxl; fusion-office office-api has no /v1/pptx/write endpoint yet, upstream
+# issue filed) and exports to .outbox/ in the office IPC dir for fusion-office to pick up.
+# The engine never overwrites the user's original file.
 
 _MAX_SHEET_ROWS = 500
 _MAX_SHEET_COLS = 64
@@ -39,7 +41,11 @@ def parse_office(path: Path) -> tuple[str, str, dict]:
         "headings": len(_HEADING_RE.findall(content)),
     }
     logger.info(
-        "office parsed %s (%s, %d chars, %d headings)", path.name, suffix, len(content), stats["headings"]
+        "office parsed %s (%s, %d chars, %d headings)",
+        path.name,
+        suffix,
+        len(content),
+        stats["headings"],
     )
     return content, suffix.lstrip("."), stats
 
@@ -92,7 +98,9 @@ def _parse_xlsx(path: Path) -> str:
         lines.append(f"## {sheet.title}")
         lines.append("")
         rows_written = 0
-        for row in sheet.iter_rows(max_row=_MAX_SHEET_ROWS, max_col=_MAX_SHEET_COLS, values_only=True):
+        for row in sheet.iter_rows(
+            max_row=_MAX_SHEET_ROWS, max_col=_MAX_SHEET_COLS, values_only=True
+        ):
             cells = [_md_escape_cell(v) for v in row]
             lines.append("| " + " | ".join(cells) + " |")
             if rows_written == 0:
@@ -149,7 +157,9 @@ def _blocks(content: str) -> list[dict]:
         if heading:
             flush_paragraph()
             flush_table()
-            blocks.append({"kind": "heading", "level": len(heading.group(1)), "text": heading.group(2)})
+            blocks.append(
+                {"kind": "heading", "level": len(heading.group(1)), "text": heading.group(2)}
+            )
         elif _TABLE_ROW_RE.match(stripped) and "---" not in stripped:
             flush_paragraph()
             cells = [c.replace("\\|", "|").strip() for c in stripped.strip("|").split("|")]
@@ -245,7 +255,68 @@ def markdown_to_xlsx(content: str) -> bytes:
 
 
 def markdown_to_pptx(content: str) -> bytes:
-    raise NotImplementedError("pptx write-back is not supported; export docx/xlsx only")
+    # Issue #128: regenerate a deck from patched markdown. Symmetric with _parse_pptx:
+    # every heading starts a new slide (title), paragraphs fill the body placeholder
+    # (fallback textbox), tables render as pptx tables below the body.
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches
+    except ImportError as e:
+        raise RuntimeError("python-pptx not installed") from e
+    presentation = Presentation()
+    title_and_body = presentation.slide_layouts[1]
+    slide = None
+    body_frame = None
+    body_used = False
+
+    def new_slide(title_text: str):
+        nonlocal body_frame, body_used
+        s = presentation.slides.add_slide(title_and_body)
+        body_frame = None
+        body_used = False
+        if s.shapes.title is not None:
+            s.shapes.title.text = title_text
+        for ph in s.placeholders:
+            if ph.placeholder_format.idx == 1:
+                body_frame = ph.text_frame
+                break
+        return s
+
+    def append_body(text: str):
+        nonlocal body_used
+        if body_frame is not None:
+            if not body_used:
+                body_frame.paragraphs[0].text = text
+                body_used = True
+            else:
+                body_frame.add_paragraph().text = text
+        else:
+            box = slide.shapes.add_textbox(Inches(0.5), Inches(1.8), Inches(9), Inches(4.5))
+            box.text_frame.text = text
+
+    for block in _blocks(content):
+        if block["kind"] == "heading":
+            slide = new_slide(block["text"])
+        elif slide is None:
+            slide = new_slide("")
+            append_body(block["text"] if block["kind"] == "para" else "")
+        elif block["kind"] == "para":
+            append_body(block["text"])
+        else:
+            rows = block["rows"]
+            cols = max(len(r) for r in rows)
+            shape = slide.shapes.add_table(
+                len(rows), cols, Inches(0.5), Inches(1.8), Inches(9), Inches(0.4 * len(rows))
+            )
+            table = shape.table
+            for r, row in enumerate(rows):
+                for c in range(cols):
+                    table.cell(r, c).text = row[c] if c < len(row) else ""
+    if not presentation.slides:
+        new_slide("")
+    buf = io.BytesIO()
+    presentation.save(buf)
+    return buf.getvalue()
 
 
 def maybe_write_back(engine, artifact, version_num: int) -> str | None:
@@ -253,7 +324,7 @@ def maybe_write_back(engine, artifact, version_num: int) -> str | None:
     # .outbox/. Failures only log and do not affect the patch result itself.
     meta = (artifact.metadata or {}) if artifact is not None else {}
     fmt = meta.get("office_format")
-    if fmt not in ("docx", "xlsx"):
+    if fmt not in ("docx", "xlsx", "pptx"):
         return None
     version = engine.storage.get_version(artifact.id, version_num)
     if version is None:
@@ -262,8 +333,10 @@ def maybe_write_back(engine, artifact, version_num: int) -> str | None:
     try:
         if fmt == "docx":
             data = markdown_to_docx(version.content)
-        else:
+        elif fmt == "xlsx":
             data = markdown_to_xlsx(version.content)
+        else:
+            data = markdown_to_pptx(version.content)
     except Exception:  # noqa: BLE001
         logger.exception("office write-back failed for %s v%d", artifact.id, version_num)
         return None
