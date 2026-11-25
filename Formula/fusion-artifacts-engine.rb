@@ -1,8 +1,8 @@
 class FusionArtifactsEngine < Formula
   desc "Artifact management middleware for the Fusion architecture"
   homepage "https://github.com/dahai80/fusion-artifacts-engine"
-  url "https://github.com/dahai80/fusion-artifacts-engine/archive/refs/tags/v0.7.17.tar.gz"
-  sha256 "44709cb25e55d420a1402acde06ae527c56b31d1181f700fa93f495bf7ecb1f3"
+  url "https://github.com/dahai80/fusion-artifacts-engine/archive/refs/tags/v0.7.18.tar.gz"
+  sha256 "92d068c85282a22ddacaa388a9562a7bb8c8ad6ab8fe3cf3fedfe73e96c15313"
   license "Apache-2.0"
 
   depends_on "python@3.12"
