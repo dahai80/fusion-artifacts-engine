@@ -227,7 +227,10 @@ def main():
         host = config.server_host
         port = config.server_port
         headers = {}
-        api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "")
+        # C-4 precedence, same as rpc/server.py: env first (runtime rotation),
+        # then config.api_key — otherwise a bare `status` pings unauthenticated
+        # and misreports a healthy daemon as not running (start.sh probe bug class)
+        api_key = os.environ.get("FUSION_ARTIFACTS_API_KEY", "") or (config.api_key or "")
         if api_key:
             headers["X-API-Key"] = api_key
         healthy = False

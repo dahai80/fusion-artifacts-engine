@@ -34,8 +34,14 @@ Result: **10 rounds of 1000-line code iteration uses ~15k tokens instead of ~120
 ## Quick Start
 
 ```bash
-# Install
+# Install (development, editable)
 pip install -e ".[all]"
+
+# Install from PyPI (published automatically on version tags via GitHub Actions)
+pip install fusion-artifacts-engine
+
+# Install via Homebrew (formula lives in this repo's Formula/, repo doubles as a tap)
+brew install dahai80/fusion-artifacts-engine/fusion-artifacts-engine
 
 # Start daemon
 fusion-artifacts-engine start --port 11451
@@ -43,6 +49,10 @@ fusion-artifacts-engine start --port 11451
 # Check status (exit 0 = healthy, 1 = not running)
 fusion-artifacts-engine status
 ```
+
+PyPI publishing uses Trusted Publishing (OIDC): tag `v*` → `.github/workflows/pypi.yml` builds sdist+wheel and uploads. One-time setup (repo owner): register the GitHub trusted publisher for this workflow on pypi.org.
+
+Homebrew: the formula builds from a release tag into an isolated Homebrew venv; if dependency download fails on a constrained network, retry with `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...`.
 
 ## Container Deployment
 

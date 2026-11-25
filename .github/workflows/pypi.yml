@@ -1,0 +1,53 @@
+name: PyPI
+
+# Publish sdist + wheel to PyPI on version tag push, via Trusted Publishing (OIDC).
+# One-time prerequisite (repo owner, on pypi.org):
+#   PyPI project -> Publishing -> add a "GitHub" trusted publisher:
+#     owner: dahai80  repository: fusion-artifacts-engine  workflow: pypi.yml
+# The job fails visibly until that registration exists — re-run after registering.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build --outdir dist/
+      - name: Check metadata
+        run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # OIDC id-token is required by Trusted Publishing
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

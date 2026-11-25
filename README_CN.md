@@ -34,8 +34,14 @@ Fusion 架构的结构化产物 CRUD 中间件。将生成产物与聊天消息�
 ## 快速开始
 
 ```bash
-# 安装
+# 安装（开发，可编辑）
 pip install -e ".[all]"
+
+# 从 PyPI 安装（版本 tag 推送时由 GitHub Actions 自动发布）
+pip install fusion-artifacts-engine
+
+# 通过 Homebrew 安装（formula 在本仓库 Formula/ 下，仓库本身即 tap）
+brew install dahai80/fusion-artifacts-engine/fusion-artifacts-engine
 
 # 启动守护进程
 fusion-artifacts-engine start --port 11451
@@ -43,6 +49,10 @@ fusion-artifacts-engine start --port 11451
 # 查看状态
 fusion-artifacts-engine status
 ```
+
+PyPI 发布走 Trusted Publishing（OIDC）：推 `v*` tag → `.github/workflows/pypi.yml` 构建 sdist+wheel 并上传。一次性配置（仓库所有者）：在 pypi.org 为该 workflow 注册 GitHub trusted publisher。
+
+Homebrew：formula 从 release tag 构建进独立 Homebrew venv；受限网络下依赖下载失败时，可用 `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...` 重试。
 
 ## v0.5.1 — 补丁发布
 
