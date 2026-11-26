@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.19
+version: 0.7.20
 updated: 2026-11-26
 owner: "@dahai"
 source_of_truth:
@@ -17,6 +17,12 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.20 - 2026-11-26
+
+### Changed
+
+- Enforce the no-docstring convention in CI (PR #138, refs #135): `ci/check_docstrings.py` walks all Python sources with AST and fails on any module/class/function docstring; wired into ci.yml. No runtime behavior change.
 
 ## 0.7.19 - 2026-11-26
 
