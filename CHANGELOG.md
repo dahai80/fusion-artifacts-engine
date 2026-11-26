@@ -7,7 +7,7 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.20
+version: 0.7.21
 updated: 2026-11-26
 owner: "@dahai"
 source_of_truth:
@@ -17,6 +17,12 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.21 - 2026-11-26
+
+### Added
+
+- Cross-OS release binaries: every `v*` tag now builds self-contained PyInstaller executables for Linux x86_64, Windows x86_64, and macOS arm64 and attaches them to the GitHub Release — no Python required to run the daemon. `packaging/fusion-artifacts-engine.spec` bundles `default_config.yaml` + `webui_dist` (resolved via the package-relative `_PACKAGE_DIR`/`_WEBUI_DIST` paths), the `tiktoken_ext.openai_public` plugin hidden import, and the dist-info so `version` reports the real release (importlib.metadata has no registry inside a one-file bundle); `setuptools`/`pkg_resources` excluded (drops the fragile `pyi_rth_pkgres` runtime hook — the engine never imports them). `.github/workflows/release.yml` gains a 3-OS build matrix with a `version` smoke test per OS; the release job now waits for binaries (`needs: binaries`) and uploads them (`--clobber` for rerun idempotency). Verified locally on macOS arm64: built binary reports 0.7.21 and pings the live daemon.
 
 ## 0.7.20 - 2026-11-26
 

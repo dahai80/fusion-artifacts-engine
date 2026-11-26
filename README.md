@@ -52,6 +52,8 @@ fusion-artifacts-engine status
 
 PyPI publishing uses Trusted Publishing (OIDC): tag `v*` → `.github/workflows/pypi.yml` builds sdist+wheel and uploads. One-time setup (repo owner): register the GitHub trusted publisher for this workflow on pypi.org.
 
+Standalone binaries: every `v*` tag also builds self-contained PyInstaller executables for Linux x86_64, Windows x86_64, and macOS arm64 (`.github/workflows/release.yml` matrix, `packaging/fusion-artifacts-engine.spec`), smoke-tested in CI and attached to the GitHub Release — download `fusion-artifacts-engine-<os>-<arch>` and run it directly, no Python required.
+
 Homebrew: the formula builds from a release tag into an isolated Homebrew venv; if dependency download fails on a constrained network, retry with `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...`.
 
 ## Container Deployment

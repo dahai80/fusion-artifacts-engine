@@ -20,7 +20,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  binaries:
+    # Per-OS single-file PyInstaller binaries attached to the Release.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: fusion-artifacts-engine-linux-x86_64
+          - os: windows-latest
+            artifact: fusion-artifacts-engine-windows-x86_64.exe
+          - os: macos-latest
+            artifact: fusion-artifacts-engine-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package and PyInstaller
+        run: pip install . pyinstaller
+
+      - name: Build binary
+        run: pyinstaller --clean -y packaging/fusion-artifacts-engine.spec
+
+      - name: Smoke test
+        shell: bash
+        run: ./dist/fusion-artifacts-engine${{ runner.os == 'Windows' && '.exe' || '' }} version
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            mv dist/fusion-artifacts-engine.exe dist/${{ matrix.artifact }}
+          else
+            mv dist/fusion-artifacts-engine dist/${{ matrix.artifact }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          retention-days: 3
+
   release:
+    needs: binaries
     runs-on: ubuntu-latest
     # rc/pre-release tags skip the "latest" flag
     steps:
@@ -60,3 +107,21 @@ jobs:
           [ "$IS_PRERELEASE" = "true" ] && ARGS+=(--prerelease)
           [ "$IS_LATEST" = "true" ] && ARGS+=(--latest)
           gh release create "${ARGS[@]}"
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload binaries to the Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.flags.outputs.tag }}
+        run: |
+          # Idempotent: clobber is fine on rerun (issue #65 class)
+          gh release upload "$TAG" \
+            dist/fusion-artifacts-engine-linux-x86_64 \
+            dist/fusion-artifacts-engine-windows-x86_64.exe \
+            dist/fusion-artifacts-engine-macos-arm64 \
+            --clobber
