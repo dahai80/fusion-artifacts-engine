@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.18
-updated: 2026-11-25
+version: 0.7.19
+updated: 2026-11-26
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -17,6 +17,12 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.19 - 2026-11-26
+
+### Changed
+
+- Mark user-facing Chinese render strings in visual_primitives with i18n markers (refs dahai80/fusion#9, PR #136) — no behavior change; the rendered SVG labels stay Chinese per the round-17 UI-string decision. Follow-up to the 2026-11-26 audit (#134/#135): source + tests verified free of Chinese comments and docstrings; `logs/` process-data residue truncated.
 
 ## 0.7.18 - 2026-11-25
 
