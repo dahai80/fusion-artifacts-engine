@@ -52,6 +52,7 @@ class TapeDiagramCompiler(BaseCompiler):
             f"viewBox='0 0 {bar_w} {bar_h + 40}'>"
             f"<g transform='translate(0,10)'>" + "".join(parts) + f"</g>"
             f"<text x='{bar_w // 2}' y='{bar_h + 30}' text-anchor='middle' "
+            # i18n: user-facing
             f"font-size='13' fill='#333'>总计: {total:g}</text>" + "</svg>"
         )
         style = ".seg{transition:opacity .3s}"

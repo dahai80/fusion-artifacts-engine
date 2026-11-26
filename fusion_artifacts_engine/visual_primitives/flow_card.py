@@ -19,12 +19,14 @@ class FlowCardCompiler(BaseCompiler):
             params = self._parameters(dsl_dict)
         except Exception:
             pipeline, meta, params = [], {}, {}
+        # i18n: user-facing
         title_text = _esc(meta.get("topic") or meta.get("id") or "解题步骤")
         if not pipeline:
             body = (
                 f"<div class='flow-container'>"
                 f"<h2 class='flow-title'>{title_text}</h2>"
                 f"<div class='flow-card placeholder'>"
+                # i18n: user-facing
                 f"<p class='formula'>暂无解题步骤数据</p>"
                 f"</div></div>"
             )
@@ -36,6 +38,7 @@ class FlowCardCompiler(BaseCompiler):
             if not isinstance(step, dict):
                 continue
             step_num = step.get("step") or i + 1
+            # i18n: user-facing
             step_title = _esc(step.get("title") or f"步骤 {step_num}")
             formula = _esc(step.get("formula") or "")
             eval_str = _esc(step.get("eval") or "")
@@ -52,6 +55,7 @@ class FlowCardCompiler(BaseCompiler):
                 f"<h3>{step_title}</h3>"
                 f"<p class='formula'>{formula}</p>"
                 + (f"<p class='eval'>= {eval_str}</p>" if eval_str else "")
+                # i18n: user-facing
                 + (f"<p class='result'>结果单位: {result_unit}</p>" if result_unit else "")
                 + "</div></div>"
             )
@@ -66,6 +70,7 @@ class FlowCardCompiler(BaseCompiler):
         params_html = ""
         if param_rows:
             params_html = (
+                # i18n: user-facing
                 "<table class='params'><tr><th>量</th><th>值</th><th>单位</th></tr>"
                 + "".join(param_rows)
                 + "</table>"

@@ -60,6 +60,7 @@ class ArrayGridCompiler(BaseCompiler):
             f"viewBox='0 0 {w} {h}'>"
             + "".join(dots)
             + f"<text x='{w // 2}' y='{h - 8}' text-anchor='middle' "
+            # i18n: user-facing
             f"font-size='14' fill='#333'>共 {shown} 个</text>" + "</svg>"
         )
         style = ".dot{transition:fill .3s}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}"
