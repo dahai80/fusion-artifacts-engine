@@ -34,6 +34,7 @@ class DataChartCompiler(BaseCompiler):
         if not labels:
             for i, step in enumerate(pipeline):
                 if isinstance(step, dict):
+                    # i18n: user-facing
                     labels.append(step.get("title") or f"步骤{i + 1}")
                     values.append(float(i + 1))
         if not labels:
@@ -55,6 +56,7 @@ class DataChartCompiler(BaseCompiler):
             "new Chart(document.getElementById('data-chart').getContext('2d'),{"
             "type:D.chart_type,"
             "data:{labels:D.labels,"
+            # i18n: user-facing
             "datasets:[{label:'数据',data:D.values,"
             "backgroundColor:'#4dabf7',borderColor:'#4dabf7',"
             "borderWidth:2}]},"

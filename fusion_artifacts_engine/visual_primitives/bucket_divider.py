@@ -53,6 +53,7 @@ class BucketDividerCompiler(BaseCompiler):
                 buckets.append(f"<circle cx='{ex}' cy='{ey}' r='9' fill='{color}' class='item'/>")
             buckets.append(
                 f"<text x='{bx + bw // 2}' y='180' text-anchor='middle' "
+                # i18n: user-facing
                 f"font-size='13' fill='#495057'>桶 {b + 1}</text>"
             )
         svg = (
@@ -60,6 +61,7 @@ class BucketDividerCompiler(BaseCompiler):
             f"viewBox='0 0 {w} {h}'>"
             + "".join(buckets)
             + f"<text x='{w // 2}' y='20' text-anchor='middle' font-size='13' "
+            # i18n: user-facing
             f"fill='#333'>{shown}/{element_count} 个元素分配到 {bucket_count} 桶</text>" + "</svg>"
         )
         style = ".bucket{transition:stroke .3s}.item{transition:fill .3s}"

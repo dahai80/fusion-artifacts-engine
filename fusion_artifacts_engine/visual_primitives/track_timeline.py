@@ -19,6 +19,7 @@ class TrackTimelineCompiler(BaseCompiler):
         lanes = []
         if not entities:
             entities = [
+                # i18n: user-facing (default demo runner labels)
                 {"id": "a", "type": "runner", "label": "甲", "properties": {"speed": 60}},
                 {"id": "b", "type": "runner", "label": "乙", "properties": {"speed": 40}},
             ]
