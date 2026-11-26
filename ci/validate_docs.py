@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""
-fusion docs-system static validator (stdlib only, CI-ready)
-
-Usage:
-  python3 ci/validate_docs.py --root . --product fusion-mlx --class core --entry service
-  python3 ci/validate_docs.py --root . --strict          # treat WARN as failure too
-  python3 ci/validate_docs.py --root . --skip-inventory  # format/redline checks only
-
-Five check families:
-  1. frontmatter completeness + value legality
-  2. doc-set completeness (Tier 0 / Tier 1 derived from class x entry)
-  3. source_of_truth path existence
-  4. redline scan (banned words / placeholders / secrets / relative links)
-  5. line budget + zh/en pairing
-
-Exit codes: 0 pass; 1 ERROR found; with --strict WARN also returns 1; 2 usage error.
-"""
+#
+# fusion docs-system static validator (stdlib only, CI-ready)
+#
+# Usage:
+#   python3 ci/validate_docs.py --root . --product fusion-mlx --class core --entry service
+#   python3 ci/validate_docs.py --root . --strict          # treat WARN as failure too
+#   python3 ci/validate_docs.py --root . --skip-inventory  # format/redline checks only
+#
+# Five check families:
+#   1. frontmatter completeness + value legality
+#   2. doc-set completeness (Tier 0 / Tier 1 derived from class x entry)
+#   3. source_of_truth path existence
+#   4. redline scan (banned words / placeholders / secrets / relative links)
+#   5. line budget + zh/en pairing
+#
+# Exit codes: 0 pass; 1 ERROR found; with --strict WARN also returns 1; 2 usage error.
 
 from __future__ import annotations
 
@@ -260,8 +259,8 @@ KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$")
 ITEM_RE = re.compile(r"^\s*-\s+(.+)$")
 
 
+    # Return (meta, 1-based line number where frontmatter ends, total lines). No frontmatter -> ({}, 0, N).
 def parse_frontmatter(text: str) -> tuple[dict[str, object], int, int]:
-    """Return (meta, 1-based line number where frontmatter ends, total lines). No frontmatter -> ({}, 0, N)."""
     lines = text.splitlines()
     total = len(lines)
     if not lines or lines[0].strip() != "---":

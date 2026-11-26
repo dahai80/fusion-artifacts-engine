@@ -36,5 +36,8 @@ jobs:
       - name: Lint (ruff)
         run: ruff check fusion_artifacts_engine/ tests/
 
+      - name: No-docstring convention gate (refs dahai80/fusion#9)
+        run: python ci/check_docstrings.py
+
       - name: Test (pytest)
         run: pytest tests/ -q
