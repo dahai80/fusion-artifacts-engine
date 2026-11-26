@@ -52,6 +52,8 @@ fusion-artifacts-engine status
 
 PyPI 发布走 Trusted Publishing（OIDC）：推 `v*` tag → `.github/workflows/pypi.yml` 构建 sdist+wheel 并上传。一次性配置（仓库所有者）：在 pypi.org 为该 workflow 注册 GitHub trusted publisher。
 
+独立二进制：每个 `v*` tag 同时构建自包含的 PyInstaller 可执行文件（Linux x86_64 / Windows x86_64 / macOS arm64，见 `.github/workflows/release.yml` 矩阵与 `packaging/fusion-artifacts-engine.spec`），CI 内 smoke 测试后附到 GitHub Release —— 下载 `fusion-artifacts-engine-<os>-<arch>` 直接运行，无需 Python。
+
 Homebrew：formula 从 release tag 构建进独立 Homebrew venv；受限网络下依赖下载失败时，可用 `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...` 重试。
 
 ## v0.5.1 — 补丁发布
