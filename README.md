@@ -54,6 +54,26 @@ PyPI publishing uses Trusted Publishing (OIDC): tag `v*` → `.github/workflows/
 
 Standalone binaries: every `v*` tag also builds self-contained PyInstaller executables for Linux x86_64, Windows x86_64, and macOS arm64 (`.github/workflows/release.yml` matrix, `packaging/fusion-artifacts-engine.spec`), smoke-tested in CI and attached to the GitHub Release — download `fusion-artifacts-engine-<os>-<arch>` and run it directly, no Python required.
 
+## TypeScript Client
+
+`client-rpc/` ships the official TS client (`@fusion/artifacts-client`, issue #141) — a typed JSON-RPC client over the `:11451` endpoint covering the core/lifecycle/recycle-bin/share/snapshot method groups (everything else via the generic `call()`). Contract-tested against `contract/rpc-surface.json`, which is generated from the Python handler (`python ci/gen_rpc_surface.py`) and is the single source of truth in both repos — surface drift fails the PR that caused it.
+
+```bash
+cd client-rpc && bun install && bun test   # contract + transport tests
+```
+
+```ts
+import { ArtifactsClient } from "@fusion/artifacts-client";
+
+const client = new ArtifactsClient("http://127.0.0.1:11451", { apiKey: "..." });
+const { artifact } = await client.createArtifact({
+  session_id: "sess-1", name: "PRD", type: "markdown",
+  content: "# PRD", idempotency_key: "op-42",   // retry-safe create
+});
+```
+
+ACL/multi-tenant field semantics (`caller_user_id`, `owner_user_id`, `project_id`) and the per-method retry-safety table for offline reconciliation: see `docs/acl-semantics.md`.
+
 Homebrew: the formula builds from a release tag into an isolated Homebrew venv; if dependency download fails on a constrained network, retry with `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...`.
 
 ## Container Deployment

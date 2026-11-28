@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "变更日志", en: "Changelog" }
 audience: engineer
 status: draft
-version: 0.7.21
-updated: 2026-11-26
+version: 0.7.22
+updated: 2026-11-28
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -17,6 +17,17 @@ source_of_truth:
 # Changelog
 
 All notable changes to fusion-artifacts-engine are documented here.
+
+## 0.7.22 - 2026-11-28
+
+### Added
+
+- Issue #141 (P2 of the consolidation RFC fusion-office#64): official TypeScript client + cross-repo contract CI + ACL semantics + offline-reconciliation idempotency.
+  - `client-rpc/` — `@fusion/artifacts-client`: typed JSON-RPC client over `:11451` covering the core/lifecycle/recycle-bin/share/snapshot method groups (24 typed helpers; everything else via the generic `call()`), `RpcError` with the layered business codes, `RETRY_SAFE_READ` policy constant.
+  - `contract/rpc-surface.json` — the JSON-RPC surface extracted from `RPCHandler._build_methods` by `ci/gen_rpc_surface.py` (AST, no engine instantiation). One file, two repos: the bun contract test asserts wrapped + allow-listed coverage exactly equals the surface (bi-directional — gaps and phantoms both fail), so contract drift fails the PR that caused it. New ci.yml `ts-contract` job (bun install/test/typecheck).
+  - `docs/acl-semantics.md` — multi-tenant field contract (`caller_user_id`/`owner_user_id`/`project_id`), IDOR enforcement semantics, adversarial examples (cross-tenant reads/writes → `-32006`), per-method retry-safety table for offline reconciliation.
+  - Engine-side idempotency: `artifact.create` accepts `idempotency_key`; replay within the same session/project returns the original artifact with `deduplicated: true` instead of duplicating (key stored in metadata `_idempotency_key`).
+  - Verified live: TS client smoke against the production daemon (create + keyed replay dedup + delete cleanup); 751 tests green.
 
 ## 0.7.21 - 2026-11-26
 
