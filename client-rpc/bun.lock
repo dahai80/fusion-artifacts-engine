@@ -1,0 +1,24 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "@fusion/artifacts-client",
+      "devDependencies": {
+        "bun-types": "^1.4.3",
+        "typescript": "^5.6.3",
+      },
+    },
+  },
+  "packages": {
+    "@types/node": ["@types/node@26.6.11", "https://registry.npmmirror.com/@types/node/-/node-26.6.11.tgz", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uUyQ2XLEz+EXh34lmS3GhKrkqn/8FU7KUiKRpk347At2bmnMVWss45yz8b4FG/tUtmV1tV/+TVkITItPROyeeQ=="],
+
+    "bun-types": ["bun-types@1.4.5", "https://registry.npmmirror.com/bun-types/-/bun-types-1.4.5.tgz", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-ECHn+9dhL3wv0G6u0+7dQvrnaimXiRDxxerYBmhTaLyJEEuvTPWk2Fye3XIf5Y++JIIiHKfQw4Z7V5D8KuiXbg=="],
+
+    "typescript": ["typescript@5.9.3", "https://registry.npmmirror.com/typescript/-/typescript-5.9.3.tgz", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
+
+    "undici-types": ["undici-types@8.14.0", "https://registry.npmmirror.com/undici-types/-/undici-types-8.14.0.tgz", {}, "sha512-adaTpowOLjSeKhwA1+gEN/F8Bw/wmKH7Csw+01zmDB1TAYJ+COEn/Cfb9RXSUdssbZOdPBRvI6wOubXyzbiotQ=="],
+
+    "@types/node/undici-types": ["undici-types@8.9.0", "https://registry.npmmirror.com/undici-types/-/undici-types-8.9.0.tgz", {}, "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="],
+  }
+}

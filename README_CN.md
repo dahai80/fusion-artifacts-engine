@@ -54,6 +54,26 @@ PyPI 发布走 Trusted Publishing（OIDC）：推 `v*` tag → `.github/workflow
 
 独立二进制：每个 `v*` tag 同时构建自包含的 PyInstaller 可执行文件（Linux x86_64 / Windows x86_64 / macOS arm64，见 `.github/workflows/release.yml` 矩阵与 `packaging/fusion-artifacts-engine.spec`），CI 内 smoke 测试后附到 GitHub Release —— 下载 `fusion-artifacts-engine-<os>-<arch>` 直接运行，无需 Python。
 
+## TypeScript 客户端
+
+`client-rpc/` 提供官方 TS 客户端（`@fusion/artifacts-client`，issue #141）—— 面向 `:11451` 端点的类型化 JSON-RPC 客户端，覆盖 core/lifecycle/回收站/share/snapshot 方法组（其余方法走通用 `call()`）。客户端与 `contract/rpc-surface.json` 做契约测试；该文件由 Python handler 生成（`python ci/gen_rpc_surface.py`），是双仓唯一的契约真源 —— 契约漂移会让引发漂移的 PR 直接挂 CI。
+
+```bash
+cd client-rpc && bun install && bun test   # 契约 + 传输层测试
+```
+
+```ts
+import { ArtifactsClient } from "@fusion/artifacts-client";
+
+const client = new ArtifactsClient("http://127.0.0.1:11451", { apiKey: "..." });
+const { artifact } = await client.createArtifact({
+  session_id: "sess-1", name: "PRD", type: "markdown",
+  content: "# PRD", idempotency_key: "op-42",   // 重试安全的 create
+});
+```
+
+ACL/多租户字段语义（`caller_user_id`、`owner_user_id`、`project_id`）与离线对账的逐方法重试安全表见 `docs/acl-semantics.md`。
+
 Homebrew：formula 从 release tag 构建进独立 Homebrew venv；受限网络下依赖下载失败时，可用 `HOMEBREW_PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple brew install ...` 重试。
 
 ## v0.5.1 — 补丁发布

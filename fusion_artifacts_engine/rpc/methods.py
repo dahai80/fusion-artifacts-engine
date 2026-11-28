@@ -7,6 +7,7 @@ from typing import Any
 from fusion_artifacts_engine import ai_client, long_context
 from fusion_artifacts_engine.engine import ArtifactEngine
 from fusion_artifacts_engine.office_ingest import maybe_write_back
+from fusion_artifacts_engine.ref_parser import generate_ref_text
 from fusion_artifacts_engine.rpc.errors import (
     BusinessRuleError,
     NotFoundError,
@@ -216,6 +217,36 @@ class RPCHandler:
         kind = params.get("kind")
         if kind is not None and kind not in valid_kinds:
             raise ValueError(f"Invalid kind, must be one of {valid_kinds}")
+        # #141: idempotent create for offline-reconciliation retries. The key is stored in
+        # artifact metadata; a replay within the same session/project returns the original
+        # artifact (deduplicated: true) instead of creating a duplicate.
+        idem_key = params.get("idempotency_key")
+        metadata = dict(params.get("metadata") or {})
+        if idem_key:
+            existing = await asyncio.to_thread(
+                self.engine.storage.list_artifacts,
+                params["session_id"], False, params.get("project_id"),
+                {"_idempotency_key": idem_key},
+            )
+            if existing:
+                art = existing[0]
+                version = await asyncio.to_thread(
+                    self.engine.storage.get_version, art.id, art.current_version
+                )
+                ref_text = generate_ref_text(
+                    art.id, art.name, art.type, art.current_version,
+                    version.size_bytes if version else 0, art.summary,
+                )
+                logger.info(
+                    "Idempotent create replay: key=%s artifact_id=%s", idem_key, art.id
+                )
+                return {
+                    "artifact": art.model_dump(),
+                    "version": version.model_dump() if version else None,
+                    "ref_text": ref_text,
+                    "deduplicated": True,
+                }
+            metadata["_idempotency_key"] = idem_key
         artifact, version, ref_text = await self.engine.create_artifact(
             session_id=params["session_id"],
             name=params["name"],
@@ -225,7 +256,7 @@ class RPCHandler:
             change_log=params.get("change_log", "Initial version"),
             kind=kind,
             project_id=params.get("project_id"),
-            metadata=params.get("metadata"),
+            metadata=metadata or None,
             # P2-3/MEDIUM-4: owner_user_id can be injected at creation (multi-tenant ownership);
             # default None = single-tenant
             owner_user_id=params.get("owner_user_id"),

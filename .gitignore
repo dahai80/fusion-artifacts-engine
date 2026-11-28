@@ -19,3 +19,4 @@ logs/
 .coverage
 client/node_modules/
 .DS_Store
+client-rpc/node_modules/

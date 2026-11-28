@@ -41,3 +41,20 @@ jobs:
 
       - name: Test (pytest)
         run: pytest tests/ -q
+
+  ts-contract:
+    # Issue #141: TS client contract test — client-rpc assertions run against
+    # contract/rpc-surface.json in the same PR, so surface drift fails here
+    # and not downstream in the consumer repo.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Contract test (bun)
+        working-directory: client-rpc
+        run: |
+          bun install --frozen-lockfile
+          bun test
+          bunx tsc --noEmit
